@@ -4872,6 +4872,25 @@ namespace sogen
                                        target_mod_name);
                 });
 
+                // That resolved to `mojo::SimpleWatcher::DiscardReadyState` (a real PDB name, but
+                // almost certainly ANOTHER ICF-folding artifact given its own body is a tail-call to
+                // a `RepeatingCallback<void(string const&)>::Run`, an unrelated signature). Rather
+                // than trust the misleading name, resolve ITS OWN real indirect dispatch live too
+                // (RVA 0x17d64d) - the true final consumer, whatever it actually is.
+                const auto final_hop_callback = mod.image_base + 0x17d64d;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching the final hop's own real "
+                                   "dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(final_hop_callback));
+                win_emu->emu().hook_memory_execution(final_hop_callback, [win_emu, final_hop_callback](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit the final hop's own real dispatch at 0x%llx, "
+                                       "tid=%u resolved_target=0x%x (%s)\n",
+                                       static_cast<unsigned long long>(final_hop_callback), win_emu->current_thread().id, resolved_target,
+                                       target_mod_name);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
