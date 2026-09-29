@@ -4881,6 +4881,68 @@ namespace sogen
                                        target_mod_name, connector_this, runtime_error_code, bound_string.data());
                 });
 
+                // The `connector_error_call` hook above resolved to a real symbol:
+                // `mojo::Connector::OnWatcherHandleReady`, a thin trampoline into
+                // `mojo::Connector::OnHandleReadyInternal`, which itself dispatches on the
+                // MojoResult: 0 -> `ReadAllAvailableMessages`, 9 -> `HandleError`, else ->
+                // `HandleError`. `ReadAllAvailableMessages` has an entry guard -
+                // `if (!*(this+0x83) && !*(this+0x80)) { ... real read loop ... }` - that makes
+                // the entire function a silent no-op if either byte is set, without ever calling
+                // `ReadMessage`/`DispatchMessageW`/`HandleError`. This is the most direct
+                // candidate yet for why a clean "readable" signal never results in a read.
+                const auto read_all_entry = mod.image_base + 0x35b226;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "Connector::ReadAllAvailableMessages entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(read_all_entry));
+                win_emu->emu().hook_memory_execution(read_all_entry, [win_emu, read_all_entry](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
+                    uint8_t guard_0x83{};
+                    emu.try_read_memory(connector_this + 0x83, &guard_0x83, sizeof(guard_0x83));
+                    uint8_t guard_0x80{};
+                    emu.try_read_memory(connector_this + 0x80, &guard_0x80, sizeof(guard_0x80));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                       "Connector::ReadAllAvailableMessages entry at 0x%llx, tid=%u "
+                                       "connector_this=0x%x guard_0x83=%u guard_0x80=%u\n",
+                                       static_cast<unsigned long long>(read_all_entry), win_emu->current_thread().id, connector_this,
+                                       guard_0x83, guard_0x80);
+                });
+
+                const auto read_all_guard_bail = mod.image_base + 0x35b389;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "ReadAllAvailableMessages's own guard-bail exit at 0x%llx\n",
+                                   static_cast<unsigned long long>(read_all_guard_bail));
+                win_emu->emu().hook_memory_execution(read_all_guard_bail, [win_emu, read_all_guard_bail](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                       "ReadAllAvailableMessages's own guard-bail exit at 0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(read_all_guard_bail), win_emu->current_thread().id);
+                });
+
+                const auto read_message_entry = mod.image_base + 0x35ab6a;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Connector::ReadMessage "
+                                   "entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(read_message_entry));
+                win_emu->emu().hook_memory_execution(read_message_entry, [win_emu, read_message_entry](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Connector::ReadMessage entry "
+                                       "at 0x%llx, tid=%u connector_this=0x%x\n",
+                                       static_cast<unsigned long long>(read_message_entry), win_emu->current_thread().id, connector_this);
+                });
+
+                const auto read_message_post_call = mod.image_base + 0x35aba1;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Connector::ReadMessage's own "
+                                   "post-MojoReadMessage result at 0x%llx\n",
+                                   static_cast<unsigned long long>(read_message_post_call));
+                win_emu->emu().hook_memory_execution(read_message_post_call, [win_emu, read_message_post_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto mojo_read_message_result = emu.reg<uint32_t>(x86_register::eax);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Connector::ReadMessage's own "
+                                       "post-MojoReadMessage result at 0x%llx, tid=%u mojo_read_message_result=%u\n",
+                                       static_cast<unsigned long long>(read_message_post_call), win_emu->current_thread().id,
+                                       mojo_read_message_result);
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
