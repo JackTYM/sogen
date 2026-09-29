@@ -1253,9 +1253,18 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtUserGetProcessUIContextInformation()
+        NTSTATUS handle_NtUserGetProcessUIContextInformation(const syscall_context& /*c*/, const handle /*process_handle*/,
+                                                             const emulator_object<std::array<ULONG, 2>> ui_context)
         {
-            return STATUS_NOT_SUPPORTED;
+            if (!ui_context)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            constexpr ULONG process_uicontext_desktop = 0;
+            constexpr ULONG no_flags = 0;
+            ui_context.write({process_uicontext_desktop, no_flags});
+            return STATUS_SUCCESS;
         }
 
         ULONG handle_NtUserGetKeyboardType()

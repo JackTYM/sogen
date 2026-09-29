@@ -5149,7 +5149,9 @@ namespace sogen
                     dxgk_warn(c, "NtGdiDdDDIGetDeviceState: Unknown device 0x%X", state.hDevice);
                 }
 
-                state.State = 0;
+                constexpr uint32_t d3dkmt_devicestate_execution = 1;
+                constexpr uint32_t d3dkmt_deviceexecution_active = 1;
+                state.State = state.StateType == d3dkmt_devicestate_execution ? d3dkmt_deviceexecution_active : 0;
             });
 
             return STATUS_SUCCESS;
