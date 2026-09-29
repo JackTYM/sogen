@@ -4801,6 +4801,34 @@ namespace sogen
                                        static_cast<unsigned long long>(post_task_call), win_emu->current_thread().id);
                 });
 
+                // `#567` also confirmed 2 of 20 real watcher calls take the DIRECT (non-posted)
+                // path - a synchronous call to `mojo::SimpleWatcher::OnHandleReady` with no
+                // task-runner dependency at all - yet `HandleValidatedMessage` still never fires
+                // even then, redirecting suspicion away from task-posting and toward
+                // `OnHandleReady`'s own body. Decompiled it: its ENTIRE body is gated by a single
+                // watch-id validation check (`if (a2 == *(this+6))`, RVA 0x364199) - if the notified
+                // watch id doesn't match the watcher's own currently-active id, the whole call is a
+                // silent no-op (no error, no crash, just an early return) - otherwise it proceeds to
+                // run the real, application-registered `RepeatingCallback` (the actual final
+                // consumer). Watching both operands directly settles whether this exact mismatch is
+                // what's silently swallowing every notification - see
+                // project_solidworks_bringup.md #567.
+                const auto watch_id_check = mod.image_base + 0x364199;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
+                                   "validation check at 0x%llx\n",
+                                   static_cast<unsigned long long>(watch_id_check));
+                win_emu->emu().hook_memory_execution(watch_id_check, [win_emu, watch_id_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto notified_watch_id = emu.reg<uint32_t>(x86_register::eax);
+                    const auto watcher_ptr = emu.reg<uint32_t>(x86_register::esi);
+                    uint32_t current_watch_id{};
+                    emu.try_read_memory(watcher_ptr + 0x18, &current_watch_id, sizeof(current_watch_id));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnHandleReady's own watch-id validation check "
+                                       "at 0x%llx, tid=%u notified_watch_id=%u current_watch_id=%u matches=%d\n",
+                                       static_cast<unsigned long long>(watch_id_check), win_emu->current_thread().id, notified_watch_id,
+                                       current_watch_id, notified_watch_id == current_watch_id ? 1 : 0);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
