@@ -4652,6 +4652,40 @@ namespace sogen
                                            this_ptr);
                     });
 
+                // `#565` decompiled `AcceptInboundParcel`'s own real body: after successfully
+                // pushing the parcel onto its own internal queue, it real-wakes any waiting mojo
+                // consumer via `ipcz::TrapSet::NotifyNewLocalParcel` (a genuine, PDB-named,
+                // symbol-confirmed function) - but ONLY if two gates both pass: `this[0x2C] == 0`
+                // (RVA 0x9c08b) and a size/threshold comparison against the queue's own data (both
+                // gated behind the SAME lock). If EITHER gate fails, the parcel stays queued but no
+                // one gets woken to consume it - directly explaining a `HandleValidatedMessage` that
+                // never fires despite successful ipcz-level routing. Watching the gate value and the
+                // actual notify call directly.
+                const auto notify_gate_check = mod.image_base + 0x9c08b;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching AcceptInboundParcel's own "
+                                   "notify-gate check at 0x%llx\n",
+                                   static_cast<unsigned long long>(notify_gate_check));
+                win_emu->emu().hook_memory_execution(notify_gate_check, [win_emu, notify_gate_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
+                    uint32_t gate_flag{};
+                    emu.try_read_memory(this_ptr + 0x2C, &gate_flag, sizeof(gate_flag));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit AcceptInboundParcel's own "
+                                       "notify-gate check at 0x%llx, tid=%u gate_flag=%u gate_open=%d\n",
+                                       static_cast<unsigned long long>(notify_gate_check), win_emu->current_thread().id, gate_flag,
+                                       gate_flag == 0 ? 1 : 0);
+                });
+
+                const auto notify_call = mod.image_base + 0x9c0f5;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TrapSet::NotifyNewLocalParcel call "
+                                   "at 0x%llx\n",
+                                   static_cast<unsigned long long>(notify_call));
+                win_emu->emu().hook_memory_execution(notify_call, [win_emu, notify_call](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapSet::NotifyNewLocalParcel call "
+                                       "at 0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(notify_call), win_emu->current_thread().id);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
