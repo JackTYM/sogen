@@ -46,7 +46,7 @@ namespace sogen
                                          emulator_object<HARDERROR_RESPONSE> response);
         NTSTATUS handle_NtRaiseException(const syscall_context& c,
                                          emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>> exception_record,
-                                         emulator_object<CONTEXT64> thread_context, BOOLEAN handle_exception);
+                                         emulator_object<CONTEXT64> thread_context, BOOLEAN first_chance);
 
         // syscalls/file.cpp
         NTSTATUS handle_NtSetInformationFile(const syscall_context& c, handle file_handle,

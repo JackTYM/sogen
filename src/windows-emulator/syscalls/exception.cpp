@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../exception_dispatch.hpp"
 
 namespace sogen
 {
@@ -51,21 +52,21 @@ namespace sogen
 
         NTSTATUS handle_NtRaiseException(const syscall_context& c,
                                          const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>> exception_record,
-                                         const emulator_object<CONTEXT64> /*thread_context*/, const BOOLEAN handle_exception)
+                                         const emulator_object<CONTEXT64> thread_context, const BOOLEAN first_chance)
         {
-            if (handle_exception)
+            // FirstChance == TRUE is the normal case for every software-raised exception
+            // (RtlRaiseException/RaiseException always pass TRUE here) and means the guest's own
+            // SEH/C++ handler chain must get a chance to catch it via KiUserExceptionDispatcher -
+            // it does NOT mean the exception is already known to be unhandled. Only a genuine
+            // second-chance raise (FirstChance == FALSE, issued by the guest's own unhandled
+            // exception filter once RtlDispatchException found no handler) means the process
+            // should actually die.
+            if (first_chance && exception_record && thread_context)
             {
-                NTSTATUS exception_code = STATUS_UNSUCCESSFUL;
-                if (exception_record)
-                {
-                    const auto record = exception_record.read();
-                    exception_code = static_cast<NTSTATUS>(record.ExceptionCode);
-                }
-
-                c.win_emu.log.error("Unhandled exception: 0x%X\n", static_cast<uint32_t>(exception_code));
-                c.proc.exit_status = exception_code;
-                c.win_emu.callbacks.on_exception();
-                c.emu.stop();
+                c.write_status = false;
+                const auto record = exception_record.read();
+                const auto ctx = thread_context.read();
+                dispatch_raised_exception(c.win_emu, c.vcpu, record, ctx);
                 return STATUS_SUCCESS;
             }
 

@@ -24,6 +24,14 @@ namespace sogen
     void dispatch_exception(windows_emulator& win_emu, vcpu_context& vcpu, DWORD status,
                             const std::vector<EmulatorTraits<Emu64>::ULONG_PTR>& parameters);
 
+    // Dispatches an exception record and context that the guest already built itself (e.g. via
+    // RtlRaiseException/NtRaiseException for a software-raised C++/SEH exception), as opposed to
+    // dispatch_exception() above, which synthesizes both from the vCPU's current register state for
+    // hardware-fault-style exceptions. The guest-supplied ContextRecord already reflects the true
+    // raise site (RtlRaiseException fixes it up before the syscall), so it must be used unmodified.
+    void dispatch_raised_exception(windows_emulator& win_emu, vcpu_context& vcpu, const EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>& record,
+                                   const CONTEXT64& ctx);
+
     template <typename T>
         requires(std::is_integral_v<T> && !std::is_same_v<T, DWORD>)
     void dispatch_exception(windows_emulator& win_emu, vcpu_context& vcpu, const T status,

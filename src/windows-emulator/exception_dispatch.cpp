@@ -392,6 +392,29 @@ namespace sogen
                                     pointers);
     }
 
+    void dispatch_raised_exception(windows_emulator& win_emu, vcpu_context& vcpu, const exception_record& record, const CONTEXT64& ctx)
+    {
+        auto& thread = vcpu.thread();
+
+        win_emu.record_exception_trace({
+            .status = static_cast<uint32_t>(record.ExceptionCode),
+            .tid = thread.id,
+            .vcpu = static_cast<uint32_t>(vcpu.cpu.index()),
+            .rip = ctx.Rip,
+            .info = record.NumberParameters > 1 ? static_cast<uint64_t>(record.ExceptionInformation[1]) : 0,
+        });
+
+        sync_wow64_cpu_reserved_context(win_emu, vcpu.cpu, thread, ctx);
+
+        EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers{};
+        pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(const_cast<CONTEXT64*>(&ctx));
+        pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(const_cast<exception_record*>(&record));
+
+        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher,
+                                    win_emu.mod_manager.wow64_heaven_gate_code_base(), win_emu.mod_manager.wow64_heaven_gate_stack_top(),
+                                    pointers);
+    }
+
     void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)
     {
         dispatch_exception(win_emu, vcpu, STATUS_ACCESS_VIOLATION,
