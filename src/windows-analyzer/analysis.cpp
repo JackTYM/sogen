@@ -5007,6 +5007,61 @@ namespace sogen
                                        accept_result);
                 });
 
+                // The incoming_receiver_ null-check hooks above never fired despite ReadMessage
+                // succeeding repeatedly, meaning DispatchMessageW takes one of its two earlier
+                // validation exits before ever reaching that code: mojo::Message::
+                // CreateFromMessageHandle failing, or MessageHeaderValidator::Accept rejecting
+                // the message header - both of which jump straight into HandleError(1, 0)
+                // without ever calling the real receiver. Trace both checks plus HandleError's
+                // own entry to determine which one is actually rejecting the message.
+                const auto msg_create_check = mod.image_base + 0x35ac27;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
+                                   "CreateFromMessageHandle result check at 0x%llx\n",
+                                   static_cast<unsigned long long>(msg_create_check));
+                win_emu->emu().hook_memory_execution(msg_create_check, [win_emu, msg_create_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
+                    uint32_t message_handle{};
+                    emu.try_read_memory(ebx, &message_handle, sizeof(message_handle));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
+                                       "CreateFromMessageHandle result check at 0x%llx, tid=%u message_handle=0x%x\n",
+                                       static_cast<unsigned long long>(msg_create_check), win_emu->current_thread().id, message_handle);
+                });
+
+                const auto header_validate_check = mod.image_base + 0x35ac3c;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
+                                   "MessageHeaderValidator::Accept result check at 0x%llx\n",
+                                   static_cast<unsigned long long>(header_validate_check));
+                win_emu->emu().hook_memory_execution(header_validate_check, [win_emu, header_validate_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto al = emu.reg<uint8_t>(x86_register::al);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
+                                       "MessageHeaderValidator::Accept result check at 0x%llx, tid=%u "
+                                       "header_valid=%u\n",
+                                       static_cast<unsigned long long>(header_validate_check), win_emu->current_thread().id, al);
+                });
+
+                const auto handle_error_entry = mod.image_base + 0x35a89a;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Connector::HandleError entry "
+                                   "at 0x%llx\n",
+                                   static_cast<unsigned long long>(handle_error_entry));
+                win_emu->emu().hook_memory_execution(handle_error_entry, [win_emu, handle_error_entry](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t return_addr{};
+                    emu.try_read_memory(esp, &return_addr, sizeof(return_addr));
+                    uint32_t force_pipe_reset{};
+                    emu.try_read_memory(esp + 4, &force_pipe_reset, sizeof(force_pipe_reset));
+                    uint32_t force_async_handler{};
+                    emu.try_read_memory(esp + 8, &force_async_handler, sizeof(force_async_handler));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Connector::HandleError entry at "
+                                       "0x%llx, tid=%u connector_this=0x%x return_addr=0x%x force_pipe_reset=%u "
+                                       "force_async_handler=%u\n",
+                                       static_cast<unsigned long long>(handle_error_entry), win_emu->current_thread().id, connector_this,
+                                       return_addr, force_pipe_reset, force_async_handler);
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
