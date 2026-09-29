@@ -5265,6 +5265,57 @@ namespace sogen
                                            win_emu->current_thread().id, message_ptr, gate_result, flag_0x28, flag_0x1c);
                     });
 
+                // The inline-vs-fragment gate above always passes (`#574` live run). The real
+                // fork happens next: `OnAcceptParcel` reads a `FragmentDescriptor` out of the
+                // message's own attachment array at `[esi+0x70]`/`[esi+0x74]`; if BOTH DWORDs
+                // AND to `0xFFFFFFFF` (an "absent" sentinel), it takes a separate branch
+                // (presumed inline-data path). Otherwise it calls real
+                // `ipcz::NodeLinkMemory::GetFragment` to resolve that descriptor into an actual
+                // mapped `Fragment` - and if THAT result's own two DWORDs also AND to
+                // `0xFFFFFFFF`, execution jumps straight to the SAME early-exit that produces a
+                // genuinely empty parcel (no error, no crash) - this is a real, concrete
+                // candidate for exactly the empty-data symptom this whole arc has been chasing.
+                const auto fragment_descriptor_sentinel_check = mod.image_base + 0x8ffaf;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnAcceptParcel's own "
+                                   "fragment-descriptor sentinel check at 0x%llx\n",
+                                   static_cast<unsigned long long>(fragment_descriptor_sentinel_check));
+                win_emu->emu().hook_memory_execution(fragment_descriptor_sentinel_check, [win_emu, fragment_descriptor_sentinel_check](
+                                                                                             cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
+                    const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
+                    uint32_t descriptor_lo{};
+                    emu.try_read_memory(message_ptr + 0x70, &descriptor_lo, sizeof(descriptor_lo));
+                    uint32_t descriptor_hi{};
+                    emu.try_read_memory(message_ptr + 0x74, &descriptor_hi, sizeof(descriptor_hi));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnAcceptParcel's own "
+                                       "fragment-descriptor sentinel check at 0x%llx, tid=%u message_ptr=0x%x "
+                                       "anded_result=0x%x descriptor_lo=0x%x descriptor_hi=0x%x is_absent=%d\n",
+                                       static_cast<unsigned long long>(fragment_descriptor_sentinel_check), win_emu->current_thread().id,
+                                       message_ptr, anded_result, descriptor_lo, descriptor_hi, anded_result == 0xFFFFFFFFu);
+                });
+
+                const auto get_fragment_result_sentinel_check = mod.image_base + 0x8ffde;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnAcceptParcel's own "
+                                   "NodeLinkMemory::GetFragment result sentinel check at 0x%llx\n",
+                                   static_cast<unsigned long long>(get_fragment_result_sentinel_check));
+                win_emu->emu().hook_memory_execution(get_fragment_result_sentinel_check, [win_emu, get_fragment_result_sentinel_check](
+                                                                                             cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
+                    const auto fragment_out_ptr = emu.reg<uint32_t>(x86_register::ebx);
+                    uint32_t fragment_lo{};
+                    emu.try_read_memory(fragment_out_ptr, &fragment_lo, sizeof(fragment_lo));
+                    uint32_t fragment_hi{};
+                    emu.try_read_memory(fragment_out_ptr + 4, &fragment_hi, sizeof(fragment_hi));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnAcceptParcel's own "
+                                       "NodeLinkMemory::GetFragment result sentinel check at 0x%llx, tid=%u "
+                                       "fragment_out_ptr=0x%x anded_result=0x%x fragment_lo=0x%x fragment_hi=0x%x "
+                                       "is_invalid_fragment=%d\n",
+                                       static_cast<unsigned long long>(get_fragment_result_sentinel_check), win_emu->current_thread().id,
+                                       fragment_out_ptr, anded_result, fragment_lo, fragment_hi, anded_result == 0xFFFFFFFFu);
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
