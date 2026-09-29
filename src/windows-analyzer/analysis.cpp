@@ -4465,6 +4465,34 @@ namespace sogen
                                        header_num_bytes, header_message_type, header_name);
                 });
 
+                // The OnReadComplete-entry snapshot above reads the buffer's own `consumed`/`filled`
+                // offsets BEFORE this read's own bytes get appended (that happens as this function's
+                // own first real instruction, `*(buffer+16) += bytes_transferred`) - it was seeing
+                // stale leftover state from a prior cycle, not a live "stuck" buffer. This hooks the
+                // REAL outer gate `OnReadComplete` itself evaluates right after that update (`cmp edx,
+                // ebx` at RVA 0x6d42e: `edx` = filled-consumed = actually-available unconsumed bytes,
+                // `ebx` = the computed minimum-bytes-needed threshold, `8 * alignment_factor + 8`) -
+                // if `edx < ebx` here, `TryDispatchMessage` never even gets called, which is exactly
+                // what every run so far has shown (zero hits on the message_type comparison). Reading
+                // both operands live directly tests whether this is genuinely "waiting for more data"
+                // (small, sane threshold, just not enough buffered yet) or a corrupted/oversized
+                // threshold (e.g. a garbage alignment_factor byte) that can never be satisfied - see
+                // project_solidworks_bringup.md #561.
+                const auto outer_gate_cmp = mod.image_base + 0x6d42e;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnReadComplete's own outer "
+                                   "buffered-bytes gate at 0x%llx\n",
+                                   static_cast<unsigned long long>(outer_gate_cmp));
+                win_emu->emu().hook_memory_execution(outer_gate_cmp, [win_emu, outer_gate_cmp](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto available_bytes = emu.reg<uint32_t>(x86_register::edx);
+                    const auto required_bytes = emu.reg<uint32_t>(x86_register::ebx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnReadComplete's own outer "
+                                       "buffered-bytes gate at 0x%llx, tid=%u available_bytes=%u required_bytes=%u "
+                                       "will_dispatch=%d\n",
+                                       static_cast<unsigned long long>(outer_gate_cmp), win_emu->current_thread().id, available_bytes,
+                                       required_bytes, available_bytes >= required_bytes ? 1 : 0);
+                });
+
                 // Decompiled `Channel::TryDispatchMessage_0` (called from `OnReadComplete`'s own
                 // internal loop): the real wire-format `MessageHeader::message_type` field lives at
                 // byte offset 6 of the raw header (`cmp word ptr [edi+6], 2`, RVA 0x6dcbe) - if it's
