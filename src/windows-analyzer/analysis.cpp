@@ -4121,6 +4121,41 @@ namespace sogen
                                        static_cast<unsigned long long>(call_target), target_mod_name,
                                        static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(trampoline_state));
                 });
+
+                // `#559`'s own resolution of the previous hook's dispatch target landed exactly on
+                // `embedded_browser::mojom::EmbeddedBrowser_Initialize_ProxyToResponder::Run` (RVA
+                // 0x6dd2470, real PDB name) - mojo's own auto-generated reply-responder proxy for
+                // `EmbeddedBrowser::Initialize` specifically (confirmed by its own real ordinal
+                // 0x6d5a37bf matching this file's own long-standing EMBEDDED_BROWSER_ORDINALS
+                // array). Its own decompiled body ends with a REAL, DIRECT (non-CFG-guarded) call to
+                // `mojo::internal::SendMojoMessage` (RVA 0x6dd2577) - the actual, final mojo
+                // transport-send call. Watching both the responder's own entry and the real send
+                // call directly confirms whether the reply genuinely reaches mojo's own transport
+                // layer, or whether something upstream (the `BindPostTaskTrampoline` post itself)
+                // silently drops it before this point is ever reached.
+                const auto proxy_responder_entry = mod.image_base + 0x6dd2470;
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching "
+                                   "EmbeddedBrowser_Initialize_ProxyToResponder::Run entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(proxy_responder_entry));
+                win_emu->emu().hook_memory_execution(proxy_responder_entry, [win_emu, proxy_responder_entry](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit "
+                                       "EmbeddedBrowser_Initialize_ProxyToResponder::Run entry at 0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(proxy_responder_entry), win_emu->current_thread().id);
+                });
+
+                const auto send_mojo_message_call = mod.image_base + 0x6dd2577;
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching the real "
+                                   "SendMojoMessage call at 0x%llx\n",
+                                   static_cast<unsigned long long>(send_mojo_message_call));
+                win_emu->emu().hook_memory_execution(send_mojo_message_call, [win_emu, send_mojo_message_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto message_receiver = emu.reg<uint64_t>(x86_register::rcx);
+                    const auto message = emu.reg<uint64_t>(x86_register::rdx);
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit the real SendMojoMessage call at 0x%llx, "
+                                       "tid=%u message_receiver=0x%llx message=0x%llx\n",
+                                       static_cast<unsigned long long>(send_mojo_message_call), win_emu->current_thread().id,
+                                       static_cast<unsigned long long>(message_receiver), static_cast<unsigned long long>(message));
+                });
             }
 
             // Coarse bisection through `ContinueInitializeWithProfile`'s own success-branch body,
