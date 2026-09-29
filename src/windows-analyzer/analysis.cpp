@@ -4643,9 +4643,20 @@ namespace sogen
                 win_emu->emu().hook_memory_execution(node_link_accept_parcel, [win_emu, node_link_accept_parcel](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t accept_parcel_ptr{};
+                    emu.try_read_memory(esp + 4, &accept_parcel_ptr, sizeof(accept_parcel_ptr));
+                    // `#574`'s own recommendation (a): the deserialized `AcceptParcel` params
+                    // struct's own first field is a wire-level routing identifier (`SublinkId`)
+                    // rather than a process-local ipcz Handle - capture it as a second candidate
+                    // correlator alongside `Connector::ReadMessage`'s own `portal_handle`.
+                    uint64_t sublink_id{};
+                    emu.try_read_memory(accept_parcel_ptr, &sublink_id, sizeof(sublink_id));
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit ipcz::NodeLink::OnAcceptParcel "
-                                       "entry at 0x%llx, tid=%u this=0x%x\n",
-                                       static_cast<unsigned long long>(node_link_accept_parcel), win_emu->current_thread().id, this_ptr);
+                                       "entry at 0x%llx, tid=%u this=0x%x accept_parcel_ptr=0x%x "
+                                       "sublink_id=0x%llx\n",
+                                       static_cast<unsigned long long>(node_link_accept_parcel), win_emu->current_thread().id, this_ptr,
+                                       accept_parcel_ptr, static_cast<unsigned long long>(sublink_id));
                 });
 
                 const auto router_accept_inbound_parcel = mod.image_base + 0x9c01a;
@@ -4935,9 +4946,17 @@ namespace sogen
                 win_emu->emu().hook_memory_execution(read_message_entry, [win_emu, read_message_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
+                    // `#574`'s own recommendation (a): capture the portal handle this Connector
+                    // reads from (`*(this+8)`, the same field `Connector::ReadMessage`'s own real
+                    // body passes as MojoReadMessage's first argument) as a stable identifier that
+                    // might correlate this specific Connector/interface to whichever ipcz-level
+                    // Parcel/Router object eventually satisfies (or fails to satisfy) this read.
+                    uint32_t portal_handle{};
+                    emu.try_read_memory(connector_this + 8, &portal_handle, sizeof(portal_handle));
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Connector::ReadMessage entry "
-                                       "at 0x%llx, tid=%u connector_this=0x%x\n",
-                                       static_cast<unsigned long long>(read_message_entry), win_emu->current_thread().id, connector_this);
+                                       "at 0x%llx, tid=%u connector_this=0x%x portal_handle=0x%x\n",
+                                       static_cast<unsigned long long>(read_message_entry), win_emu->current_thread().id, connector_this,
+                                       portal_handle);
                 });
 
                 const auto read_message_post_call = mod.image_base + 0x35aba1;
