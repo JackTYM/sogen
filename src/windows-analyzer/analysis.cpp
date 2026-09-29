@@ -5193,6 +5193,35 @@ namespace sogen
                                            win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
                     });
 
+                // Traced one level deeper still: `MojoMessage::GetData` faithfully reports
+                // `this+12`/`this+16` (data ptr/size), which `MojoMessage::SetParcel` sets from a
+                // local `Size`/`Src` pair, zero-initialized then filled by a real ipcz API call
+                // (`GetIpczAPI()`'s vtable slot 11, matching the msedge.dll-side `ipcz::Router::Get`
+                // hop this same file already documents) that pulls the parcel's actual bytes out.
+                // If `Size` stays 0 after that call, the message is legitimately empty at the ipcz
+                // layer itself - one level below any Chromium/mojo application code this
+                // investigation has touched so far. Trace the call's own real result code and the
+                // `Size` out-param directly (via `esi`, which this calling convention preserves
+                // across the call) to see whether ipcz's own `Get` genuinely fails or genuinely
+                // reports zero bytes for what should be a real, non-empty message.
+                const auto set_parcel_get_call_result = mod.image_base + 0x7476b;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "MojoMessage::SetParcel's own real ipcz Get call result at 0x%llx\n",
+                                   static_cast<unsigned long long>(set_parcel_get_call_result));
+                win_emu->emu().hook_memory_execution(
+                    set_parcel_get_call_result, [win_emu, set_parcel_get_call_result](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto ipcz_result = emu.reg<uint32_t>(x86_register::eax);
+                        const auto size_out_addr = emu.reg<uint32_t>(x86_register::esi);
+                        uint32_t size_value{};
+                        emu.try_read_memory(size_out_addr, &size_value, sizeof(size_value));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                           "MojoMessage::SetParcel's own real ipcz Get call result at 0x%llx, tid=%u "
+                                           "ipcz_result=%u size_out_addr=0x%x size_value=%u\n",
+                                           static_cast<unsigned long long>(set_parcel_get_call_result), win_emu->current_thread().id,
+                                           ipcz_result, size_out_addr, size_value);
+                    });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
