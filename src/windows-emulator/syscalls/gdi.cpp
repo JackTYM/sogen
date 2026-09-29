@@ -102,6 +102,7 @@ namespace sogen
 
             constexpr int16_t k_gdi_batch_cmd_text_out = 2;
             constexpr int16_t k_gdi_batch_cmd_poly_pat_blt = 1;
+            constexpr int16_t k_gdi_batch_cmd_pat_blt = 3;
             constexpr uint32_t k_gdibs_no_rect = 0x80000000u;
             constexpr size_t k_gdi_poly_pat_blt_rect_offset = 0x30;
             constexpr size_t k_gdi_pat_rect_size = 0x18;
@@ -195,6 +196,23 @@ namespace sogen
                 ULONG brush_ul{};
                 POINTL viewport_org{};
                 std::array<gdi_batch_pat_rect, 1> rects{};
+            };
+
+            // Single-rect PatBlt batch entry (verified at runtime against this build's gdi32): a fixed-size
+            // 40-byte record distinct from gdi_batch_poly_pat_blt above. gdi32 emits this for a plain,
+            // non-poly PatBlt -- notably Scintilla's own "blank area below the last line" background fill,
+            // which otherwise never reaches any NtGdi* draw syscall at all. The two reserved DWORDs were
+            // always zero in every captured instance; color_ul mirrors color, matching the
+            // foreground/foreground_ul pairing convention gdi_batch_poly_pat_blt already uses above.
+            struct gdi_batch_pat_blt
+            {
+                gdi_batch_header header{};
+                COLORREF color{};
+                DWORD mode{};
+                RECT rect{};
+                ULONG reserved1{};
+                ULONG reserved2{};
+                ULONG color_ul{};
             };
 
             constexpr uint32_t k_dxgk_adapter_count = 1;
@@ -1145,6 +1163,12 @@ namespace sogen
                             fill_rect(*surface, rect.x + origin_x, rect.y + origin_y, rect.x + rect.width + origin_x,
                                       rect.y + rect.height + origin_y, color);
                         }
+                    }
+                    else if (header->cmd == k_gdi_batch_cmd_pat_blt && static_cast<size_t>(header->size) >= sizeof(gdi_batch_pat_blt))
+                    {
+                        const auto* pat_blt = reinterpret_cast<const gdi_batch_pat_blt*>(header);
+                        fill_rect(*surface, pat_blt->rect.left + origin_x, pat_blt->rect.top + origin_y, pat_blt->rect.right + origin_x,
+                                  pat_blt->rect.bottom + origin_y, colorref_to_bgra(pat_blt->color));
                     }
 
                     offset += static_cast<size_t>(header->size);
