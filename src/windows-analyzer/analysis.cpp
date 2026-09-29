@@ -243,6 +243,18 @@ namespace sogen
             {"mojo::MessageHeaderValidator::Accept", 0x101e6e0},
         }};
 
+        // `ipcz::Router::SendOutboundParcel`'s own real entry (RVA 0x51b8b44, real PDB name) - the
+        // OUTBOUND counterpart to the inbound-only IPCZ_ACCEPT_PARCEL_DISPATCH_TARGETS above.
+        // `#557`/`#558` confirmed the client-side `InitializeWebViewCompleted` mojo reply handler
+        // never fires despite the browser-process side reaching its own reply-to-host callback
+        // invocation (RVA 0xa0d6624), and confirmed via decompile that invoking that callback IS
+        // mojo's own reply-send mechanism - no separate C++-level "Send" call exists to trace. This
+        // watches whether the reply actually reaches ipcz's own outbound-parcel dispatch at all -
+        // see project_solidworks_bringup.md #558.
+        constexpr std::array<traced_symbol, 1> IPCZ_SEND_OUTBOUND_PARCEL_TARGETS{{
+            {"ipcz::Router::SendOutboundParcel", 0x51b8b44},
+        }};
+
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
         // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270, #272, #277).
         constexpr std::array<traced_symbol, 16> NODE_CONNECT_TARGETS{{
@@ -3658,6 +3670,42 @@ namespace sogen
                                            static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
                                            static_cast<unsigned long long>(r9), static_cast<unsigned long long>(return_address),
                                            caller_mod_name, static_cast<unsigned long long>(caller_offset));
+                    });
+                }
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_IPCZ_SEND_OUTBOUND_PARCEL_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                for (const auto& target : IPCZ_SEND_OUTBOUND_PARCEL_TARGETS)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[ipcz-send-outbound-parcel-hook-trace] watching %s at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto rsp = emu.read_stack_pointer();
+
+                        uint64_t return_address{};
+                        emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+                        const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+                        const auto rdx = emu.reg<uint64_t>(x86_register::rdx);
+
+                        const auto* caller_mod_name = win_emu->mod_manager.find_name(return_address);
+                        const auto* caller_mod = win_emu->mod_manager.find_by_address(return_address);
+                        const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+                        win_emu->log.error("[ipcz-send-outbound-parcel-hook-trace] hit %s at 0x%llx, tid=%u rcx=0x%llx "
+                                           "rdx=0x%llx return=0x%llx (%s+0x%llx)\n",
+                                           name, static_cast<unsigned long long>(address), win_emu->current_thread().id,
+                                           static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rdx),
+                                           static_cast<unsigned long long>(return_address), caller_mod_name,
+                                           static_cast<unsigned long long>(caller_offset));
                     });
                 }
             }
