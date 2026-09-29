@@ -4493,6 +4493,35 @@ namespace sogen
                                        required_bytes, available_bytes >= required_bytes ? 1 : 0);
                 });
 
+                // Careful full-disassembly correlation of `TryDispatchMessage_0`'s own real entry
+                // (RVA 0x6d7b0-0x6d840ish) revealed the ACTUAL header layout differs from what the
+                // earlier `message_type`-comparison hook assumed: `num_header_bytes` is a WORD at
+                // offset 0, and the real `num_bytes` (total declared message size) is a DWORD at
+                // offset 4 - not the other way around. The decisive branch is `sub ebx, [edx+4]` /
+                // `jbe` (RVA 0x6d826/0x6d829): `ebx` = declared `num_bytes`, `[edx+4]` = `a3` (the
+                // actually-available buffered bytes for this call, matching `OnReadComplete`'s own
+                // outer-gate `available_bytes`). If `num_bytes > a3`, it silently returns "need more
+                // data" (result=1, no error, buffer preserved) WITHOUT ever reaching the
+                // `message_type` check - exactly consistent with every prior observation. Hooking
+                // this exact comparison, before the `sub` executes, reads both real operands live -
+                // see project_solidworks_bringup.md #562.
+                const auto size_sufficiency_cmp = mod.image_base + 0x6d826;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own "
+                                   "declared-size-vs-available check at 0x%llx\n",
+                                   static_cast<unsigned long long>(size_sufficiency_cmp));
+                win_emu->emu().hook_memory_execution(size_sufficiency_cmp, [win_emu, size_sufficiency_cmp](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto declared_num_bytes = emu.reg<uint32_t>(x86_register::ebx);
+                    const auto edx = emu.reg<uint32_t>(x86_register::edx);
+                    uint32_t a3_available{};
+                    emu.try_read_memory(edx + 4, &a3_available, sizeof(a3_available));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own "
+                                       "declared-size-vs-available check at 0x%llx, tid=%u declared_num_bytes=%u "
+                                       "a3_available=%u sufficient=%d\n",
+                                       static_cast<unsigned long long>(size_sufficiency_cmp), win_emu->current_thread().id,
+                                       declared_num_bytes, a3_available, declared_num_bytes <= a3_available ? 1 : 0);
+                });
+
                 // Decompiled `Channel::TryDispatchMessage_0` (called from `OnReadComplete`'s own
                 // internal loop): the real wire-format `MessageHeader::message_type` field lives at
                 // byte offset 6 of the raw header (`cmp word ptr [edi+6], 2`, RVA 0x6dcbe) - if it's
