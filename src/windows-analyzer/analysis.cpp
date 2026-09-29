@@ -4155,6 +4155,34 @@ namespace sogen
                                        static_cast<unsigned long long>(runonce_address), win_emu->current_thread().id, hresult,
                                        controller_ptr);
                 });
+
+                // `EmbeddedBrowserWebView::InitializeWebViewCompleted`'s own real entry (RVA
+                // 0x120380, real PDB name): the mojo reply handler for `EmbeddedBrowserProxy::
+                // Initialize`'s own cross-process round trip, retrieving the LONG-LIVED
+                // `WebViewCreationParams` retained at `this+1404` (checked out and back in around
+                // `RuntimeClassInitialize`'s own success path) rather than the short-lived one
+                // `CreateWebViewGeneric`/`RetryCreateWebView` operate on synchronously. `*(a2+12)`
+                // is the actual delivered error code from the browser process's own
+                // `EmbeddedBrowserCreationData` reply - reading it here captures the real,
+                // ground-truth async-reply outcome at the moment it arrives, rather than inferring
+                // it from the final retry-exhaustion callback - see project_solidworks_bringup.md
+                // #556.
+                const auto init_completed_address = mod.image_base + 0x120380;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching InitializeWebViewCompleted mojo "
+                                   "reply entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(init_completed_address));
+                win_emu->emu().hook_memory_execution(init_completed_address, [win_emu, init_completed_address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t reply_ptr{};
+                    emu.try_read_memory(esp + 4, &reply_ptr, sizeof(reply_ptr));
+                    uint32_t reply_error{};
+                    emu.try_read_memory(reply_ptr + 12, &reply_error, sizeof(reply_error));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit InitializeWebViewCompleted mojo "
+                                       "reply entry at 0x%llx, tid=%u reply_ptr=0x%x reply_error=0x%x\n",
+                                       static_cast<unsigned long long>(init_completed_address), win_emu->current_thread().id, reply_ptr,
+                                       reply_error);
+                });
             }
         }
 
