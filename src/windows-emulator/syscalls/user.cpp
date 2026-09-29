@@ -3027,17 +3027,18 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        BOOL handle_NtUserSetWindowPos(const syscall_context& c, hwnd hWnd, hwnd hwnd_insert_after, int x, int y, int cx, int cy,
+                                       UINT flags);
+
+        // Real user32 MoveWindow is a thin wrapper around SetWindowPos (SWP_NOZORDER | SWP_NOACTIVATE,
+        // plus SWP_NOREDRAW when repaint is false) - it sends the same WM_WINDOWPOSCHANGING/CHANGED and
+        // WM_MOVE/WM_SIZE notifications SetWindowPos does. Delegating here keeps that behavior instead of
+        // silently updating geometry with no notification at all.
         BOOL handle_NtUserMoveWindow(const syscall_context& c, const hwnd hwnd, const int x, const int y, const int width, const int height,
                                      const BOOL repaint)
         {
-            auto* win = c.proc.windows.get(hwnd);
-            if (!win)
-            {
-                return FALSE;
-            }
-
-            update_window_geometry(c, *win, x, y, width, height, repaint != FALSE);
-            return TRUE;
+            const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (repaint ? 0 : SWP_NOREDRAW);
+            return handle_NtUserSetWindowPos(c, hwnd, 0, x, y, width, height, flags);
         }
 
         uint64_t handle_NtUserGetProcessWindowStation()
@@ -4897,8 +4898,8 @@ namespace sogen
             return old_parent;
         }
 
-        BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd /*hwnd_insert_after*/, const int x,
-                                       const int y, const int cx, const int cy, const UINT flags)
+        BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd hwnd_insert_after, const int x, const int y,
+                                       const int cx, const int cy, const UINT flags)
         {
             auto* win = c.proc.windows.get(hWnd);
             if (!win)
@@ -4906,11 +4907,32 @@ namespace sogen
                 return FALSE;
             }
 
+            const auto old_x = win->x;
+            const auto old_y = win->y;
+            const auto old_width = win->width;
+            const auto old_height = win->height;
+
             const auto new_x = (flags & SWP_NOMOVE) ? win->x : x;
             const auto new_y = (flags & SWP_NOMOVE) ? win->y : y;
             const auto new_width = (flags & SWP_NOSIZE) ? win->width : cx;
             const auto new_height = (flags & SWP_NOSIZE) ? win->height : cy;
             const auto repaint = (flags & SWP_NOREDRAW) == 0;
+
+            // Real win32k folds SWP_NOSIZE/SWP_NOMOVE into the effective flags whenever the requested geometry
+            // already matches the window's current geometry, before sending any notification. Callers routinely
+            // reissue SetWindowPos with the window's current geometry (e.g. comctl32's status bar re-validating
+            // its layout on every WM_SIZE); without this, the WINDOWPOS delivered via WM_WINDOWPOSCHANGED would
+            // keep telling the guest a size/move happened, and its own WM_WINDOWPOSCHANGED handling would keep
+            // re-synthesizing WM_SIZE/WM_MOVE and re-triggering the same SetWindowPos call forever.
+            auto effective_flags = flags;
+            if (new_width == old_width && new_height == old_height)
+            {
+                effective_flags |= SWP_NOSIZE;
+            }
+            if (new_x == old_x && new_y == old_y)
+            {
+                effective_flags |= SWP_NOMOVE;
+            }
 
             update_window_geometry(c, *win, new_x, new_y, new_width, new_height, repaint);
 
@@ -4934,6 +4956,84 @@ namespace sogen
                 // Repaint the now-visible window and its child controls (see invalidate_window_tree).
                 invalidate_window_tree(c, *win);
             }
+
+            // A real SetWindowPos synchronously sends WM_WINDOWPOSCHANGING/WM_WINDOWPOSCHANGED (and, for an
+            // actual move/resize, WM_MOVE/WM_SIZE) to the window's own thread before returning. Without this,
+            // a window resized after creation (e.g. a docking layout pass) never learns its new client size:
+            // its geometry (GetClientRect etc.) is already correct above, but code that only recomputes
+            // internal layout in its WM_SIZE handler (Scintilla's margins/line cache, for example) keeps
+            // operating on whatever size it last received - which for a window created at a small placeholder
+            // size and never resized via ShowWindow is only the WM_SIZE sent at creation time.
+            if (win->thread_id != c.vcpu.active_thread->id)
+            {
+                return TRUE;
+            }
+
+            window_set_pos_state state{};
+            state.handle = hWnd;
+
+            const EMU_WINDOWPOS changing_position{
+                .hwnd = hWnd,
+                .hwndInsertAfter = hwnd_insert_after,
+                .x = new_x,
+                .y = new_y,
+                .cx = new_width,
+                .cy = new_height,
+                .flags = effective_flags,
+            };
+            state.window_pos_alloc = push_stack_ensuring_commit(c, changing_position);
+
+            state.message_queue = {
+                {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0},
+            };
+            if ((effective_flags & SWP_NOSIZE) == 0)
+            {
+                state.message_queue.insert(state.message_queue.begin(), {.message = WM_SIZE, .wParam = 0, .lParam = 0});
+            }
+            if ((effective_flags & SWP_NOMOVE) == 0)
+            {
+                state.message_queue.insert(state.message_queue.begin(), {.message = WM_MOVE, .wParam = 0, .lParam = 0});
+            }
+            state.message_queue.push_back({.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()});
+
+            if (state.message_queue.back().message == WM_WINDOWPOSCHANGING)
+            {
+                state.pending_window_pos_address = state.message_queue.back().lParam;
+            }
+
+            dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(state), *win, state.message_queue);
+            return {};
+        }
+
+        BOOL completion_NtUserSetWindowPos(const syscall_context& c, const hwnd /*hWnd*/, const hwnd /*hwnd_insert_after*/, const int /*x*/,
+                                           const int /*y*/, const int /*cx*/, const int /*cy*/, const UINT /*flags*/)
+        {
+            auto& s = c.get_completion_state<window_set_pos_state>();
+            auto* win = c.proc.windows.get(s.handle);
+
+            if (s.pending_window_pos_address != 0)
+            {
+                complete_window_position_change(c, *win, s.pending_window_pos_address, s.changed_window_pos_alloc, s.message_queue, true);
+                s.pending_window_pos_address = 0;
+            }
+
+            if (!s.message_queue.empty())
+            {
+                const auto& next = s.message_queue.back();
+                if (next.message == WM_WINDOWPOSCHANGING)
+                {
+                    s.pending_window_pos_address = next.lParam;
+                }
+
+                dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(s), *win, s.message_queue);
+                return {};
+            }
+
+            if (s.changed_window_pos_alloc)
+            {
+                c.emu.pop_stack(s.changed_window_pos_alloc);
+            }
+            c.emu.pop_stack(s.window_pos_alloc);
 
             return TRUE;
         }
