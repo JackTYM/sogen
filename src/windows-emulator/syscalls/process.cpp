@@ -1340,7 +1340,7 @@ namespace sogen
                         continue;
                     }
 
-                    std::vector<std::byte> content = section->object->backing_storage;
+                    section->object->ensure_backing(static_cast<size_t>(page_align_up(section->object->maximum_size)));
 
                     inherited_sections.push_back({
                         .target_handle = src_handle,
@@ -1348,7 +1348,7 @@ namespace sogen
                         .section_page_protection = section->object->section_page_protection,
                         .allocation_attributes = section->object->allocation_attributes,
                         .granted_access = section->granted_access,
-                        .content = std::move(content),
+                        .backing = section->object->backing,
                     });
                     continue;
                 }

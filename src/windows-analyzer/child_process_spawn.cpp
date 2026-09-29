@@ -2,11 +2,13 @@
 #include "child_process_spawn.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 
 #if !defined(_WIN32) && !defined(OS_EMSCRIPTEN)
 #define SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING 1
@@ -16,6 +18,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -92,10 +95,125 @@ namespace sogen
         }
 #endif
 
-        bool send_framed(const int fd, const std::vector<std::byte>& payload)
+        // A frame may carry file descriptors (shared-memory section backings) out of band: they ride
+        // as SCM_RIGHTS ancillary data on the length prefix, which the receiver always reads with
+        // recvmsg so a descriptor can never be silently dropped by a plain read().
+        constexpr size_t max_fds_per_frame = 128;
+
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        bool write_length_with_fds(const int fd, const uint64_t length, const std::span<const int> fds)
+        {
+            iovec iov{const_cast<uint64_t*>(&length), sizeof(length)};
+            alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int) * max_fds_per_frame)> control{};
+
+            msghdr message{};
+            message.msg_iov = &iov;
+            message.msg_iovlen = 1;
+            message.msg_control = control.data();
+            message.msg_controllen = CMSG_SPACE(sizeof(int) * fds.size());
+
+            auto* const header = CMSG_FIRSTHDR(&message);
+            header->cmsg_level = SOL_SOCKET;
+            header->cmsg_type = SCM_RIGHTS;
+            header->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
+            std::memcpy(CMSG_DATA(header), fds.data(), sizeof(int) * fds.size());
+
+            while (true)
+            {
+                const auto sent = ::sendmsg(fd, &message, 0);
+                if (sent < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    return false;
+                }
+
+                const auto remaining = sizeof(length) - static_cast<size_t>(sent);
+                return remaining == 0 || write_all(fd, reinterpret_cast<const std::byte*>(&length) + sent, remaining);
+            }
+        }
+
+        bool read_length_with_fds(const int fd, uint64_t& length, std::vector<int>& received_fds)
+        {
+            size_t received = 0;
+            while (received < sizeof(length))
+            {
+                iovec iov{reinterpret_cast<std::byte*>(&length) + received, sizeof(length) - received};
+                alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int) * max_fds_per_frame)> control{};
+
+                msghdr message{};
+                message.msg_iov = &iov;
+                message.msg_iovlen = 1;
+                message.msg_control = control.data();
+                message.msg_controllen = control.size();
+
+                const auto n = ::recvmsg(fd, &message, 0);
+                if (n < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    return false;
+                }
+
+                if (n == 0)
+                {
+                    return false;
+                }
+
+                for (auto* header = CMSG_FIRSTHDR(&message); header; header = CMSG_NXTHDR(&message, header))
+                {
+                    if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS)
+                    {
+                        continue;
+                    }
+
+                    const auto count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        int received_fd{};
+                        std::memcpy(&received_fd, CMSG_DATA(header) + i * sizeof(int), sizeof(int));
+                        ::fcntl(received_fd, F_SETFD, FD_CLOEXEC);
+                        received_fds.push_back(received_fd);
+                    }
+                }
+
+                received += static_cast<size_t>(n);
+            }
+
+            return true;
+        }
+#else
+        bool write_length_with_fds(int, uint64_t, std::span<const int>)
+        {
+            return false;
+        }
+
+        bool read_length_with_fds(int, uint64_t&, std::vector<int>&)
+        {
+            return false;
+        }
+#endif
+
+        void close_fds(const std::vector<int>& fds)
+        {
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+            for (const auto fd : fds)
+            {
+                ::close(fd);
+            }
+#else
+            (void)fds;
+#endif
+        }
+
+        bool send_framed(const int fd, const std::vector<std::byte>& payload, const std::span<const int> fds = {})
         {
             const uint64_t length = payload.size();
-            if (!write_all(fd, &length, sizeof(length)))
+            if (fds.empty() ? !write_all(fd, &length, sizeof(length)) : !write_length_with_fds(fd, length, fds))
             {
                 return false;
             }
@@ -108,7 +226,8 @@ namespace sogen
             return write_all(fd, payload.data(), payload.size());
         }
 
-        std::optional<std::vector<std::byte>> recv_framed(const int fd, const int timeout_ms)
+        std::optional<std::vector<std::byte>> recv_framed(const int fd, const int timeout_ms,
+                                                          std::vector<int>* const received_fds = nullptr)
         {
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
             if (timeout_ms >= 0)
@@ -125,22 +244,34 @@ namespace sogen
             (void)timeout_ms;
 #endif
 
+            std::vector<int> fds{};
             uint64_t length = 0;
-            if (!read_all(fd, &length, sizeof(length)))
+            if (!read_length_with_fds(fd, length, fds))
             {
+                close_fds(fds);
                 return std::nullopt;
             }
 
             constexpr uint64_t max_reasonable_length = 64ull << 20;
-            if (length > max_reasonable_length)
+            std::vector<std::byte> buffer{};
+            if (length <= max_reasonable_length)
             {
+                buffer.resize(length);
+            }
+
+            if (length > max_reasonable_length || (length > 0 && !read_all(fd, buffer.data(), buffer.size())))
+            {
+                close_fds(fds);
                 return std::nullopt;
             }
 
-            std::vector<std::byte> buffer(length);
-            if (length > 0 && !read_all(fd, buffer.data(), buffer.size()))
+            if (received_fds)
             {
-                return std::nullopt;
+                received_fds->insert(received_fds->end(), fds.begin(), fds.end());
+            }
+            else
+            {
+                close_fds(fds);
             }
 
             return buffer;
@@ -520,7 +651,39 @@ namespace sogen
             exit_notification = 2,
         };
 
-        void write_process_control_request_body(utils::buffer_serializer& buffer, const process_control_request& request)
+        // The section backing is the one part of a control message that cannot be serialized: a shared
+        // backing is represented by a flag plus its size in the body, with its descriptor appended to
+        // `out_fds` for the transport to pass out of band.
+        void write_backing_descriptor(utils::buffer_serializer& buffer, const std::shared_ptr<shared_backing>& backing,
+                                      std::vector<int>& out_fds)
+        {
+            const auto shared = backing && backing->is_shared();
+            buffer.write(shared);
+            buffer.write(static_cast<uint64_t>(backing ? backing->size() : 0));
+            if (shared)
+            {
+                out_fds.push_back(backing->native_fd());
+            }
+        }
+
+        std::shared_ptr<shared_backing> read_backing_descriptor(utils::buffer_deserializer& buffer, std::vector<int>& in_fds)
+        {
+            bool shared{};
+            uint64_t size{};
+            buffer.read(shared);
+            buffer.read(size);
+            if (!shared || in_fds.empty())
+            {
+                return nullptr;
+            }
+
+            const auto fd = in_fds.front();
+            in_fds.erase(in_fds.begin());
+            return shared_backing::adopt_fd(fd, static_cast<size_t>(size));
+        }
+
+        void write_process_control_request_body(utils::buffer_serializer& buffer, const process_control_request& request,
+                                                std::vector<int>& out_fds)
         {
             buffer.write(static_cast<uint8_t>(request.op));
             buffer.write(request.address);
@@ -535,9 +698,11 @@ namespace sogen
             buffer.write(request.allocation_attributes);
             buffer.write(request.granted_access);
             buffer.write_vector(request.payload);
+            write_backing_descriptor(buffer, request.backing, out_fds);
         }
 
-        void read_process_control_request_body(utils::buffer_deserializer& buffer, process_control_request& request)
+        void read_process_control_request_body(utils::buffer_deserializer& buffer, process_control_request& request,
+                                               std::vector<int>& in_fds)
         {
             uint8_t op{};
             buffer.read(op);
@@ -554,9 +719,11 @@ namespace sogen
             buffer.read(request.allocation_attributes);
             buffer.read(request.granted_access);
             buffer.read_vector(request.payload);
+            request.backing = read_backing_descriptor(buffer, in_fds);
         }
 
-        void write_process_control_response_body(utils::buffer_serializer& buffer, const process_control_response& response)
+        void write_process_control_response_body(utils::buffer_serializer& buffer, const process_control_response& response,
+                                                 std::vector<int>& out_fds)
         {
             buffer.write(response.status);
             buffer.write(response.bytes_written);
@@ -573,9 +740,11 @@ namespace sogen
             buffer.write(response.allocation_attributes);
             buffer.write(response.granted_access);
             buffer.write_vector(response.payload);
+            write_backing_descriptor(buffer, response.backing, out_fds);
         }
 
-        void read_process_control_response_body(utils::buffer_deserializer& buffer, process_control_response& response)
+        void read_process_control_response_body(utils::buffer_deserializer& buffer, process_control_response& response,
+                                                std::vector<int>& in_fds)
         {
             buffer.read(response.status);
             buffer.read(response.bytes_written);
@@ -592,6 +761,7 @@ namespace sogen
             buffer.read(response.allocation_attributes);
             buffer.read(response.granted_access);
             buffer.read_vector(response.payload);
+            response.backing = read_backing_descriptor(buffer, in_fds);
         }
 
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
@@ -627,15 +797,17 @@ namespace sogen
                 utils::buffer_serializer buffer{};
                 buffer.write(static_cast<uint8_t>(process_control_frame_kind::request));
                 buffer.write(request_id);
-                write_process_control_request_body(buffer, request);
+                std::vector<int> out_fds{};
+                write_process_control_request_body(buffer, request, out_fds);
 
-                if (!send_framed(this->fd_, buffer.get_buffer()))
+                if (!send_framed(this->fd_, buffer.get_buffer(), out_fds))
                 {
                     this->dead_ = true;
                     return std::nullopt;
                 }
 
-                auto raw = recv_framed(this->fd_, timeout_ms);
+                std::vector<int> in_fds{};
+                auto raw = recv_framed(this->fd_, timeout_ms, &in_fds);
                 if (!raw)
                 {
                     this->dead_ = true;
@@ -667,14 +839,16 @@ namespace sogen
 
                 process_control_response response{};
                 response.request_id = response_id;
-                read_process_control_response_body(deserializer, response);
+                read_process_control_response_body(deserializer, response, in_fds);
+                close_fds(in_fds);
 
                 return response;
             }
 
             std::optional<process_control_request> try_receive() override
             {
-                auto raw = recv_framed(this->fd_, 0);
+                std::vector<int> in_fds{};
+                auto raw = recv_framed(this->fd_, 0, &in_fds);
                 if (!raw)
                 {
                     return std::nullopt;
@@ -688,7 +862,8 @@ namespace sogen
 
                 process_control_request request{};
                 deserializer.read(request.request_id);
-                read_process_control_request_body(deserializer, request);
+                read_process_control_request_body(deserializer, request, in_fds);
+                close_fds(in_fds);
 
                 return request;
             }
@@ -698,9 +873,10 @@ namespace sogen
                 utils::buffer_serializer buffer{};
                 buffer.write(static_cast<uint8_t>(process_control_frame_kind::response));
                 buffer.write(response.request_id);
-                write_process_control_response_body(buffer, response);
+                std::vector<int> out_fds{};
+                write_process_control_response_body(buffer, response, out_fds);
 
-                send_framed(this->fd_, buffer.get_buffer());
+                send_framed(this->fd_, buffer.get_buffer(), out_fds);
             }
 
             void notify_exit(const int32_t exit_status) override
@@ -892,13 +1068,7 @@ namespace sogen
         ::close(child_fd);
         ::close(child_control_fd);
 
-        utils::buffer_serializer bootstrap{};
-        bootstrap.write(settings);
-        bootstrap.write_vector(inherited_pipes);
-        bootstrap.write_vector(inherited_sections);
-        bootstrap.write_vector(inherited_events);
-
-        if (!send_framed(parent_fd, bootstrap.get_buffer()))
+        if (!send_child_bootstrap_data(parent_fd, settings, inherited_pipes, std::move(inherited_sections), inherited_events))
         {
             ::close(parent_fd);
             ::close(parent_control_fd);
@@ -934,9 +1104,41 @@ namespace sogen
 #endif
     }
 
+    bool send_child_bootstrap_data(const int fd, const application_settings& settings,
+                                   const std::vector<inherited_pipe_handle>& inherited_pipes,
+                                   std::vector<inherited_section_handle> inherited_sections,
+                                   const std::vector<inherited_event_handle>& inherited_events)
+    {
+        std::vector<int> section_fds{};
+        for (auto& section : inherited_sections)
+        {
+            if (!section.backing || !section.backing->is_shared())
+            {
+                continue;
+            }
+
+            if (section_fds.size() >= max_fds_per_frame)
+            {
+                section.backing = shared_backing::create_from_content(section.backing->content());
+                continue;
+            }
+
+            section_fds.push_back(section.backing->native_fd());
+        }
+
+        utils::buffer_serializer bootstrap{};
+        bootstrap.write(settings);
+        bootstrap.write_vector(inherited_pipes);
+        bootstrap.write_vector(inherited_sections);
+        bootstrap.write_vector(inherited_events);
+
+        return send_framed(fd, bootstrap.get_buffer(), section_fds);
+    }
+
     std::optional<child_bootstrap_data> receive_child_bootstrap_data(const int fd)
     {
-        auto raw = recv_framed(fd, -1);
+        std::vector<int> section_fds{};
+        auto raw = recv_framed(fd, -1, &section_fds);
         if (!raw)
         {
             return std::nullopt;
@@ -949,6 +1151,16 @@ namespace sogen
         buffer.read_vector(data.inherited_pipes);
         buffer.read_vector(data.inherited_sections);
         buffer.read_vector(data.inherited_events);
+
+        size_t next_fd = 0;
+        for (auto& section : data.inherited_sections)
+        {
+            if (section.wire_backing_is_shared && next_fd < section_fds.size())
+            {
+                section.backing = shared_backing::adopt_fd(section_fds[next_fd++], static_cast<size_t>(section.wire_backing_size));
+            }
+        }
+        close_fds(std::vector<int>(section_fds.begin() + static_cast<std::ptrdiff_t>(next_fd), section_fds.end()));
 
         return data;
     }

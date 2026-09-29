@@ -721,7 +721,7 @@ namespace sogen
         // handle_NtUnmapViewOfSection). Real Windows' documented view/handle lifetime independence (MSDN:
         // "the file mapping object may be used until all references to it, including the memory-mapped
         // view, are released") falls out for free from this being an ordinary shared_ptr: the object is
-        // only ever actually destroyed (freeing section_object::backing_storage) once neither this map
+        // only ever actually destroyed (freeing section_object::backing) once neither this map
         // nor any `sections` entry references it anymore. Keyed by the view's own guest VA. Not
         // serialized - runtime-only, like the host aliasing it tracks.
         std::unordered_map<uint64_t, std::shared_ptr<section_object>> section_views{};

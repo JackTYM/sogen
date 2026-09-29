@@ -64,6 +64,12 @@ namespace sogen
                                               std::vector<inherited_section_handle> inherited_sections,
                                               std::vector<inherited_event_handle> inherited_events);
 
+    // Parent side of the bootstrap handshake: sends settings and inherited handles over `fd`, with every
+    // genuinely shared section backing passed as a file descriptor rather than copied.
+    bool send_child_bootstrap_data(int fd, const application_settings& settings, const std::vector<inherited_pipe_handle>& inherited_pipes,
+                                   std::vector<inherited_section_handle> inherited_sections,
+                                   const std::vector<inherited_event_handle>& inherited_events);
+
     // Used by a process running in --child-ipc-fd mode: reads the settings/inherited_pipes/
     // inherited_sections its parent sent right after spawning it.
     std::optional<child_bootstrap_data> receive_child_bootstrap_data(int fd);

@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
 #include "serialization.hpp"
+#include "shared_backing.hpp"
 
 namespace sogen
 {
@@ -45,6 +47,9 @@ namespace sogen
         uint32_t allocation_attributes{};
         uint32_t granted_access{};
         std::vector<std::byte> payload{};
+        // Section backing being handed to the peer. Never part of the serialized body: a real transport
+        // passes it out of band (a shared backing's file descriptor) and the receiver reconstructs it.
+        std::shared_ptr<shared_backing> backing{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -103,6 +108,7 @@ namespace sogen
         uint32_t allocation_attributes{};
         uint32_t granted_access{};
         std::vector<std::byte> payload{};
+        std::shared_ptr<shared_backing> backing{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {

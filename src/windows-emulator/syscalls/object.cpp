@@ -22,19 +22,13 @@ namespace sogen
         {
             constexpr ACCESS_MASK PROCESS_DUP_HANDLE = 0x0040;
 
-            // TargetProcess::Init hands the sandbox's shared pagefile-backed IPC section to a
-            // suspended child via DuplicateHandle(cur, shared_section_, child, &out,
-            // FILE_MAP_READ|FILE_MAP_WRITE|SECTION_QUERY, false, 0). On real Windows this is genuine
-            // shared memory: the broker's SharedMemIPCServer and the child's CrossCall client poll the
-            // same physical pages. Two separate host address spaces here cannot share a guest section,
-            // so this reconstructs an equivalent section in the child from a content snapshot instead
-            // (adopt_section, process_control_server.cpp) - the section is content-copied, not truly
-            // shared. A real sandbox cross-call issued through it after this point would therefore
-            // never reach the broker. That is plausibly survivable for this one scenario only because
-            // sogen does not enforce the sandbox's restricted token: the child's intercepted syscalls
-            // succeed directly here and never fall through to the broker's cross-call path in the first
-            // place - a claim that must be verified empirically against the real repro (Task 9), not
-            // assumed.
+            // TargetProcess::Init hands the sandbox's shared pagefile-backed IPC section to a suspended child
+            // via DuplicateHandle(cur, shared_section_, child, &out, FILE_MAP_READ|FILE_MAP_WRITE|
+            // SECTION_QUERY, false, 0). On real Windows this is genuine shared memory, and mojo/ipcz's
+            // NodeLinkMemory depends on the same: the section's backing (shared_backing) is a real
+            // shared-memory mapping whose descriptor is passed to the child, so both host processes map the
+            // same physical pages. Only a host without shared memory (backing not is_shared()) degrades to a
+            // one-time content snapshot.
             NTSTATUS duplicate_section_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
                                                   const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
                                                   const ULONG options)
@@ -71,7 +65,14 @@ namespace sogen
                 request.page_protection = source_section->object->section_page_protection;
                 request.allocation_attributes = source_section->object->allocation_attributes;
                 request.granted_access = same_access ? source_section->granted_access : desired_access;
-                request.payload = source_section->object->backing_storage;
+
+                auto& backing =
+                    source_section->object->ensure_backing(static_cast<size_t>(page_align_up(source_section->object->maximum_size)));
+                request.backing = source_section->object->backing;
+                if (!backing.is_shared())
+                {
+                    request.payload = backing.content();
+                }
 
                 const auto response = send_process_control_request(c, target, request);
                 if (!response)
@@ -222,9 +223,10 @@ namespace sogen
                         return STATUS_ACCESS_DENIED;
                     }
 
+                    auto backing = response->backing ? response->backing : shared_backing::create_from_content(response->payload);
                     auto s =
                         section::from_pagefile_backing(response->maximum_size, response->page_protection, response->allocation_attributes,
-                                                       same_access ? response->granted_access : desired_access, response->payload);
+                                                       same_access ? response->granted_access : desired_access, std::move(backing));
 
                     target_handle.write(c.proc.sections.store(std::move(s)));
                     return STATUS_SUCCESS;

@@ -537,7 +537,9 @@ namespace sogen::test
 
         auto* const section_entry = b.process.sections.get(minted);
         ASSERT_NE(section_entry, nullptr);
-        ASSERT_EQ(section_entry->object->backing_storage, content);
+        ASSERT_NE(section_entry->object->backing, nullptr);
+        ASSERT_GE(section_entry->object->backing->size(), content.size());
+        ASSERT_TRUE(std::equal(content.begin(), content.end(), section_entry->object->backing->data()));
         ASSERT_EQ(section_entry->object->maximum_size, content.size());
         ASSERT_EQ(section_entry->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }

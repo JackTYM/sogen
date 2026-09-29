@@ -18,6 +18,11 @@ target_link_libraries(windows-emulator-test PRIVATE
   vulkan-bridge-marshal
 )
 
+if(NOT WIN32 AND NOT EMSCRIPTEN AND TARGET windows-analyzer)
+  target_link_libraries(windows-emulator-test PRIVATE windows-analyzer)
+  target_include_directories(windows-emulator-test PRIVATE "${PROJECT_SOURCE_DIR}/src/windows-analyzer")
+endif()
+
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   add_dependencies(windows-emulator-test test-sample)
 endif()

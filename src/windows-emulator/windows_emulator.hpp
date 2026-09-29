@@ -91,26 +91,40 @@ namespace sogen
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
         ACCESS_MASK granted_access{};
-        std::vector<std::byte> content{};
+        std::shared_ptr<shared_backing> backing{};
+        // Set by deserialize when the sender's backing is a genuinely shared mapping: its descriptor
+        // travels out of band, and the receiving transport adopts it into `backing`.
+        bool wire_backing_is_shared{};
+        uint64_t wire_backing_size{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
+            const auto shared = this->backing && this->backing->is_shared();
+
             buffer.write(this->target_handle);
             buffer.write(this->maximum_size);
             buffer.write(this->section_page_protection);
             buffer.write(this->allocation_attributes);
             buffer.write(this->granted_access);
-            buffer.write_vector(this->content);
+            buffer.write(shared);
+            buffer.write(static_cast<uint64_t>(this->backing ? this->backing->size() : 0));
+            buffer.write_vector(shared || !this->backing ? std::vector<std::byte>{} : this->backing->content());
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
         {
+            std::vector<std::byte> content{};
+
             buffer.read(this->target_handle);
             buffer.read(this->maximum_size);
             buffer.read(this->section_page_protection);
             buffer.read(this->allocation_attributes);
             buffer.read(this->granted_access);
-            buffer.read_vector(this->content);
+            buffer.read(this->wire_backing_is_shared);
+            buffer.read(this->wire_backing_size);
+            buffer.read_vector(content);
+
+            this->backing = this->wire_backing_is_shared ? nullptr : shared_backing::create_from_content(content);
         }
     };
 

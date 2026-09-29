@@ -532,12 +532,12 @@ namespace sogen
             // emulator on a stale address.
             std::erase_if(process.audio_render_streams, [&](auto& stream) {
                 const auto section = stream.section.lock();
-                if (!section || write_cursor_offset + sizeof(uint64_t) > section->backing_storage.size())
+                if (!section || !section->backing || write_cursor_offset + sizeof(uint64_t) > section->backing->size())
                 {
                     return true; // section gone or never committed -> stop tracking it
                 }
 
-                auto& backing = section->backing_storage;
+                const auto& backing = *section->backing;
 
                 uint64_t write_cursor = 0;
                 std::memcpy(&write_cursor, backing.data() + write_cursor_offset, sizeof(write_cursor));

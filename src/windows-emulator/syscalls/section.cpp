@@ -505,7 +505,7 @@ namespace sogen
             const auto protection = map_nt_to_emulator_protection(section_entry->object->section_page_protection);
 
             // Pagefile-backed section: one persistent, host-owned backing buffer per section (see
-            // section_object::backing_storage), but a FRESH guest VA aliased onto it for every single
+            // section_object::backing), but a FRESH guest VA aliased onto it for every single
             // NtMapViewOfSection call - matching real Windows, which always hands back a distinct VA per
             // view even for the same section/offset while still sharing the underlying pages across every
             // view. Handing out the SAME address for every view (the old behavior) broke real callers that
@@ -529,10 +529,10 @@ namespace sogen
                 const auto view_length = backing_size - aligned_offset;
                 const auto reserve_only = section_entry->object->allocation_attributes == SEC_RESERVE;
 
-                auto& backing_storage = section_entry->object->backing_storage;
-                if (!reserve_only && backing_storage.empty())
+                std::byte* backing_data = nullptr;
+                if (!reserve_only)
                 {
-                    backing_storage.resize(backing_size);
+                    backing_data = section_entry->object->ensure_backing(backing_size).data();
                 }
 
                 const auto view_address = c.win_emu.memory.find_free_allocation_base(view_length);
@@ -541,11 +541,11 @@ namespace sogen
                     return STATUS_NO_MEMORY;
                 }
 
-                const auto mapped =
-                    reserve_only ? c.win_emu.memory.allocate_memory(view_address, view_length, protection, true,
-                                                                    memory_region_kind::pagefile_section_view)
-                                 : c.win_emu.memory.allocate_host_memory(view_address, view_length, backing_storage.data() + aligned_offset,
-                                                                         protection, memory_region_kind::pagefile_section_view);
+                const auto mapped = reserve_only
+                                        ? c.win_emu.memory.allocate_memory(view_address, view_length, protection, true,
+                                                                           memory_region_kind::pagefile_section_view)
+                                        : c.win_emu.memory.allocate_host_memory(view_address, view_length, backing_data + aligned_offset,
+                                                                                protection, memory_region_kind::pagefile_section_view);
                 if (!mapped)
                 {
                     return STATUS_NO_MEMORY;
@@ -764,7 +764,7 @@ namespace sogen
                 if (c.win_emu.memory.release_memory(region_info.allocation_base, 0))
                 {
                     // No-op for kinds other than pagefile_section_view, which never appear as keys here.
-                    // A pagefile section's backing buffer (section_object::backing_storage) is kept alive by
+                    // A pagefile section's backing buffer (section_object::backing) is kept alive by
                     // ordinary shared_ptr refcounting, not by this region existing - erasing this view's own
                     // reference is what may allow the section to actually be destroyed, if no handle or other
                     // view references it anymore.

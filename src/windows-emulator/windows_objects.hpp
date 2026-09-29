@@ -2,8 +2,10 @@
 
 #include "handles.hpp"
 #include "memory_manager.hpp"
+#include "shared_backing.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <string_view>
 #include <serialization_helper.hpp>
 #include <utils/file_handle.hpp>
@@ -765,18 +767,44 @@ namespace sogen
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
-        // Shared backing for a pagefile-backed section: a host-owned buffer, allocated once (lazily, on
-        // first successful map, sized to maximum_size) and reused by every view. Real Windows hands a
-        // distinct guest VA to every NtMapViewOfSection call while keeping the underlying pages shared -
-        // handle_NtMapViewOfSection aliases a fresh guest address onto this same buffer per view instead
+        // Shared backing for a pagefile-backed section: host-owned memory, allocated once (lazily, on
+        // first successful map or when the section is first shared with another process, sized to
+        // maximum_size) and reused by every view. Real Windows hands a distinct guest VA to every
+        // NtMapViewOfSection call while keeping the underlying pages shared -
+        // handle_NtMapViewOfSection aliases a fresh guest address onto this same memory per view instead
         // of reusing one address, so independently-live C++-level mappings of the same section never
-        // collide. This object's own lifetime (and therefore this buffer's) is governed by ordinary
-        // shared_ptr refcounting: a reference is held by every open handle (section::object) and every
+        // collide. On POSIX hosts this is a real MAP_SHARED mapping (see shared_backing), which is also
+        // what lets a section duplicated into another sogen host process stay genuinely shared with it.
+        // This object's own lifetime (and therefore the backing's) is governed by ordinary shared_ptr
+        // refcounting: a reference is held by every open handle (section::object) and every
         // currently-mapped view (process_context::section_views), matching real Windows' documented
         // view/handle lifetime independence. Not serialized, like other host-aliased memory in this
         // codebase (see memory_manager::allocate_host_memory) - content is best-effort-only across a
         // serialize/deserialize round trip.
-        std::vector<std::byte> backing_storage{};
+        std::shared_ptr<shared_backing> backing{};
+
+        // Makes sure the section owns at least `size` bytes of backing, growing (and copying) an
+        // existing, too-small one. Growing detaches the section from any process it was already shared
+        // with, which only happens for sections whose real size was unknown when first backed.
+        shared_backing& ensure_backing(const size_t size)
+        {
+            if (!this->backing)
+            {
+                this->backing = shared_backing::create(size);
+            }
+            else if (this->backing->size() < size)
+            {
+                auto grown = shared_backing::create(size);
+                if (this->backing->size() != 0)
+                {
+                    std::memcpy(grown->data(), this->backing->data(), this->backing->size());
+                }
+                this->backing = std::move(grown);
+            }
+
+            return *this->backing;
+        }
+
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
         bool is_image() const
@@ -866,20 +894,21 @@ namespace sogen
             return copy;
         }
 
-        // Reconstructs an equivalent pagefile-backed section from a descriptor plus a content
-        // snapshot - the shape both a freshly-spawned child's inherited-handle bootstrap
-        // (recreate_inherited_section, main.cpp) and a cross-process adopt_section request
-        // (execute_adopt_section, process_control_server.cpp) receive over their respective process
-        // boundaries.
+        // Reconstructs an equivalent pagefile-backed section from a descriptor plus its backing - the
+        // shape both a freshly-spawned child's inherited-handle bootstrap (recreate_inherited_section,
+        // main.cpp) and a cross-process adopt_section request (execute_adopt_section,
+        // process_control_server.cpp) receive over their respective process boundaries. The backing is
+        // either a genuinely shared mapping of the sender's section or, on hosts without shared memory,
+        // a private snapshot of its content.
         static section from_pagefile_backing(const uint64_t maximum_size, const uint32_t section_page_protection,
                                              const uint32_t allocation_attributes, const ACCESS_MASK granted_access,
-                                             std::vector<std::byte> content)
+                                             std::shared_ptr<shared_backing> backing)
         {
             section s{};
             s.object->maximum_size = maximum_size;
             s.object->section_page_protection = section_page_protection;
             s.object->allocation_attributes = allocation_attributes;
-            s.object->backing_storage = std::move(content);
+            s.object->backing = std::move(backing);
             s.granted_access = granted_access;
             return s;
         }

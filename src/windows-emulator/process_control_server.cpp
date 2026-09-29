@@ -393,8 +393,9 @@ namespace sogen
 
         void execute_adopt_section(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
+            auto backing = request.backing ? request.backing : shared_backing::create_from_content(request.payload);
             auto s = section::from_pagefile_backing(request.maximum_size, request.page_protection, request.allocation_attributes,
-                                                    request.granted_access, request.payload);
+                                                    request.granted_access, std::move(backing));
 
             const auto h = target.process.sections.store(std::move(s));
 
@@ -461,7 +462,13 @@ namespace sogen
                 response.page_protection = source_section->object->section_page_protection;
                 response.allocation_attributes = source_section->object->allocation_attributes;
                 response.granted_access = source_section->granted_access;
-                response.payload = source_section->object->backing_storage;
+                auto& backing =
+                    source_section->object->ensure_backing(static_cast<size_t>(page_align_up(source_section->object->maximum_size)));
+                response.backing = source_section->object->backing;
+                if (!backing.is_shared())
+                {
+                    response.payload = backing.content();
+                }
                 response.status = STATUS_SUCCESS;
                 return;
             }

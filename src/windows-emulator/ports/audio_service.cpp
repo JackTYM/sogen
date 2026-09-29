@@ -417,8 +417,8 @@ namespace sogen
                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                     };
 
-                render_section.object->backing_storage.resize(static_cast<size_t>(render_section_size));
-                std::memcpy(render_section.object->backing_storage.data(), render_control_header.data(), render_control_header.size());
+                auto& render_backing = render_section.object->ensure_backing(static_cast<size_t>(render_section_size));
+                std::memcpy(render_backing.data(), render_control_header.data(), render_control_header.size());
 
                 // Register the render section so the per-context-switch audio-engine tick can advance its
                 // read cursor (see process_context::audio_render_stream) - reading/writing the backing buffer

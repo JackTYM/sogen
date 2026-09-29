@@ -511,7 +511,8 @@ namespace sogen::test
     {
         section make_pagefile_section(const std::vector<std::byte>& content, const ACCESS_MASK granted_access)
         {
-            return section::from_pagefile_backing(content.size(), PAGE_READWRITE, SEC_COMMIT, granted_access, content);
+            return section::from_pagefile_backing(content.size(), PAGE_READWRITE, SEC_COMMIT, granted_access,
+                                                  shared_backing::create_from_content(content));
         }
     }
 
@@ -545,7 +546,8 @@ namespace sogen::test
 
         auto* const child_section = child.process.sections.get(minted);
         ASSERT_NE(child_section, nullptr);
-        ASSERT_EQ(child_section->object->backing_storage, content);
+        ASSERT_NE(child_section->object->backing, nullptr);
+        ASSERT_TRUE(std::equal(content.begin(), content.end(), child_section->object->backing->data()));
         ASSERT_EQ(child_section->object->maximum_size, content.size());
         ASSERT_EQ(child_section->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
@@ -770,7 +772,8 @@ namespace sogen::test
 
         auto* const parent_section = parent.process.sections.get(minted);
         ASSERT_NE(parent_section, nullptr);
-        ASSERT_EQ(parent_section->object->backing_storage, content);
+        ASSERT_NE(parent_section->object->backing, nullptr);
+        ASSERT_TRUE(std::equal(content.begin(), content.end(), parent_section->object->backing->data()));
         ASSERT_EQ(parent_section->object->maximum_size, content.size());
         ASSERT_EQ(parent_section->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
