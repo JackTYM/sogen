@@ -55,14 +55,14 @@ namespace sogen
             return this->state.word(0).load(std::memory_order_acquire) != 0;
         }
 
-        void set_signaled(const bool signaled)
+        void set_signaled(const bool signaled) const
         {
             this->state.word(0).store(signaled ? 1 : 0, std::memory_order_release);
         }
 
         // Atomically clears the signal, so two processes waiting on one auto-reset event can never both
         // consume it.
-        bool try_consume_signal()
+        bool try_consume_signal() const
         {
             uint64_t expected = 1;
             return this->state.word(0).compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
@@ -609,7 +609,7 @@ namespace sogen
             return this->state.word(0).load(std::memory_order_acquire) >> owner_shift;
         }
 
-        void restore(const uint32_t locked_count, const uint64_t owner_key, const bool abandoned)
+        void restore(const uint32_t locked_count, const uint64_t owner_key, const bool abandoned) const
         {
             this->state.word(0).store(pack(locked_count, abandoned, owner_key), std::memory_order_release);
         }
@@ -620,7 +620,7 @@ namespace sogen
             return (value & abandoned_bit) != 0 || (value & lock_count_mask) == 0 || (value >> owner_shift) == owner_key;
         }
 
-        std::optional<bool> try_lock(const uint64_t owner_key)
+        std::optional<bool> try_lock(const uint64_t owner_key) const
         {
             auto value = this->state.word(0).load(std::memory_order_acquire);
             while (true)
@@ -649,7 +649,7 @@ namespace sogen
             }
         }
 
-        std::pair<uint32_t, bool> release(const uint64_t owner_key)
+        std::pair<uint32_t, bool> release(const uint64_t owner_key) const
         {
             auto value = this->state.word(0).load(std::memory_order_acquire);
             while (true)
@@ -669,7 +669,7 @@ namespace sogen
             }
         }
 
-        void abandon()
+        void abandon() const
         {
             auto value = this->state.word(0).load(std::memory_order_acquire);
             while ((value & lock_count_mask) != 0)
@@ -681,7 +681,7 @@ namespace sogen
             }
         }
 
-        void abandon_if_owned_by(const uint64_t owner_key)
+        void abandon_if_owned_by(const uint64_t owner_key) const
         {
             auto value = this->state.word(0).load(std::memory_order_acquire);
             while ((value & lock_count_mask) != 0 && (value >> owner_shift) == owner_key)
@@ -1037,13 +1037,13 @@ namespace sogen
             return static_cast<uint32_t>(this->state.word(1).load(std::memory_order_acquire));
         }
 
-        void initialize(const uint32_t initial_count, const uint32_t maximum_count)
+        void initialize(const uint32_t initial_count, const uint32_t maximum_count) const
         {
             this->state.word(0).store(initial_count, std::memory_order_release);
             this->state.word(1).store(maximum_count, std::memory_order_release);
         }
 
-        bool try_lock()
+        bool try_lock() const
         {
             auto value = this->state.word(0).load(std::memory_order_acquire);
             while (value > 0)
@@ -1057,7 +1057,7 @@ namespace sogen
             return false;
         }
 
-        std::pair<uint32_t, bool> release(const uint32_t release_count)
+        std::pair<uint32_t, bool> release(const uint32_t release_count) const
         {
             const auto maximum = this->max_count();
             auto value = this->state.word(0).load(std::memory_order_acquire);

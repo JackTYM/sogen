@@ -26,6 +26,7 @@ namespace sogen
 
         enum class named_object_kind : uint32_t
         {
+            none = 0,
             event = 1,
             mutant = 2,
             semaphore = 3,
@@ -151,7 +152,7 @@ namespace sogen
 
         std::atomic<uint64_t>& word(const size_t index) const
         {
-            return this->slot_ ? this->slot_->words()[index] : this->local_[index];
+            return this->slot_ ? this->slot_->words()[index] : this->local_.at(index);
         }
 
         bool is_shared() const
