@@ -4541,6 +4541,30 @@ namespace sogen
                 // 0x6dc95 (a resolved interface-stub/delegate call reached via the SAME fast path,
                 // right after the 0x6dc34 `jz` is NOT taken), whose own success/failure is checked
                 // immediately after at RVA 0x6dc9b (`test al, al`). Watching both directly.
+
+                // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
+                // size-sufficiency check passing every time - one more branch sits between them:
+                // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
+                // `esi+0x10`) - if `this[0x34] == 1`, execution jumps straight to an error/cleanup
+                // path (`loc_1006DD9F`), skipping 0x6dc95 entirely. This looks like a real
+                // Channel-level state flag (plausibly "peer disconnected"/"is dead") - watching it
+                // directly tests whether THIS is the actual blocker.
+                const auto channel_state_check = mod.image_base + 0x6dc40;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own "
+                                   "channel-state check at 0x%llx\n",
+                                   static_cast<unsigned long long>(channel_state_check));
+                win_emu->emu().hook_memory_execution(channel_state_check, [win_emu, channel_state_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto channel_ptr = emu.reg<uint32_t>(x86_register::eax);
+                    uint32_t state_flag{};
+                    emu.try_read_memory(channel_ptr + 0x34, &state_flag, sizeof(state_flag));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own "
+                                       "channel-state check at 0x%llx, tid=%u channel_ptr=0x%x state_flag=%u "
+                                       "will_bail=%d\n",
+                                       static_cast<unsigned long long>(channel_state_check), win_emu->current_thread().id, channel_ptr,
+                                       state_flag, state_flag == 1 ? 1 : 0);
+                });
+
                 const auto real_dispatch_call = mod.image_base + 0x6dc95;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
                                    "dispatch call at 0x%llx\n",
