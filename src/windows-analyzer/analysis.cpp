@@ -4054,6 +4054,40 @@ namespace sogen
                         static_cast<unsigned long long>(address), static_cast<unsigned long long>(creation_data_ptr), error_code,
                         static_cast<int32_t>(error_code));
                 });
+
+                // `#558` found `ipcz::Router::SendOutboundParcel` never fires despite this reply
+                // callback being invoked - but that guessed the wrong function name. Rather than
+                // continue guessing, this hooks `OnceCallback<void(StructPtr<
+                // EmbeddedBrowserCreationData>)>::Run`'s own real, symbol-confirmed body (RVA
+                // 0x6dd2408, same msedge.dll image base as every other hook in this file) at its
+                // own CFG-guarded indirect dispatch (`call cs:__guard_dispatch_icall_fptr`) -
+                // reading `rax` live resolves the REAL bound target the reply callback dispatches
+                // into, the same technique already used successfully for the client-side
+                // `CreateCoreWebView2ControllerWithOptions` resolution in `#556` - see
+                // project_solidworks_bringup.md #559.
+                const auto run_dispatch_address = mod.image_base + 0x6dd2408;
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching OnceCallback::Run's own "
+                                   "indirect dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(run_dispatch_address));
+
+                win_emu->emu().hook_memory_execution(run_dispatch_address, [win_emu, run_dispatch_address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+                    const auto bind_state = emu.reg<uint64_t>(x86_register::rcx);
+                    const auto struct_ptr_arg = emu.reg<uint64_t>(x86_register::rdx);
+
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit OnceCallback::Run's own "
+                                       "indirect dispatch at 0x%llx, tid=%u call_target=0x%llx (%s+0x%llx) "
+                                       "bind_state=0x%llx struct_ptr_arg=0x%llx\n",
+                                       static_cast<unsigned long long>(run_dispatch_address), win_emu->current_thread().id,
+                                       static_cast<unsigned long long>(call_target), target_mod_name,
+                                       static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(bind_state),
+                                       static_cast<unsigned long long>(struct_ptr_arg));
+                });
             }
 
             // Coarse bisection through `ContinueInitializeWithProfile`'s own success-branch body,
