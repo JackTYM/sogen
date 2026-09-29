@@ -4769,6 +4769,38 @@ namespace sogen
                                            resolved_target);
                     });
 
+                // `#567` resolved the real watcher-callback target above to
+                // `mojo::SimpleWatcher::Context::CallNotify` -> `Context::Notify` (real, PDB-named
+                // symbols - the actual application-level mojo watcher entry point). Its own
+                // decompiled body has a real, decisive fork: if already on the expected sequence
+                // (a real `TaskRunner::RunsTasksInCurrentSequence`-style check), it calls
+                // `mojo::SimpleWatcher::OnHandleReady` DIRECTLY (RVA 0x3643a4) - the true final hop
+                // toward reading the message and reaching `HandleValidatedMessage`. Otherwise, it
+                // POSTS `OnHandleReady` as a task via `base::TaskRunner::PostTask` (RVA 0x364435) to
+                // run later on the correct sequence - if sogen's own task/message-loop emulation for
+                // that sequence never actually runs the posted task, this would perfectly explain
+                // every step up to here firing correctly while `HandleValidatedMessage` never does.
+                // Watching both paths directly.
+                const auto direct_on_handle_ready = mod.image_base + 0x3643a4;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Notify's own direct "
+                                   "OnHandleReady call at 0x%llx\n",
+                                   static_cast<unsigned long long>(direct_on_handle_ready));
+                win_emu->emu().hook_memory_execution(direct_on_handle_ready, [win_emu, direct_on_handle_ready](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Notify's own direct "
+                                       "OnHandleReady call at 0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(direct_on_handle_ready), win_emu->current_thread().id);
+                });
+
+                const auto post_task_call = mod.image_base + 0x364435;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Notify's own PostTask call at "
+                                   "0x%llx\n",
+                                   static_cast<unsigned long long>(post_task_call));
+                win_emu->emu().hook_memory_execution(post_task_call, [win_emu, post_task_call](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Notify's own PostTask call at "
+                                       "0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(post_task_call), win_emu->current_thread().id);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
