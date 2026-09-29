@@ -4522,59 +4522,49 @@ namespace sogen
                                        declared_num_bytes, a3_available, declared_num_bytes <= a3_available ? 1 : 0);
                 });
 
-                // Decompiled `Channel::TryDispatchMessage_0` (called from `OnReadComplete`'s own
-                // internal loop): the real wire-format `MessageHeader::message_type` field lives at
-                // byte offset 6 of the raw header (`cmp word ptr [edi+6], 2`, RVA 0x6dcbe) - if it's
-                // >= 2 the message is routed to `Channel::OnControlMessage` INSTEAD of the real
-                // delegate dispatch, a plausible silent-misroute mechanism for an otherwise-valid
-                // reply. If it IS < 2, the code null-checks a delegate/vtable pointer (RVA 0x6dccd)
-                // before making the real CFG-guarded delegate-dispatch call (`call ebx`, RVA
-                // 0x6dd2e) that ultimately leads to `HandleValidatedMessage`. Watching all three to
-                // pinpoint exactly which of these branches our reply's own read actually takes - see
-                // project_solidworks_bringup.md #560.
-                const auto message_type_cmp = mod.image_base + 0x6dcbe;
-                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage's own "
-                                   "message_type comparison at 0x%llx\n",
-                                   static_cast<unsigned long long>(message_type_cmp));
-                win_emu->emu().hook_memory_execution(message_type_cmp, [win_emu, message_type_cmp](cpu_interface&, uint64_t) {
+                // CORRECTION (see project_solidworks_bringup.md #563): RVA 0x6dcbe (`cmp word ptr
+                // [edi+6], 2`) was originally believed to be `TryDispatchMessage_0`'s own general
+                // `message_type` dispatch gate, reached by every normal message. A full line-by-line
+                // disassembly trace (0x6d8bb through 0x6dcbe) proved this wrong: 0x6dcbe is only
+                // reached via a `jz` at RVA 0x6dc34, taken ONLY when a specific derived WORD value is
+                // exactly zero - a rare degenerate case, not the general path. That derived value, for
+                // a "no attached handles" message (the real fast path, `[header+2] == 0`), is the LOW
+                // 16 BITS of the header's own `num_bytes` DWORD field (at header offset 4) - meaning
+                // it's zero only for a vanishingly rare message whose size is an exact multiple of
+                // 65536. For our reply (`num_bytes=112`), this is non-zero, so 0x6dcbe is correctly
+                // NEVER reached - explaining every prior run's own zero hits. Also corrected: the real
+                // wire header layout is `num_header_bytes` (WORD, offset 0, must be >= 8),
+                // `<handle-count-like field>` (WORD, offset 2, 0 triggers the no-handles fast path),
+                // `num_bytes` (DWORD, offset 4, the total declared message size) - not the
+                // num_bytes-then-message_type layout the original hook assumed. The REAL general
+                // dispatch call our message actually takes is `call dword ptr [esi+14h]` at RVA
+                // 0x6dc95 (a resolved interface-stub/delegate call reached via the SAME fast path,
+                // right after the 0x6dc34 `jz` is NOT taken), whose own success/failure is checked
+                // immediately after at RVA 0x6dc9b (`test al, al`). Watching both directly.
+                const auto real_dispatch_call = mod.image_base + 0x6dc95;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
+                                   "dispatch call at 0x%llx\n",
+                                   static_cast<unsigned long long>(real_dispatch_call));
+                win_emu->emu().hook_memory_execution(real_dispatch_call, [win_emu, real_dispatch_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
-                    const auto header_ptr = emu.reg<uint32_t>(x86_register::edi);
-                    uint32_t num_bytes{};
-                    emu.try_read_memory(header_ptr, &num_bytes, sizeof(num_bytes));
-                    uint16_t num_header_bytes{};
-                    emu.try_read_memory(header_ptr + 4, &num_header_bytes, sizeof(num_header_bytes));
-                    uint16_t message_type{};
-                    emu.try_read_memory(header_ptr + 6, &message_type, sizeof(message_type));
-                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage's own message_type comparison "
-                                       "at 0x%llx, tid=%u header_ptr=0x%x num_bytes=%u num_header_bytes=%u message_type=%u\n",
-                                       static_cast<unsigned long long>(message_type_cmp), win_emu->current_thread().id, header_ptr,
-                                       num_bytes, num_header_bytes, message_type);
+                    const auto esi = emu.reg<uint32_t>(x86_register::esi);
+                    uint32_t resolved_target{};
+                    emu.try_read_memory(esi + 0x14, &resolved_target, sizeof(resolved_target));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own real "
+                                       "dispatch call at 0x%llx, tid=%u resolved_target=0x%x\n",
+                                       static_cast<unsigned long long>(real_dispatch_call), win_emu->current_thread().id, resolved_target);
                 });
 
-                const auto null_delegate_check = mod.image_base + 0x6dccd;
-                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage's own "
-                                   "null-delegate check at 0x%llx\n",
-                                   static_cast<unsigned long long>(null_delegate_check));
-                win_emu->emu().hook_memory_execution(null_delegate_check, [win_emu, null_delegate_check](cpu_interface&, uint64_t) {
+                const auto real_dispatch_return = mod.image_base + 0x6dc9b;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
+                                   "dispatch return value at 0x%llx\n",
+                                   static_cast<unsigned long long>(real_dispatch_return));
+                win_emu->emu().hook_memory_execution(real_dispatch_return, [win_emu, real_dispatch_return](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
-                    const auto delegate_ptr = emu.reg<uint32_t>(x86_register::ecx);
-                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage's own null-delegate check at "
-                                       "0x%llx, tid=%u delegate_ptr=0x%x\n",
-                                       static_cast<unsigned long long>(null_delegate_check), win_emu->current_thread().id, delegate_ptr);
-                });
-
-                const auto delegate_dispatch_call = mod.image_base + 0x6dd2e;
-                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage's own real "
-                                   "delegate dispatch call at 0x%llx\n",
-                                   static_cast<unsigned long long>(delegate_dispatch_call));
-                win_emu->emu().hook_memory_execution(delegate_dispatch_call, [win_emu, delegate_dispatch_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
-                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ebx);
-                    const auto delegate_this = emu.reg<uint32_t>(x86_register::ecx);
-                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage's own real delegate "
-                                       "dispatch call at 0x%llx, tid=%u resolved_target=0x%x delegate_this=0x%x\n",
-                                       static_cast<unsigned long long>(delegate_dispatch_call), win_emu->current_thread().id,
-                                       resolved_target, delegate_this);
+                    const auto al = emu.reg<uint8_t>(x86_register::al);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own real "
+                                       "dispatch return value at 0x%llx, tid=%u succeeded=%u\n",
+                                       static_cast<unsigned long long>(real_dispatch_return), win_emu->current_thread().id, al);
                 });
             }
         }
