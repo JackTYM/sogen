@@ -4417,6 +4417,29 @@ namespace sogen
                                        "0x%llx, tid=%u dispatched=%u\n",
                                        static_cast<unsigned long long>(handle_validated_return), win_emu->current_thread().id, dispatched);
                 });
+
+                // `#560`'s own live run showed ZERO hits on `HandleValidatedMessage`, despite the
+                // full transport chain (write, relay, and a SYNCHRONOUS client-side `NtReadFile`)
+                // succeeding - narrowing the gap to somewhere between the raw read and this
+                // dispatch point. `mojo::core::Channel::OnReadComplete`'s own real entry (RVA
+                // 0x6d3f0, real PDB name) is the read-completion callback that turns raw pipe bytes
+                // into decoded messages and eventually calls `HandleValidatedMessage` - watching its
+                // entry tests whether even THIS gets invoked for the client's own successful read.
+                const auto on_read_complete_entry = mod.image_base + 0x6d3f0;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Channel::OnReadComplete entry at "
+                                   "0x%llx\n",
+                                   static_cast<unsigned long long>(on_read_complete_entry));
+                win_emu->emu().hook_memory_execution(on_read_complete_entry, [win_emu, on_read_complete_entry](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t bytes_transferred{};
+                    emu.try_read_memory(esp + 4, &bytes_transferred, sizeof(bytes_transferred));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Channel::OnReadComplete entry at "
+                                       "0x%llx, tid=%u this=0x%x bytes_transferred=%u\n",
+                                       static_cast<unsigned long long>(on_read_complete_entry), win_emu->current_thread().id, this_ptr,
+                                       bytes_transferred);
+                });
             }
         }
 
