@@ -4724,6 +4724,28 @@ namespace sogen
                                        resolved_target);
                 });
 
+                // `#566` resolved the real callback above to `mojo::core::ipcz_driver::MojoTrap::
+                // TrapEventHandler` -> `MojoTrap::HandleEvent` (real, PDB-named symbols) - genuine
+                // mojo-core embedder-API trap dispatch, confirming the whole ipcz-to-mojo-core
+                // bridge fires. `HandleEvent`'s own body has several gates (a state byte at
+                // `this[58]`, flag bytes at `v3+40`/`v3+41`) before its own real dispatch call to
+                // `MojoTrap::DispatchOrQueueEvent` (RVA 0x7693c) - the function that would finally
+                // invoke the REAL registered watcher callback (mojo::Watcher/SimpleWatcher's own
+                // C++-level handler, the actual last hop toward reading the message and reaching
+                // `HandleValidatedMessage`). Watching this call directly settles whether any of
+                // those gates silently swallow the event before real dispatch.
+                const auto dispatch_or_queue_call = mod.image_base + 0x7693c;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching MojoTrap::DispatchOrQueueEvent "
+                                   "call at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_or_queue_call));
+                win_emu->emu().hook_memory_execution(dispatch_or_queue_call, [win_emu, dispatch_or_queue_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto trap_ptr = emu.reg<uint32_t>(x86_register::esi);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit MojoTrap::DispatchOrQueueEvent "
+                                       "call at 0x%llx, tid=%u trap_ptr=0x%x\n",
+                                       static_cast<unsigned long long>(dispatch_or_queue_call), win_emu->current_thread().id, trap_ptr);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
