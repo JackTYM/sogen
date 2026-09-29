@@ -4374,6 +4374,49 @@ namespace sogen
                                        static_cast<unsigned long long>(init_completed_address), win_emu->current_thread().id, reply_ptr,
                                        reply_error);
                 });
+
+                // `#560` verified the ENTIRE transport chain succeeds - the browser process's reply
+                // is written, relayed across sogen's own host-process IPC, and read synchronously by
+                // the client. `mojo::InterfaceEndpointClient::HandleValidatedMessage`'s own real body
+                // (RVA 0x35614c, real PDB name) is the next real hop after that read: for a RESPONSE
+                // message (its own header flags bit 2 set), it looks the message's own embedded
+                // request_id up in a `pending_async_responses_`/`sync_responses_` map that was
+                // populated when the ORIGINAL `Initialize()` request was sent - if no matching entry
+                // is found, the message is SILENTLY DROPPED (returns false, no error, no crash) and
+                // the awaited response callback (ultimately `InitializeWebViewCompleted`) never
+                // fires. Watching this function's own entry and real return value (RVA 0x356612, `mov
+                // eax, ebx` right before the epilogue) directly tests whether this exact
+                // request_id-matching lookup is where the reply gets lost - see
+                // project_solidworks_bringup.md #560.
+                const auto handle_validated_entry = mod.image_base + 0x35614c;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "InterfaceEndpointClient::HandleValidatedMessage entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(handle_validated_entry));
+                win_emu->emu().hook_memory_execution(handle_validated_entry, [win_emu, handle_validated_entry](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t message_ptr{};
+                    emu.try_read_memory(esp + 4, &message_ptr, sizeof(message_ptr));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                       "InterfaceEndpointClient::HandleValidatedMessage entry at 0x%llx, tid=%u "
+                                       "this=0x%x message=0x%x\n",
+                                       static_cast<unsigned long long>(handle_validated_entry), win_emu->current_thread().id, this_ptr,
+                                       message_ptr);
+                });
+
+                const auto handle_validated_return = mod.image_base + 0x356612;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "InterfaceEndpointClient::HandleValidatedMessage's own return value at 0x%llx\n",
+                                   static_cast<unsigned long long>(handle_validated_return));
+                win_emu->emu().hook_memory_execution(handle_validated_return, [win_emu, handle_validated_return](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto dispatched = emu.reg<uint32_t>(x86_register::ebx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                       "InterfaceEndpointClient::HandleValidatedMessage's own return value at "
+                                       "0x%llx, tid=%u dispatched=%u\n",
+                                       static_cast<unsigned long long>(handle_validated_return), win_emu->current_thread().id, dispatched);
+                });
             }
         }
 
