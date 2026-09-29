@@ -599,6 +599,62 @@ namespace sogen
                 return &surface;
             }
 
+            // WS_CLIPSIBLINGS means this DC's owning window must never draw over a sibling window that
+            // overlaps it (real win32 enforces this via the DC's clip region, independent of z-order). Returns
+            // the overlapping visible siblings' rects in the same surface-absolute coordinate space as
+            // resolve_dc_surface's origin_x/origin_y, so callers can skip writing into them.
+            std::vector<RECT> compute_sibling_clip_exclusions(const syscall_context& c, const hdc dc, const int32_t origin_x,
+                                                              const int32_t origin_y)
+            {
+                std::vector<RECT> exclusions{};
+
+                const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+                if (dc_it == c.proc.gdi_dc_states.end() || dc_it->second.selected_bitmap != 0 || dc_it->second.target_window == 0)
+                {
+                    return exclusions;
+                }
+
+                const auto* win = c.proc.windows.get(dc_it->second.target_window);
+                if (!win || (win->style & WS_CLIPSIBLINGS) == 0 || win->parent_handle == 0)
+                {
+                    return exclusions;
+                }
+
+                for (const auto& [handle, sibling] : c.proc.windows)
+                {
+                    (void)handle;
+                    if (sibling.handle == win->handle || sibling.parent_handle != win->parent_handle)
+                    {
+                        continue;
+                    }
+
+                    if ((sibling.style & WS_VISIBLE) == 0 || !c.proc.is_window_effectively_visible(sibling.handle))
+                    {
+                        continue;
+                    }
+
+                    const auto sib_left = origin_x - win->x + sibling.x;
+                    const auto sib_top = origin_y - win->y + sibling.y;
+                    exclusions.push_back(
+                        RECT{.left = sib_left, .top = sib_top, .right = sib_left + sibling.width, .bottom = sib_top + sibling.height});
+                }
+
+                return exclusions;
+            }
+
+            bool point_in_rects(const int32_t x, const int32_t y, const std::vector<RECT>& rects)
+            {
+                for (const auto& r : rects)
+                {
+                    if (x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
             bool get_dc_state_and_surface(const syscall_context& c, const hdc dc, gdi_dc_state*& dc_state, gdi_bitmap_surface*& surface,
                                           int32_t& origin_x, int32_t& origin_y, uint32_t* present_handle = nullptr)
             {
@@ -3643,13 +3699,21 @@ namespace sogen
             }
 
             const uint32_t pattern = get_dc_brush_color(c, dst_dc);
+            const auto clip_exclusions = compute_sibling_clip_exclusions(c, dst_dc, dst_origin_x, dst_origin_y);
 
             for (size_t row = 0; row < blt_height; ++row)
             {
                 auto* dst_row = dst_surface->pixels.data() + (static_cast<size_t>(dy) + row) * dst_surface->width + static_cast<size_t>(dx);
+                const auto abs_y = static_cast<int32_t>(dy + static_cast<int64_t>(row));
 
                 for (size_t col = 0; col < blt_width; ++col)
                 {
+                    if (!clip_exclusions.empty() &&
+                        point_in_rects(static_cast<int32_t>(dx + static_cast<int64_t>(col)), abs_y, clip_exclusions))
+                    {
+                        continue;
+                    }
+
                     const size_t i = row * blt_width + col;
                     const uint32_t src = needs_source ? src_snapshot[i] : 0;
                     const uint32_t dst = dst_snapshot[i];
