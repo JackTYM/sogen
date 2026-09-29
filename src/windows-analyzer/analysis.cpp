@@ -4746,6 +4746,29 @@ namespace sogen
                                        static_cast<unsigned long long>(dispatch_or_queue_call), win_emu->current_thread().id, trap_ptr);
                 });
 
+                // `DispatchOrQueueEvent`'s own real body (decompiled): a "dispatch in progress"
+                // marker at `this+40` gates whether the event is immediately dispatched to the REAL
+                // registered watcher callback (`(*(this+12))(a3)`, RVA 0x75f91 - a direct,
+                // non-CFG-guarded call resolved via `this+12`'s own stored function pointer) or
+                // instead QUEUED for later (relying on whichever call currently "owns" dispatch to
+                // drain the queue when it finishes). If that marker ever gets stuck, every event
+                // queues forever and this call never fires. Watching it directly is the most
+                // decisive test yet - this IS the actual mojo::Watcher/SimpleWatcher-level C++
+                // callback invocation, the true last hop toward `HandleValidatedMessage`.
+                const auto real_watcher_callback_call = mod.image_base + 0x75f91;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchOrQueueEvent's own real "
+                                   "watcher callback call at 0x%llx\n",
+                                   static_cast<unsigned long long>(real_watcher_callback_call));
+                win_emu->emu().hook_memory_execution(
+                    real_watcher_callback_call, [win_emu, real_watcher_callback_call](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchOrQueueEvent's own real watcher "
+                                           "callback call at 0x%llx, tid=%u resolved_target=0x%x\n",
+                                           static_cast<unsigned long long>(real_watcher_callback_call), win_emu->current_thread().id,
+                                           resolved_target);
+                    });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
