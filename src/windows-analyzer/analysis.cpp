@@ -4943,6 +4943,70 @@ namespace sogen
                                        mojo_read_message_result);
                 });
 
+                // `ReadMessage` succeeds (MojoReadMessage returns 0) every time it's called, so
+                // `DispatchMessageW` is the next candidate. Its real dispatch is a null-checked
+                // vtable call: `incoming_receiver_ = *(this+0xC); if (incoming_receiver_) call
+                // incoming_receiver_->Accept(message) else v5 = 0` (silent, no error). If
+                // incoming_receiver_ is null, this is a completely silent no-op that would
+                // exactly explain a message vanishing with no crash and no HandleValidatedMessage.
+                const auto dispatch_receiver_null_check = mod.image_base + 0x35ace9;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
+                                   "incoming_receiver_ null-check at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_receiver_null_check));
+                win_emu->emu().hook_memory_execution(
+                    dispatch_receiver_null_check, [win_emu, dispatch_receiver_null_check](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto connector_this = emu.reg<uint32_t>(x86_register::esi);
+                        uint32_t incoming_receiver{};
+                        emu.try_read_memory(connector_this + 0xc, &incoming_receiver, sizeof(incoming_receiver));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
+                                           "incoming_receiver_ null-check at 0x%llx, tid=%u connector_this=0x%x "
+                                           "incoming_receiver_=0x%x\n",
+                                           static_cast<unsigned long long>(dispatch_receiver_null_check), win_emu->current_thread().id,
+                                           connector_this, incoming_receiver);
+                    });
+
+                const auto dispatch_receiver_null_skip = mod.image_base + 0x35adb5;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
+                                   "incoming_receiver_-is-null skip target at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_receiver_null_skip));
+                win_emu->emu().hook_memory_execution(
+                    dispatch_receiver_null_skip, [win_emu, dispatch_receiver_null_skip](cpu_interface&, uint64_t) {
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
+                                           "incoming_receiver_-is-null skip target at 0x%llx, tid=%u\n",
+                                           static_cast<unsigned long long>(dispatch_receiver_null_skip), win_emu->current_thread().id);
+                    });
+
+                const auto dispatch_accept_call = mod.image_base + 0x35ad08;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own real "
+                                   "incoming_receiver_->Accept() call at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_accept_call));
+                win_emu->emu().hook_memory_execution(dispatch_accept_call, [win_emu, dispatch_accept_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto receiver_this = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::eax);
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own real "
+                                       "incoming_receiver_->Accept() call at 0x%llx, tid=%u receiver_this=0x%x "
+                                       "resolved_target=0x%x (%s)\n",
+                                       static_cast<unsigned long long>(dispatch_accept_call), win_emu->current_thread().id, receiver_this,
+                                       resolved_target, target_mod_name);
+                });
+
+                const auto dispatch_accept_return = mod.image_base + 0x35ad0e;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
+                                   "incoming_receiver_->Accept() return value at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_accept_return));
+                win_emu->emu().hook_memory_execution(dispatch_accept_return, [win_emu, dispatch_accept_return](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto accept_result = emu.reg<uint32_t>(x86_register::eax);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
+                                       "incoming_receiver_->Accept() return value at 0x%llx, tid=%u "
+                                       "accept_result=%u\n",
+                                       static_cast<unsigned long long>(dispatch_accept_return), win_emu->current_thread().id,
+                                       accept_result);
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
