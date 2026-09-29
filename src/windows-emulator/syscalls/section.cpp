@@ -600,31 +600,67 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // File-backed section: map a fresh copy of the file contents.
+            auto& section = *section_entry->object;
+            const auto section_protection = section.section_page_protection;
+            const auto is_copy_on_write = section_protection == PAGE_WRITECOPY || section_protection == PAGE_EXECUTE_WRITECOPY;
+            const auto reserve_only = section.allocation_attributes == SEC_RESERVE;
+            const auto shares_backing =
+                !is_copy_on_write && !reserve_only && page_align_down(static_cast<uint64_t>(offset)) == static_cast<uint64_t>(offset);
+
             std::vector<std::byte> file_data{};
-            if (!utils::io::read_file(c.win_emu.file_sys.translate(section_entry->object->file_name), &file_data))
+            size_t file_size{};
+            if (shares_backing && section.backing)
+            {
+                file_size = section.backing->size();
+            }
+            else if (utils::io::read_file(c.win_emu.file_sys.translate(section.file_name), &file_data))
+            {
+                file_size = file_data.size();
+            }
+            else
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
             // The guest fully controls the mapping offset. Reject anything past the file so the
-            // subtraction below cannot underflow into a huge copy that reads past file_data.
-            if (static_cast<uint64_t>(offset) > file_data.size())
+            // subtraction below cannot underflow into a huge copy that reads past the file data.
+            if (static_cast<uint64_t>(offset) > file_size)
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
-            const auto size = static_cast<size_t>(file_data.size() - offset);
+            const auto size = static_cast<size_t>(file_size - offset);
             const auto aligned_size = static_cast<size_t>(page_align_up(size));
-            const auto reserve_only = section_entry->object->allocation_attributes == SEC_RESERVE;
-            const auto address =
-                c.win_emu.memory.allocate_memory(aligned_size, protection, reserve_only, 0, memory_region_kind::file_section_view);
-            c.win_emu.memory.set_region_mapped_filename(address, section_entry->object->file_name);
 
-            if (!reserve_only && !file_data.empty())
+            uint64_t address{};
+            if (shares_backing && aligned_size != 0)
             {
-                c.emu.write_memory(address, file_data.data() + offset, size);
+                if (!section.backing)
+                {
+                    section.backing = shared_backing::create(page_align_up(file_size));
+                    std::memcpy(section.backing->data(), file_data.data(), file_size);
+                }
+
+                address = c.win_emu.memory.find_free_allocation_base(aligned_size);
+                if (!address || !c.win_emu.memory.allocate_host_memory(address, aligned_size, section.backing->data() + offset, protection,
+                                                                       memory_region_kind::file_section_view))
+                {
+                    return STATUS_NO_MEMORY;
+                }
+
+                c.proc.section_views[address] = section_entry->object;
             }
+            else
+            {
+                address =
+                    c.win_emu.memory.allocate_memory(aligned_size, protection, reserve_only, 0, memory_region_kind::file_section_view);
+                if (!reserve_only && !file_data.empty())
+                {
+                    c.emu.write_memory(address, file_data.data() + offset, size);
+                }
+            }
+
+            c.win_emu.memory.set_region_mapped_filename(address, section.file_name);
 
             if (view_size)
             {
