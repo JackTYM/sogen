@@ -5232,6 +5232,39 @@ namespace sogen
                                            ipcz_result, size_out_addr, size_value);
                     });
 
+                // `#573` proved the byte count survives perfectly through `Transport::
+                // OnChannelMessage` for every message this run, ruling out loss at that boundary.
+                // Decompiling deeper into real ipcz core (`ipcz::NodeLink::OnAcceptParcel`'s own
+                // full body, not just its entry gate) revealed it has TWO parcel-data paths: an
+                // inline path (`Parcel::SetDataFromMessage`) taken when a flag byte pair at
+                // `message+0x28`/`message+0x1C` both read as `1`, and a shared-memory FRAGMENT
+                // path (`NodeLinkMemory::GetFragment`/`Parcel::AdoptDataFragment`/`NodeLink::
+                // WaitForParcelFragmentToResolve`) otherwise - a genuinely different mechanism
+                // this investigation has never touched, and a strong candidate for a sogen-side
+                // shared-memory-region emulation bug. If the flag-pair check itself fails, the
+                // parcel is built with GENUINELY EMPTY data with no error at all - a THIRD
+                // possible empty-result path, even before fragment resolution. Trace this first
+                // gate directly to see which of these paths our specific messages take.
+                const auto accept_parcel_inline_vs_fragment_check = mod.image_base + 0x8ff6f;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching NodeLink::OnAcceptParcel's own "
+                                   "inline-vs-fragment gate check at 0x%llx\n",
+                                   static_cast<unsigned long long>(accept_parcel_inline_vs_fragment_check));
+                win_emu->emu().hook_memory_execution(
+                    accept_parcel_inline_vs_fragment_check, [win_emu, accept_parcel_inline_vs_fragment_check](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto gate_result = emu.reg<uint8_t>(x86_register::al);
+                        const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
+                        uint8_t flag_0x28{};
+                        emu.try_read_memory(message_ptr + 0x28, &flag_0x28, sizeof(flag_0x28));
+                        uint8_t flag_0x1c{};
+                        emu.try_read_memory(message_ptr + 0x1c, &flag_0x1c, sizeof(flag_0x1c));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit NodeLink::OnAcceptParcel's own "
+                                           "inline-vs-fragment gate check at 0x%llx, tid=%u message_ptr=0x%x "
+                                           "gate_result=%u flag_0x28=%u flag_0x1c=%u\n",
+                                           static_cast<unsigned long long>(accept_parcel_inline_vs_fragment_check),
+                                           win_emu->current_thread().id, message_ptr, gate_result, flag_0x28, flag_0x1c);
+                    });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
