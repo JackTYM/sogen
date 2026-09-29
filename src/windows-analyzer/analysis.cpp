@@ -4156,6 +4156,47 @@ namespace sogen
                                        static_cast<unsigned long long>(send_mojo_message_call), win_emu->current_thread().id,
                                        static_cast<unsigned long long>(message_receiver), static_cast<unsigned long long>(message));
                 });
+
+                // `#559`'s own decompile of `SendMojoMessage`'s real body (854-line function,
+                // `InterfaceEndpointClient::Accept` -> `MultiplexRouter::InterfaceEndpoint::
+                // SendMessageW` path, i.e. the modern mojo path this reply actually takes - the
+                // legacy `IPC::ChannelAssociatedGroupController` branch calls a different,
+                // unrelated `Connector::AcceptAndGetResult`) ends with a direct call to the real
+                // public Mojo Core Embedder API `MojoWriteMessage(MojoHandle, MojoMessage*,
+                // MojoWriteMessageOptions*)` (RVA 0x51abc3). Its own return value (a MojoResult) is
+                // checked immediately after (RVA 0x51abc8, `cmp eax, 9`): if it's exactly 9
+                // (MOJO_RESULT_FAILED_PRECONDITION, meaning "the peer endpoint is already closed"),
+                // the code SILENTLY SWALLOWS this as a benign/expected outcome and treats it as
+                // success, propagating no error. If sogen's own pipe/handle emulation misreports the
+                // peer as already-disconnected here, this would exactly explain a reply that's
+                // silently dropped with no exception, no error log, and no visible failure on the
+                // sending side - precisely the symptom `#557`-`#559` have converged on. Watching
+                // both the call site (args) and the return value live.
+                const auto write_message_call = mod.image_base + 0x51abc3;
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching the real "
+                                   "MojoWriteMessage call at 0x%llx\n",
+                                   static_cast<unsigned long long>(write_message_call));
+                win_emu->emu().hook_memory_execution(write_message_call, [win_emu, write_message_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto mojo_handle = emu.reg<uint64_t>(x86_register::rcx);
+                    const auto mojo_message = emu.reg<uint64_t>(x86_register::rdx);
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit the real MojoWriteMessage call at "
+                                       "0x%llx, tid=%u mojo_handle=0x%llx mojo_message=0x%llx\n",
+                                       static_cast<unsigned long long>(write_message_call), win_emu->current_thread().id,
+                                       static_cast<unsigned long long>(mojo_handle), static_cast<unsigned long long>(mojo_message));
+                });
+
+                const auto write_message_return = mod.image_base + 0x51abc8;
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching MojoWriteMessage's own "
+                                   "return value at 0x%llx\n",
+                                   static_cast<unsigned long long>(write_message_return));
+                win_emu->emu().hook_memory_execution(write_message_return, [win_emu, write_message_return](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit MojoWriteMessage's own return value at "
+                                       "0x%llx, tid=%u mojo_result=%u\n",
+                                       static_cast<unsigned long long>(write_message_return), win_emu->current_thread().id, mojo_result);
+                });
             }
 
             // Coarse bisection through `ContinueInitializeWithProfile`'s own success-branch body,
