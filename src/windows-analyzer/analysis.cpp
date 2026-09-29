@@ -4087,6 +4087,75 @@ namespace sogen
                                        static_cast<unsigned long long>(address), win_emu->current_thread().id);
                 });
             }
+
+            // `EBWebViewEnvironment::CreateCoreWebView2Controller`'s own real wrapper (RVA 0x112150,
+            // real PDB name): a thin synchronous gate around a virtual dispatch at `this[0x54]/4`. If
+            // `RunningOnUIThread()` fails, it returns 0x802A000C synchronously (this is `#97`'s own
+            // original mechanism); otherwise it tail-calls through the resolved vtable slot into the
+            // real, unnamed async controller-creation implementation. Watching entry, the fail branch
+            // (0x112185), and the `call ecx` dispatch itself (0x112181, reading the resolved target
+            // live instead of reconstructing the WRL multi-inheritance vtable statically) - this
+            // directly tests whether the synchronous check is what's failing, or whether execution
+            // reaches the real async implementation. Also watching the completion callback's own
+            // `RunOnce` trampoline (RVA 0x117be0) to read the actual delivered HRESULT/controller
+            // pointer when it eventually fires - see project_solidworks_bringup.md #555/#556.
+            if (mod.name == "embeddedbrowserwebview.dll" && std::getenv("SOGEN_TRACE_SLDIM_BASEDLG_WEBVIEW2_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                const auto entry_address = mod.image_base + 0x112150;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching CreateCoreWebView2Controller wrapper "
+                                   "entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(entry_address));
+                win_emu->emu().hook_memory_execution(entry_address, [win_emu, entry_address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t this_ptr{};
+                    emu.try_read_memory(esp + 4, &this_ptr, sizeof(this_ptr));
+                    uint32_t ui_thread_flag{};
+                    emu.try_read_memory(this_ptr + 0xEC, &ui_thread_flag, sizeof(ui_thread_flag));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit CreateCoreWebView2Controller wrapper "
+                                       "entry at 0x%llx, tid=%u this=0x%x ui_thread_flag=0x%x\n",
+                                       static_cast<unsigned long long>(entry_address), win_emu->current_thread().id, this_ptr,
+                                       ui_thread_flag);
+                });
+
+                const auto fail_address = mod.image_base + 0x112185;
+                win_emu->emu().hook_memory_execution(fail_address, [win_emu, fail_address](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit CreateCoreWebView2Controller wrapper "
+                                       "SYNCHRONOUS FAIL branch (0x802A000C) at 0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(fail_address), win_emu->current_thread().id);
+                });
+
+                const auto dispatch_address = mod.image_base + 0x112181;
+                win_emu->emu().hook_memory_execution(dispatch_address, [win_emu, dispatch_address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
+                    const auto hwnd = emu.reg<uint32_t>(x86_register::ebx);
+                    const auto handler = emu.reg<uint32_t>(x86_register::edi);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit CreateCoreWebView2Controller wrapper "
+                                       "real dispatch at 0x%llx, tid=%u resolved_target=0x%x this=0x%x hwnd=0x%x "
+                                       "handler=0x%x\n",
+                                       static_cast<unsigned long long>(dispatch_address), win_emu->current_thread().id, resolved_target,
+                                       this_ptr, hwnd, handler);
+                });
+
+                const auto runonce_address = mod.image_base + 0x117be0;
+                win_emu->emu().hook_memory_execution(runonce_address, [win_emu, runonce_address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t hresult{};
+                    emu.try_read_memory(esp + 8, &hresult, sizeof(hresult));
+                    uint32_t controller_ptr{};
+                    emu.try_read_memory(esp + 0xC, &controller_ptr, sizeof(controller_ptr));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                       "OnCreateWebViewControllerCompleted RunOnce trampoline at 0x%llx, tid=%u "
+                                       "hresult=0x%x controller=0x%x\n",
+                                       static_cast<unsigned long long>(runonce_address), win_emu->current_thread().id, hresult,
+                                       controller_ptr);
+                });
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
