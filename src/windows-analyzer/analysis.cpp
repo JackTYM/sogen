@@ -4813,6 +4813,40 @@ namespace sogen
                 // consumer). Watching both operands directly settles whether this exact mismatch is
                 // what's silently swallowing every notification - see
                 // project_solidworks_bringup.md #567.
+
+                // #565-#568's own arc confirmed 20+ hops all firing correctly, ending in a tight
+                // dispatch-table-shaped address cluster without ever reaching
+                // `HandleValidatedMessage`. Rather than resolve further hops, decode the raw
+                // MojoResult/HandleSignalsState-shaped arguments `OnHandleReady` itself receives
+                // (watch_id=a2, then a3/a4 - real mojo API shape is `(context, MojoResult,
+                // MojoHandleSignalsState)`) directly at entry, before anything else executes - if
+                // the reported signal state is something other than "readable" (e.g. a peer-closed
+                // or error condition), that alone would explain the whole chain firing while no
+                // message ever actually gets read - see project_solidworks_bringup.md #569.
+                const auto on_handle_ready_entry = mod.image_base + 0x364180;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own raw entry "
+                                   "args at 0x%llx\n",
+                                   static_cast<unsigned long long>(on_handle_ready_entry));
+                win_emu->emu().hook_memory_execution(on_handle_ready_entry, [win_emu, on_handle_ready_entry](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t a2_watch_id{};
+                    emu.try_read_memory(esp + 4, &a2_watch_id, sizeof(a2_watch_id));
+                    uint32_t a3_result{};
+                    emu.try_read_memory(esp + 8, &a3_result, sizeof(a3_result));
+                    uint32_t a4_signals_ptr{};
+                    emu.try_read_memory(esp + 0xC, &a4_signals_ptr, sizeof(a4_signals_ptr));
+                    uint32_t satisfied_signals{};
+                    uint32_t satisfiable_signals{};
+                    emu.try_read_memory(a4_signals_ptr, &satisfied_signals, sizeof(satisfied_signals));
+                    emu.try_read_memory(a4_signals_ptr + 4, &satisfiable_signals, sizeof(satisfiable_signals));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnHandleReady's own raw entry args at 0x%llx, "
+                                       "tid=%u a2_watch_id=%u a3_result=0x%x a4_signals_ptr=0x%x satisfied_signals=0x%x "
+                                       "satisfiable_signals=0x%x\n",
+                                       static_cast<unsigned long long>(on_handle_ready_entry), win_emu->current_thread().id, a2_watch_id,
+                                       a3_result, a4_signals_ptr, satisfied_signals, satisfiable_signals);
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
