@@ -468,6 +468,7 @@ namespace sogen
             case SystemFeatureConfigurationSectionInformation:
             case SystemFirmwareTableInformation:
             case SystemPolicyInformation:
+            case SystemShadowStackInformation:
                 return STATUS_NOT_SUPPORTED;
 
             case SystemControlFlowTransition:

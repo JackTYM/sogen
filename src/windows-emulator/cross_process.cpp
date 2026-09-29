@@ -44,6 +44,10 @@ namespace sogen
                 return "window_control";
             case process_control_op::query_peb:
                 return "query_peb";
+            case process_control_op::suspend_process:
+                return "suspend_process";
+            case process_control_op::resume_process:
+                return "resume_process";
             }
 
             return "unknown";

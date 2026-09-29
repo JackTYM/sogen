@@ -170,6 +170,55 @@ namespace sogen
             }
         }
 
+        NTSTATUS suspend_or_resume_process(const syscall_context& c, const handle process_handle, const bool suspend)
+        {
+            constexpr ACCESS_MASK PROCESS_SUSPEND_RESUME = 0x0800;
+
+            if (c.proc.is_current_process_handle(process_handle))
+            {
+                for (auto& thread : c.proc.threads | std::views::values)
+                {
+                    if (&thread == c.vcpu.active_thread)
+                    {
+                        continue;
+                    }
+
+                    if (suspend)
+                    {
+                        ++thread.suspended;
+                    }
+                    else if (thread.suspended > 0)
+                    {
+                        --thread.suspended;
+                    }
+                }
+
+                return STATUS_SUCCESS;
+            }
+
+            const auto child = resolve_child_target(c, process_handle, PROCESS_SUSPEND_RESUME);
+            if (std::holds_alternative<NTSTATUS>(child))
+            {
+                return std::get<NTSTATUS>(child);
+            }
+
+            process_control_request request{};
+            request.op = suspend ? process_control_op::suspend_process : process_control_op::resume_process;
+
+            const auto response = send_process_control_request(c, std::get<child_target>(child), request);
+            return response ? static_cast<NTSTATUS>(response->status) : STATUS_PROCESS_IS_TERMINATING;
+        }
+
+        NTSTATUS handle_NtSuspendProcess(const syscall_context& c, const handle process_handle)
+        {
+            return suspend_or_resume_process(c, process_handle, true);
+        }
+
+        NTSTATUS handle_NtResumeProcess(const syscall_context& c, const handle process_handle)
+        {
+            return suspend_or_resume_process(c, process_handle, false);
+        }
+
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, const handle process_handle, const uint32_t info_class,
                                                   const uint64_t process_information, const uint32_t process_information_length,
                                                   const emulator_object<uint32_t> return_length)
@@ -695,6 +744,66 @@ namespace sogen
                                                                     info.WindowFlags = 0;
                                                                     info.WindowTitleLength = 0;
                                                                 });
+
+            case ProcessHandleCount: {
+                const auto handle_count = static_cast<ULONG>(c.proc.files.size() + c.proc.events.size() + c.proc.sections.size() +
+                                                             c.proc.mutants.size() + c.proc.semaphores.size() + c.proc.threads.size() +
+                                                             c.proc.registry_keys.size() + c.proc.timers.size());
+                if (process_information_length == sizeof(ULONG))
+                {
+                    return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length,
+                                               [&](ULONG& count) { count = handle_count; });
+                }
+
+                struct process_handle_information
+                {
+                    ULONG handle_count;
+                    ULONG handle_count_high_watermark;
+                };
+
+                return handle_query<process_handle_information>(c.emu, process_information, process_information_length, return_length,
+                                                                [&](process_handle_information& info) {
+                                                                    info.handle_count = handle_count;
+                                                                    info.handle_count_high_watermark = handle_count;
+                                                                });
+            }
+
+            case ProcessHandleTable: {
+                std::vector<ULONG> handles{};
+                const auto collect = [&](const auto& store) {
+                    for (const auto& entry : store)
+                    {
+                        handles.push_back(static_cast<ULONG>(store.make_handle(entry.first).bits));
+                    }
+                };
+
+                collect(c.proc.files);
+                collect(c.proc.events);
+                collect(c.proc.sections);
+                collect(c.proc.mutants);
+                collect(c.proc.semaphores);
+                collect(c.proc.threads);
+                collect(c.proc.registry_keys);
+                collect(c.proc.timers);
+                collect(c.proc.io_completions);
+                collect(c.proc.wait_completion_packets);
+                collect(c.proc.worker_factories);
+                collect(c.proc.ports);
+                collect(c.proc.jobs);
+                collect(c.proc.devices);
+                collect(c.proc.tokens);
+
+                const auto required_length = static_cast<uint32_t>(handles.size() * sizeof(ULONG));
+                return_length.write_if_valid(required_length);
+
+                if (process_information_length < required_length)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                c.emu.write_memory(process_information, handles.data(), required_length);
+                return STATUS_SUCCESS;
+            }
 
             case ProcessCycleTime:
                 return handle_query<PROCESS_CYCLE_TIME_INFORMATION>(c.emu, process_information, process_information_length, return_length,

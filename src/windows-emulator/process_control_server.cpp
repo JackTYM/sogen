@@ -392,6 +392,23 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
+        void execute_suspend_process(windows_emulator& target, const bool suspend, process_control_response& response)
+        {
+            for (auto& thread : target.process.threads | std::views::values)
+            {
+                if (suspend)
+                {
+                    ++thread.suspended;
+                }
+                else if (thread.suspended > 0)
+                {
+                    --thread.suspended;
+                }
+            }
+
+            response.status = STATUS_SUCCESS;
+        }
+
         void execute_query_cycle_time(windows_emulator& target, const process_control_request& /*request*/,
                                       process_control_response& response)
         {
@@ -474,6 +491,12 @@ namespace sogen
             break;
         case process_control_op::query_peb:
             execute_query_peb(target, request, response);
+            break;
+        case process_control_op::suspend_process:
+            execute_suspend_process(target, true, response);
+            break;
+        case process_control_op::resume_process:
+            execute_suspend_process(target, false, response);
             break;
         case process_control_op::query_cycle_time:
             execute_query_cycle_time(target, request, response);

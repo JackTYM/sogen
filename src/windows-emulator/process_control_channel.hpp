@@ -27,6 +27,8 @@ namespace sogen
         export_handle = 13,
         window_control = 14,
         query_peb = 15,
+        suspend_process = 16,
+        resume_process = 17,
     };
 
     inline constexpr int process_control_default_timeout_ms = 10000;
