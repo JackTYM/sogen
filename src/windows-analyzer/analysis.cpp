@@ -5062,6 +5062,49 @@ namespace sogen
                                        return_addr, force_pipe_reset, force_async_handler);
                 });
 
+                // `mojo::MessageHeaderValidator::Accept` was confirmed to reject every real
+                // message this run (header_valid=0 on 8/8). It first calls
+                // `ValidateStructHeaderAndClaimMemory`, and only on success reads the header's
+                // own size/version fields into a switch (v0=24 bytes, v1=32, v2=48, v3=56,
+                // default requires >0x37 bytes) before checking flags/interface-id validity.
+                // Trace both the struct-header-claim result and the raw size/version fields
+                // actually observed to pin down exactly which check is rejecting the message.
+                const auto validate_struct_header_result = mod.image_base + 0x35eab6;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "MessageHeaderValidator::Accept's own ValidateStructHeaderAndClaimMemory "
+                                   "result at 0x%llx\n",
+                                   static_cast<unsigned long long>(validate_struct_header_result));
+                win_emu->emu().hook_memory_execution(
+                    validate_struct_header_result, [win_emu, validate_struct_header_result](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto al = emu.reg<uint8_t>(x86_register::al);
+                        const auto edi = emu.reg<uint32_t>(x86_register::edi);
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                           "MessageHeaderValidator::Accept's own ValidateStructHeaderAndClaimMemory "
+                                           "result at 0x%llx, tid=%u struct_header_claim_ok=%u edi=0x%x\n",
+                                           static_cast<unsigned long long>(validate_struct_header_result), win_emu->current_thread().id, al,
+                                           edi);
+                    });
+
+                const auto switch_dispatch_point = mod.image_base + 0x35eac2;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "MessageHeaderValidator::Accept's own version-switch dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(switch_dispatch_point));
+                win_emu->emu().hook_memory_execution(switch_dispatch_point, [win_emu, switch_dispatch_point](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto header_num_bytes = emu.reg<uint32_t>(x86_register::eax);
+                    const auto header_version = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto header_ptr = emu.reg<uint32_t>(x86_register::edi);
+                    uint8_t header_flags{};
+                    emu.try_read_memory(header_ptr + 0x10, &header_flags, sizeof(header_flags));
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                       "MessageHeaderValidator::Accept's own version-switch dispatch at 0x%llx, "
+                                       "tid=%u header_ptr=0x%x header_num_bytes=%u header_version=%u "
+                                       "header_flags=0x%x\n",
+                                       static_cast<unsigned long long>(switch_dispatch_point), win_emu->current_thread().id, header_ptr,
+                                       header_num_bytes, header_version, header_flags);
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
