@@ -1753,6 +1753,26 @@ namespace sogen
             return resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
         }
 
+        // DefWindowProc's own WM_ERASEBKGND handling: fills the window's client rect with its own
+        // registered class hbrBackground. Used from NtUserMessageCall's FNID_DEFWINDOW dispatch when
+        // the guest falls through to the default handler instead of erasing the background itself.
+        BOOL erase_window_class_background(const syscall_context& c, const window& win, const hdc dc)
+        {
+            int32_t origin_x = 0;
+            int32_t origin_y = 0;
+            uint32_t present_handle = 0;
+            auto* surface = resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
+            if (surface == nullptr)
+            {
+                return FALSE;
+            }
+
+            const auto color = window_surface_fill_color(c, win);
+            fill_rect(*surface, origin_x, origin_y, origin_x + win.width, origin_y + win.height, color);
+            present_win_surface(c, present_handle, surface);
+            return TRUE;
+        }
+
         NTSTATUS handle_NtDxgkIsFeatureEnabled(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;

@@ -969,6 +969,15 @@ namespace sogen
             return copy_count;
         }
 
+    } // namespace
+
+    namespace syscalls
+    {
+        BOOL erase_window_class_background(const syscall_context& c, const window& win, hdc dc);
+    } // namespace syscalls
+
+    namespace
+    {
         uint64_t handle_default_window_proc_message(const syscall_context& c, window& win, const UINT msg, const uint64_t w_param,
                                                     const uint64_t l_param, const BOOL ansi)
         {
@@ -998,6 +1007,7 @@ namespace sogen
                 return read_guest_window_text(c, win).size();
 
             case WM_ERASEBKGND:
+                syscalls::erase_window_class_background(c, win, static_cast<hdc>(w_param));
                 return TRUE;
 
             case WM_PAINT:
