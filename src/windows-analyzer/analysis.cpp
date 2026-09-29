@@ -4542,6 +4542,24 @@ namespace sogen
                 // right after the 0x6dc34 `jz` is NOT taken), whose own success/failure is checked
                 // immediately after at RVA 0x6dc9b (`test al, al`). Watching both directly.
 
+                // The "[header+2] == 0 selects the no-handles fast path" claim above was never
+                // empirically confirmed - it was inferred from static reading alone. Watching the
+                // real branch point directly (RVA 0x6d8d7, `test eax, eax` where `eax` IS that exact
+                // field's own value) settles whether our message actually takes that path at all.
+                const auto handle_count_check = mod.image_base + 0x6d8d7;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own "
+                                   "handle-count field check at 0x%llx\n",
+                                   static_cast<unsigned long long>(handle_count_check));
+                win_emu->emu().hook_memory_execution(handle_count_check, [win_emu, handle_count_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto handle_count_field = emu.reg<uint32_t>(x86_register::eax);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own "
+                                       "handle-count field check at 0x%llx, tid=%u handle_count_field=%u "
+                                       "takes_fast_path=%d\n",
+                                       static_cast<unsigned long long>(handle_count_check), win_emu->current_thread().id,
+                                       handle_count_field, handle_count_field == 0 ? 1 : 0);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
