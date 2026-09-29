@@ -4686,6 +4686,44 @@ namespace sogen
                                        static_cast<unsigned long long>(notify_call), win_emu->current_thread().id);
                 });
 
+                // `#565`'s own live run confirmed `NotifyNewLocalParcel` genuinely fires - real
+                // ipcz architecture defers the actual trap CALLBACK invocation into a
+                // `TrapEventDispatcher`, which only really dispatches at its own destructor (called
+                // at the end of `AcceptInboundParcel`, outside the lock). Decompiled
+                // `TrapEventDispatcher::DispatchAll`: it computes a queued-event count and skips its
+                // entire dispatch loop (RVA 0xa34af, `and ebx,0xFFFFFFE0; jz`) if that count is zero
+                // - i.e. if `NotifyNewLocalParcel`'s own `DeferEvent` call never actually found a
+                // registered trap/watch to queue in the first place, NOTHING gets called here despite
+                // every earlier step succeeding. If the count is non-zero, the real per-event
+                // callback fires via a CFG-guarded `call ecx` (RVA 0xa34d9) - the actual "wake the
+                // mojo consumer" invocation. Watching both directly settles whether a trap was ever
+                // registered on this parcel queue at all.
+                const auto dispatch_count_check = mod.image_base + 0xa34af;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TrapEventDispatcher::DispatchAll's "
+                                   "own event-count check at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_count_check));
+                win_emu->emu().hook_memory_execution(dispatch_count_check, [win_emu, dispatch_count_check](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto masked_count = emu.reg<uint32_t>(x86_register::ebx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapEventDispatcher::DispatchAll's own "
+                                       "event-count check at 0x%llx, tid=%u masked_count=%u has_events=%d\n",
+                                       static_cast<unsigned long long>(dispatch_count_check), win_emu->current_thread().id, masked_count,
+                                       masked_count != 0 ? 1 : 0);
+                });
+
+                const auto dispatch_callback_call = mod.image_base + 0xa34d9;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TrapEventDispatcher::DispatchAll's "
+                                   "own real callback call at 0x%llx\n",
+                                   static_cast<unsigned long long>(dispatch_callback_call));
+                win_emu->emu().hook_memory_execution(dispatch_callback_call, [win_emu, dispatch_callback_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapEventDispatcher::DispatchAll's own real "
+                                       "callback call at 0x%llx, tid=%u resolved_target=0x%x\n",
+                                       static_cast<unsigned long long>(dispatch_callback_call), win_emu->current_thread().id,
+                                       resolved_target);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
