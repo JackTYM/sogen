@@ -4852,6 +4852,26 @@ namespace sogen
                                        target_mod_name);
                 });
 
+                // The resolved target above landed on ANOTHER `Invoker::Run`-style trampoline,
+                // wrapping a `RepeatingCallback<void(unsigned int)>` with the real
+                // `mojo::Connector`-style `(handle_id, HandleSignalsState)` signature - one hop
+                // closer to the true consumer. Its own body does a single, real indirect dispatch
+                // (`call ecx`, RVA 0x35b91e) through `a1+16`'s own stored function pointer - resolve
+                // it live to keep following the chain to its true end.
+                const auto next_hop_callback = mod.image_base + 0x35b91e;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching the next hop's own real "
+                                   "dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(next_hop_callback));
+                win_emu->emu().hook_memory_execution(next_hop_callback, [win_emu, next_hop_callback](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit the next hop's own real dispatch at 0x%llx, "
+                                       "tid=%u resolved_target=0x%x (%s)\n",
+                                       static_cast<unsigned long long>(next_hop_callback), win_emu->current_thread().id, resolved_target,
+                                       target_mod_name);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
