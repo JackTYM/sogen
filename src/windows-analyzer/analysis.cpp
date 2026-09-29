@@ -4847,6 +4847,40 @@ namespace sogen
                                        a3_result, a4_signals_ptr, satisfied_signals, satisfiable_signals);
                 });
 
+                // `#569`'s own address-cluster resolution landed on a function whose own real
+                // mangled name explicitly mentions `mojo::Connector::_(const char*, unsigned int)` -
+                // a REAL Connector member function bound with a FIXED string constant and a runtime
+                // error code, strongly suggesting the "readable" notification is being routed into
+                // a Connector-level ERROR/DIAGNOSTIC call rather than the real message-read path.
+                // Decompiled it: it dispatches through a resolved function pointer (`call esi`, RVA
+                // 0x35b95b) with the bound `const char*` string and the runtime error code as its
+                // own real arguments. Reading the string directly (rather than just the pointer)
+                // should reveal exactly what real Chromium/mojo error condition this path
+                // represents - the single most direct way to finally understand why a clean
+                // "readable" signal never results in an actual read.
+                const auto connector_error_call = mod.image_base + 0x35b95b;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching the resolved Connector error "
+                                   "call at 0x%llx\n",
+                                   static_cast<unsigned long long>(connector_error_call));
+                win_emu->emu().hook_memory_execution(connector_error_call, [win_emu, connector_error_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::esi);
+                    const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                    uint32_t bound_string_ptr{};
+                    emu.try_read_memory(esp, &bound_string_ptr, sizeof(bound_string_ptr));
+                    uint32_t runtime_error_code{};
+                    emu.try_read_memory(esp + 4, &runtime_error_code, sizeof(runtime_error_code));
+                    std::array<char, 128> bound_string{};
+                    emu.try_read_memory(bound_string_ptr, bound_string.data(), bound_string.size() - 1);
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit the resolved Connector error call at 0x%llx, "
+                                       "tid=%u resolved_target=0x%x (%s) connector_this=0x%x runtime_error_code=%u "
+                                       "bound_string='%s'\n",
+                                       static_cast<unsigned long long>(connector_error_call), win_emu->current_thread().id, resolved_target,
+                                       target_mod_name, connector_this, runtime_error_code, bound_string.data());
+                });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
