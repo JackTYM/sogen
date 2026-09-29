@@ -386,6 +386,12 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
+        void execute_query_peb(windows_emulator& target, const process_control_request& /*request*/, process_control_response& response)
+        {
+            response.base_address = target.process.peb64.value();
+            response.status = STATUS_SUCCESS;
+        }
+
         void execute_query_cycle_time(windows_emulator& target, const process_control_request& /*request*/,
                                       process_control_response& response)
         {
@@ -465,6 +471,9 @@ namespace sogen
             break;
         case process_control_op::query_wow64_info:
             execute_query_wow64_info(target, request, response);
+            break;
+        case process_control_op::query_peb:
+            execute_query_peb(target, request, response);
             break;
         case process_control_op::query_cycle_time:
             execute_query_cycle_time(target, request, response);

@@ -734,9 +734,35 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAdjustPrivilegesToken()
+        NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, const handle /*token_handle*/,
+                                                const BOOLEAN disable_all_privileges, const emulator_object<TOKEN_PRIVILEGES64> new_state,
+                                                const ULONG /*buffer_length*/, const emulator_object<TOKEN_PRIVILEGES64> previous_state,
+                                                const emulator_object<ULONG> return_length)
         {
-            return STATUS_NOT_SUPPORTED;
+            constexpr ULONG se_change_notify_privilege = 23;
+
+            if (previous_state)
+            {
+                previous_state.write(TOKEN_PRIVILEGES64{});
+            }
+
+            return_length.write_if_valid(static_cast<ULONG>(sizeof(ULONG)));
+
+            if (disable_all_privileges || !new_state)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto requested_count = new_state.read().PrivilegeCount;
+            bool all_assigned = true;
+            for (ULONG i = 0; i < requested_count; ++i)
+            {
+                const auto entry = c.emu.read_memory<LUID_AND_ATTRIBUTES>(new_state.value() + offsetof(TOKEN_PRIVILEGES64, Privileges) +
+                                                                          i * sizeof(LUID_AND_ATTRIBUTES));
+                all_assigned &= entry.Luid.HighPart == 0 && entry.Luid.LowPart == se_change_notify_privilege;
+            }
+
+            return all_assigned ? STATUS_SUCCESS : STATUS_NOT_ALL_ASSIGNED;
         }
 
         NTSTATUS handle_NtQuerySecurityPolicy()

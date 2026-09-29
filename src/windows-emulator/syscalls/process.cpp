@@ -235,10 +235,24 @@ namespace sogen
 
                     const auto* const record = std::get<const process_context::child_process_record*>(child);
 
+                    uint64_t child_peb = 0;
+                    if (auto* const channel = c.win_emu.find_child_control_channel(process_handle.value.id))
+                    {
+                        process_control_request request{};
+                        request.op = process_control_op::query_peb;
+                        const auto response = send_process_control_request(c, child_target{process_handle.value.id, channel}, request);
+                        if (response && static_cast<NTSTATUS>(response->status) == STATUS_SUCCESS)
+                        {
+                            child_peb = response->base_address;
+                        }
+                    }
+
                     const auto init_child_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
                         basic_info = {};
                         basic_info.UniqueProcessId = record->pid;
                         basic_info.ExitStatus = record->exit_status;
+                        basic_info.PebBaseAddress = child_peb;
+                        basic_info.InheritedFromUniqueProcessId = c.proc.process_id;
                     };
 
                     switch (process_information_length)

@@ -42,6 +42,8 @@ namespace sogen
                 return "export_handle";
             case process_control_op::window_control:
                 return "window_control";
+            case process_control_op::query_peb:
+                return "query_peb";
             }
 
             return "unknown";
