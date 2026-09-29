@@ -4088,6 +4088,39 @@ namespace sogen
                                        static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(bind_state),
                                        static_cast<unsigned long long>(struct_ptr_arg));
                 });
+
+                // `#559`'s own live run resolved OnceCallback::Run's dispatch target to a
+                // COMDAT-folded `Invoker<FunctorTraits<BindPostTaskTrampoline<OnceCallback<void(
+                // StructPtr<T>)>>>>::RunOnce` (msedge.dll+0x516e8b0 - ICF folds this generic
+                // trampoline shape across many unrelated template instantiations, e.g. its real PDB
+                // name mentions an unrelated `PhotoState` type; the machine code is what matters,
+                // not the misleading demangled name). `BindPostTaskTrampoline` is real Chromium
+                // machinery that POSTS the actual callback invocation to another task
+                // sequence/runner rather than running it inline - if that posted task never
+                // actually executes, the reply would vanish exactly as observed by `#557`. This
+                // hooks ITS OWN indirect dispatch one level deeper (RVA 0x516e8e0) to resolve the
+                // real post-task target live.
+                const auto post_task_dispatch_address = mod.image_base + 0x516e8e0;
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching "
+                                   "BindPostTaskTrampoline's own indirect dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(post_task_dispatch_address));
+
+                win_emu->emu().hook_memory_execution(post_task_dispatch_address, [win_emu, post_task_dispatch_address](cpu_interface&,
+                                                                                                                       uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+                    const auto trampoline_state = emu.reg<uint64_t>(x86_register::rcx);
+
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit BindPostTaskTrampoline's own indirect "
+                                       "dispatch at 0x%llx, tid=%u call_target=0x%llx (%s+0x%llx) trampoline_state=0x%llx\n",
+                                       static_cast<unsigned long long>(post_task_dispatch_address), win_emu->current_thread().id,
+                                       static_cast<unsigned long long>(call_target), target_mod_name,
+                                       static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(trampoline_state));
+                });
             }
 
             // Coarse bisection through `ContinueInitializeWithProfile`'s own success-branch body,
