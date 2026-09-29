@@ -5137,6 +5137,62 @@ namespace sogen
                                            struct_ptr, validation_context, ctx_next, ctx_end, declared_num_bytes);
                     });
 
+                // `ValidateStructHeaderAndClaimMemory` was confirmed called with a NULL
+                // struct_ptr on every hit - i.e. the `mojo::Message` object never gets a real
+                // data buffer attached. `mojo::Message::CreateFromMessageHandle`'s own real body
+                // calls `MojoGetMessageData(message, 0, &buffer, &num_bytes, 0, &num_handles)`
+                // (retrying once if it returns 8, presumably MOJO_RESULT_RESOURCE_EXHAUSTED, to
+                // resize the handle array) - if the FINAL result is nonzero, it silently builds
+                // an EMPTY Message with a null data pointer instead of a real one. Trace both
+                // call sites' own result and out-params directly to see which path is taken.
+                const auto get_message_data_first_call_result = mod.image_base + 0x35f2e4;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "CreateFromMessageHandle's own first MojoGetMessageData result at 0x%llx\n",
+                                   static_cast<unsigned long long>(get_message_data_first_call_result));
+                win_emu->emu().hook_memory_execution(
+                    get_message_data_first_call_result, [win_emu, get_message_data_first_call_result](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
+                        const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                        uint32_t buffer_out_addr{};
+                        emu.try_read_memory(esp + 8, &buffer_out_addr, sizeof(buffer_out_addr));
+                        uint32_t num_bytes_out_addr{};
+                        emu.try_read_memory(esp + 0xc, &num_bytes_out_addr, sizeof(num_bytes_out_addr));
+                        uint32_t buffer_ptr{};
+                        emu.try_read_memory(buffer_out_addr, &buffer_ptr, sizeof(buffer_ptr));
+                        uint32_t num_bytes{};
+                        emu.try_read_memory(num_bytes_out_addr, &num_bytes, sizeof(num_bytes));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                           "CreateFromMessageHandle's own first MojoGetMessageData result at 0x%llx, "
+                                           "tid=%u mojo_result=%u buffer_ptr=0x%x num_bytes=%u\n",
+                                           static_cast<unsigned long long>(get_message_data_first_call_result),
+                                           win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
+                    });
+
+                const auto get_message_data_retry_call_result = mod.image_base + 0x35f30f;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "CreateFromMessageHandle's own retry MojoGetMessageData result at 0x%llx\n",
+                                   static_cast<unsigned long long>(get_message_data_retry_call_result));
+                win_emu->emu().hook_memory_execution(
+                    get_message_data_retry_call_result, [win_emu, get_message_data_retry_call_result](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
+                        const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                        uint32_t buffer_out_addr{};
+                        emu.try_read_memory(esp + 8, &buffer_out_addr, sizeof(buffer_out_addr));
+                        uint32_t num_bytes_out_addr{};
+                        emu.try_read_memory(esp + 0xc, &num_bytes_out_addr, sizeof(num_bytes_out_addr));
+                        uint32_t buffer_ptr{};
+                        emu.try_read_memory(buffer_out_addr, &buffer_ptr, sizeof(buffer_ptr));
+                        uint32_t num_bytes{};
+                        emu.try_read_memory(num_bytes_out_addr, &num_bytes, sizeof(num_bytes));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                           "CreateFromMessageHandle's own retry MojoGetMessageData result at 0x%llx, "
+                                           "tid=%u mojo_result=%u buffer_ptr=0x%x num_bytes=%u\n",
+                                           static_cast<unsigned long long>(get_message_data_retry_call_result),
+                                           win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
+                    });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
