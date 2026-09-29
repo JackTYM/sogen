@@ -4667,10 +4667,22 @@ namespace sogen
                     router_accept_inbound_parcel, [win_emu, router_accept_inbound_parcel](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+                        // A live run just proved `Connector::ReadMessage`'s own `portal_handle`
+                        // field (`*(connector_this+8)`) IS a direct `ipcz::Router*` - exactly
+                        // matching several of THIS function's own `this` pointers for connectors
+                        // whose reads later end up empty. But only ONE
+                        // `NodeLink::OnAcceptParcel` hit fired that same run, far fewer than the
+                        // number of `AcceptInboundParcel` hits - meaning most of these calls do
+                        // NOT come through the wire-deserialization path this investigation has
+                        // been examining. Capture the caller's own return address to find out
+                        // where they actually originate.
+                        const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                        uint32_t return_addr{};
+                        emu.try_read_memory(esp, &return_addr, sizeof(return_addr));
                         win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit ipcz::Router::AcceptInboundParcel entry at "
-                                           "0x%llx, tid=%u this=0x%x\n",
+                                           "0x%llx, tid=%u this=0x%x return_addr=0x%x\n",
                                            static_cast<unsigned long long>(router_accept_inbound_parcel), win_emu->current_thread().id,
-                                           this_ptr);
+                                           this_ptr, return_addr);
                     });
 
                 // `#565` decompiled `AcceptInboundParcel`'s own real body: after successfully
