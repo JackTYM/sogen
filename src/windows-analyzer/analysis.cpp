@@ -4583,6 +4583,41 @@ namespace sogen
                                        resolved_target, delegate_this);
                 });
 
+                // `#564`'s own live run confirmed the real delegate dispatch above resolves to
+                // `mojo::core::ipcz_driver::Transport::OnChannelMessage` (real PDB name) - genuine
+                // ipcz-driver code, one hop from this project's own already-confirmed
+                // `ipcz-channel-error-hook-trace` targets (`#558`). Its own decompiled body makes ONE
+                // decisive inner dispatch call (RVA 0x7add7, resolved via a CFG-guarded vtable slot)
+                // and checks the raw result code immediately after (RVA 0x7addc, `test eax,eax` /
+                // `cmp eax,0Ch`): 0 or 12 are treated as benign and skip the error path; any OTHER
+                // non-zero value calls this object's own `NotifyError`-equivalent (vtable+12,
+                // constant `2`) instead of proceeding. Watching both the call and its real return
+                // code directly tests whether this is where our message's own processing fails.
+                const auto ipcz_accept_call = mod.image_base + 0x7add7;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Transport::OnChannelMessage's own "
+                                   "inner ipcz accept call at 0x%llx\n",
+                                   static_cast<unsigned long long>(ipcz_accept_call));
+                win_emu->emu().hook_memory_execution(ipcz_accept_call, [win_emu, ipcz_accept_call](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Transport::OnChannelMessage's own "
+                                       "inner ipcz accept call at 0x%llx, tid=%u resolved_target=0x%x\n",
+                                       static_cast<unsigned long long>(ipcz_accept_call), win_emu->current_thread().id, resolved_target);
+                });
+
+                const auto ipcz_accept_result = mod.image_base + 0x7addc;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Transport::OnChannelMessage's own "
+                                   "inner ipcz accept result at 0x%llx\n",
+                                   static_cast<unsigned long long>(ipcz_accept_result));
+                win_emu->emu().hook_memory_execution(ipcz_accept_result, [win_emu, ipcz_accept_result](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto result_code = emu.reg<uint32_t>(x86_register::eax);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Transport::OnChannelMessage's own inner ipcz "
+                                       "accept result at 0x%llx, tid=%u result_code=%u benign=%d\n",
+                                       static_cast<unsigned long long>(ipcz_accept_result), win_emu->current_thread().id, result_code,
+                                       (result_code == 0 || result_code == 12) ? 1 : 0);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
