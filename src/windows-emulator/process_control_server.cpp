@@ -1,5 +1,6 @@
 #include "std_include.hpp"
 #include "process_control_server.hpp"
+#include "window_control.hpp"
 
 #include "cross_process_memory.hpp"
 #include "memory_utils.hpp"
@@ -458,6 +459,9 @@ namespace sogen
             break;
         case process_control_op::export_handle:
             execute_export_handle(target, request, response);
+            break;
+        case process_control_op::window_control:
+            syscalls::execute_window_control(target, request, response);
             break;
         case process_control_op::query_wow64_info:
             execute_query_wow64_info(target, request, response);

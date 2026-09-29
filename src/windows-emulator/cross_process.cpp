@@ -40,6 +40,8 @@ namespace sogen
                 return "query_cycle_time";
             case process_control_op::export_handle:
                 return "export_handle";
+            case process_control_op::window_control:
+                return "window_control";
             }
 
             return "unknown";

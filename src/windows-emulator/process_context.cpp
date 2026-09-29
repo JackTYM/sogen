@@ -711,7 +711,7 @@ namespace sogen
 
         this->default_register_set = emu.save_registers();
 
-        this->user_handles.setup(is_wow64_process);
+        this->user_handles.setup(is_wow64_process, this->process_id >> 2);
 
         auto [mh, monitor_obj] = this->user_handles.allocate_object<USER_MONITOR>(handle_types::monitor);
         this->default_monitor_handle = mh;

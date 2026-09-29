@@ -25,6 +25,7 @@ namespace sogen
         query_wow64_info = 9,
         query_cycle_time = 10,
         export_handle = 13,
+        window_control = 14,
     };
 
     inline constexpr int process_control_default_timeout_ms = 10000;

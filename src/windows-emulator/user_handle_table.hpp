@@ -22,9 +22,13 @@ namespace sogen
         {
         }
 
-        void setup(const bool is_wow64_process)
+        static constexpr uint32_t INDEX_BITS = 14;
+        static constexpr uint32_t NAMESPACE_COUNT = 1u << 7;
+
+        void setup(const bool is_wow64_process, const uint32_t handle_namespace)
         {
             this->is_wow64_process_ = is_wow64_process;
+            this->handle_namespace_ = handle_namespace % NAMESPACE_COUNT;
 
             used_indices_.resize(MAX_HANDLES, false);
             next_free_index_ = 1;
@@ -88,6 +92,11 @@ namespace sogen
             }
         }
 
+        uint32_t handle_namespace() const
+        {
+            return this->handle_namespace_;
+        }
+
         emulator_object<USER_SERVERINFO> get_server_info() const
         {
             return {*memory_, server_info_addr_};
@@ -139,7 +148,7 @@ namespace sogen
         std::pair<handle, emulator_object<T>> allocate_object(handle_types::type type)
         {
             const auto index = find_free_index();
-            const auto object_handle = make_handle(index, type, false);
+            const auto object_handle = make_handle(index | (handle_namespace_ << INDEX_BITS), type, false);
 
             // user32's client-side handle validation (HMValidateHandle and friends) indexes the shared
             // aheList by the HANDLE's low 16 bits, not by our internal handle id. Handles are 4-aligned
@@ -156,7 +165,7 @@ namespace sogen
                 [&](USER_HANDLEENTRY& entry) {
                     entry.pHead = alloc_ptr;
                     entry.bType = get_native_type(type);
-                    entry.wUniq = static_cast<uint16_t>(type << 7);
+                    entry.wUniq = static_cast<uint16_t>((type << 7) | handle_namespace_);
                 },
                 ahe_slot);
 
@@ -176,6 +185,7 @@ namespace sogen
 
         void free_index(uint32_t index)
         {
+            index &= (1u << INDEX_BITS) - 1;
             if (index >= used_indices_.size() || !used_indices_.at(index))
             {
                 return;
@@ -204,6 +214,7 @@ namespace sogen
             buffer.write_vector(used_indices_);
             buffer.write(next_free_index_);
             buffer.write(is_wow64_process_);
+            buffer.write(handle_namespace_);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -218,6 +229,7 @@ namespace sogen
             buffer.read_vector(used_indices_);
             buffer.read(next_free_index_);
             buffer.read(is_wow64_process_);
+            buffer.read(handle_namespace_);
         }
 
       private:
@@ -372,6 +384,7 @@ namespace sogen
         std::array<uint64_t, WND_MESSAGE_BITS_COUNT> wnd_message_bits_addrs_{};
         std::vector<bool> used_indices_{};
         uint32_t next_free_index_{1};
+        uint32_t handle_namespace_{0};
         memory_manager* memory_{};
         bool is_wow64_process_{};
     };

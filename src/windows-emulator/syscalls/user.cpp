@@ -3,6 +3,8 @@
 #include "../syscall_utils.hpp"
 #include "../win32k_userconnect.hpp"
 #include "../window_destroy_orchestrator.hpp"
+#include "../window_control.hpp"
+#include "../cross_process.hpp"
 #include "segment_utils.hpp"
 #include "windows-emulator/user_callback_dispatch.hpp"
 #include <limits>
@@ -4872,6 +4874,15 @@ namespace sogen
             auto* child = c.proc.windows.get(hwnd_child);
             if (!child)
             {
+                if (is_foreign_window_handle(c, hwnd_child))
+                {
+                    const auto forwarded = forward_window_control(c, window_control_op::set_parent, hwnd_child, hwnd_new_parent);
+                    if (forwarded && static_cast<NTSTATUS>(forwarded->status) == STATUS_SUCCESS)
+                    {
+                        return forwarded->base_address;
+                    }
+                }
+
                 set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
                 return 0;
             }
@@ -4890,11 +4901,7 @@ namespace sogen
                 effective_parent = c.proc.windows.get(desktop);
             }
 
-            hwnd old_parent = child->parent_handle;
-            if (old_parent == desktop)
-            {
-                old_parent = 0;
-            }
+            const hwnd old_parent = child->parent_handle != 0 ? child->parent_handle : desktop;
 
             if (!effective_parent)
             {
@@ -5003,6 +5010,18 @@ namespace sogen
             auto* win = c.proc.windows.get(hWnd);
             if (!win)
             {
+                if (is_foreign_window_handle(c, hWnd))
+                {
+                    const window_pos_request position{.x = x, .y = y, .cx = cx, .cy = cy, .flags = flags};
+                    const auto forwarded =
+                        forward_window_control(c, window_control_op::set_window_pos, hWnd, 0, std::as_bytes(std::span{&position, 1}));
+                    if (forwarded && static_cast<NTSTATUS>(forwarded->status) == STATUS_SUCCESS)
+                    {
+                        return TRUE;
+                    }
+                }
+
+                set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
                 return FALSE;
             }
 
@@ -6997,6 +7016,110 @@ namespace sogen
         BOOL handle_NtUserHwndQueryRedirectionInfo()
         {
             return FALSE;
+        }
+
+        bool is_foreign_window_handle(const syscall_context& c, const uint64_t hwnd)
+        {
+            constexpr uint32_t namespace_mask = user_handle_table::NAMESPACE_COUNT - 1;
+            const auto handle_namespace = (get_handle_value(hwnd).id >> user_handle_table::INDEX_BITS) & namespace_mask;
+            return handle_namespace != c.proc.user_handles.handle_namespace();
+        }
+
+        std::optional<process_control_response> forward_window_control(const syscall_context& c, const window_control_op op,
+                                                                       const uint64_t hwnd, const uint64_t argument,
+                                                                       const std::span<const std::byte> payload)
+        {
+            process_control_request request{};
+            request.op = process_control_op::window_control;
+            request.info_class = static_cast<uint32_t>(op);
+            request.address = hwnd;
+            request.size = argument;
+            request.payload.assign(payload.begin(), payload.end());
+
+            for (const auto& record_id : c.proc.child_processes | std::views::keys)
+            {
+                auto* const channel = c.win_emu.find_child_control_channel(record_id);
+                if (!channel)
+                {
+                    continue;
+                }
+
+                const auto response = send_process_control_request(c, child_target{record_id, channel}, request);
+                if (response && static_cast<NTSTATUS>(response->status) != STATUS_INVALID_HANDLE)
+                {
+                    return response;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        void execute_window_control(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        {
+            auto& process = target.process;
+            auto* const win = process.windows.get(make_handle(request.address));
+            if (!win)
+            {
+                response.status = STATUS_INVALID_HANDLE;
+                return;
+            }
+
+            switch (static_cast<window_control_op>(request.info_class))
+            {
+            case window_control_op::set_parent: {
+                const auto desktop = process.default_desktop_window_handle.bits;
+                response.base_address = win->parent_handle != 0 ? win->parent_handle : desktop;
+                win->parent_handle = request.size;
+                response.status = STATUS_SUCCESS;
+                return;
+            }
+
+            case window_control_op::set_window_pos: {
+                window_pos_request position{};
+                if (request.payload.size() != sizeof(position))
+                {
+                    response.status = STATUS_INVALID_PARAMETER;
+                    return;
+                }
+
+                std::memcpy(&position, request.payload.data(), sizeof(position));
+
+                if ((position.flags & SWP_NOMOVE) == 0)
+                {
+                    win->x = position.x;
+                    win->y = position.y;
+                }
+
+                if ((position.flags & SWP_NOSIZE) == 0)
+                {
+                    win->width = position.cx;
+                    win->height = position.cy;
+                }
+
+                if ((position.flags & SWP_HIDEWINDOW) != 0)
+                {
+                    win->style &= ~WS_VISIBLE;
+                }
+                else if ((position.flags & SWP_SHOWWINDOW) != 0)
+                {
+                    win->style |= WS_VISIBLE;
+                }
+
+                sync_guest_window_rects(*win);
+                win->guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win->style; });
+
+                if (win->host_surface_window)
+                {
+                    target.ui().set_window_rect(win->handle, get_window_rect(*win));
+                    target.ui().set_window_visible(win->handle, (win->style & WS_VISIBLE) != 0);
+                }
+
+                response.status = STATUS_SUCCESS;
+                return;
+            }
+            }
+
+            response.status = STATUS_INVALID_PARAMETER;
         }
     }
 
