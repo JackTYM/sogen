@@ -1253,7 +1253,8 @@ namespace sogen
             }
 
             const auto record_id = c.proc.next_child_record_id++;
-            const uint32_t child_pid = 0x1000 + 4 * record_id;
+            auto* const pid_arena = c.proc.ensure_shared_arena();
+            const uint32_t child_pid = 0x1000 + 4 * (pid_arena ? pid_arena->allocate_process_index() : record_id);
 
             c.win_emu.log.log("NtCreateUserProcess: launching child %u: %s\n", record_id, u16_to_u8(image_path).c_str());
             c.win_emu.log.log("NtCreateUserProcess: child %u cmdline: %s\n", record_id, u16_to_u8(command_line).c_str());

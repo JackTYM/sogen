@@ -23,6 +23,7 @@ namespace sogen
         static constexpr size_t words_per_slot = 4;
         static constexpr size_t named_entry_count = 1024;
         static constexpr size_t max_named_key_length = 200;
+        static constexpr uint32_t first_child_process_index = 2;
 
         enum class named_object_kind : uint32_t
         {
@@ -51,6 +52,10 @@ namespace sogen
         }
 
         // Claims a free slot (zeroed, reference count 1) or returns nullopt when the arena is full.
+        // Every process of the tree draws its children's process ids from here, keeping them unique across
+        // the whole tree (named objects embed the process id, so two live processes must never share one).
+        uint32_t allocate_process_index();
+
         std::optional<uint32_t> allocate();
         void add_reference(uint32_t index);
         void release(uint32_t index);

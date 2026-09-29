@@ -26,6 +26,7 @@ namespace sogen
         uint64_t arena_id;
         std::atomic<uint32_t> allocation_hint;
         std::atomic<uint32_t> table_lock;
+        std::atomic<uint32_t> next_process_index;
     };
 
     struct kernel_arena::slot
@@ -95,6 +96,7 @@ namespace sogen
                          static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
         head->allocation_hint.store(0);
         head->table_lock.store(0);
+        head->next_process_index.store(first_child_process_index);
 
         return arena;
     }
@@ -129,6 +131,11 @@ namespace sogen
     kernel_arena::slot* kernel_arena::get_slot(const uint32_t index) const
     {
         return reinterpret_cast<slot*>(this->backing_->data()) + 1 + index;
+    }
+
+    uint32_t kernel_arena::allocate_process_index()
+    {
+        return this->get_header()->next_process_index.fetch_add(1);
     }
 
     std::optional<uint32_t> kernel_arena::allocate()
