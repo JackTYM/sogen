@@ -2971,14 +2971,49 @@ namespace sogen::fex
                 return this->wow64_host_window_reserved_ && rebase_for(this->is_wow64_process_, host_page) != 0;
             };
 
+            // A live mmio_region's host_backing (currently only KUSD) can sit anywhere inside the
+            // reserved wow64 window and is registered in mapped_host_pages_apple_ so ordinary
+            // first-claim logic treats it as already-mapped (see map_mmio's KUSD-collision fix) - but
+            // that makes it indistinguishable from an untouched window placeholder to
+            // is_placeholder_page above, which only looks at the address. release_host_claims
+            // (memory_manager.cpp) passes whole reservation gaps here, not just the freed range, so a
+            // gap that merely happens to span a live mmio region's page would otherwise get
+            // bulk-madvised/re-armed along with genuine placeholder pages below, discarding its real
+            // content out from under guest reads that never went through any release path themselves.
+            // Never let that happen: report the live range (if any) covering a page, so callers below
+            // can skip over it untouched instead of treating it as reclaimable.
+            const auto live_mmio_end_covering = [this](const uint64_t host_page) -> std::optional<uint64_t> {
+                for (const auto& region : this->mmio_regions_)
+                {
+                    if (region.host_backing == nullptr)
+                    {
+                        continue;
+                    }
+                    const uint64_t mmio_start = host_page_align_down_apple(region.address);
+                    const uint64_t mmio_end = mmio_start + region.host_backing_size;
+                    if (host_page >= mmio_start && host_page < mmio_end)
+                    {
+                        return mmio_end;
+                    }
+                }
+                return std::nullopt;
+            };
+
             auto it = this->mapped_host_pages_apple_.lower_bound(start);
             while (it != this->mapped_host_pages_apple_.end() && *it + host_page_size_apple <= end)
             {
+                const uint64_t run_start = *it;
+
+                if (const auto live_mmio_end = live_mmio_end_covering(run_start))
+                {
+                    it = this->mapped_host_pages_apple_.lower_bound(*live_mmio_end);
+                    continue;
+                }
+
                 // Coalesce the longest contiguous run of pages sharing the same handling (placeholder
                 // re-arm vs. real release) into one host mmap/munmap call instead of one per 16KB page
                 // -- mirrors unmap_host_pages_covering_apple's batching for the same reason: a single
                 // large VirtualFree can otherwise cost hundreds of individual host syscalls.
-                const uint64_t run_start = *it;
                 const bool placeholder = is_placeholder_page(run_start);
                 uint64_t run_end;
                 typename decltype(this->mapped_host_pages_apple_)::iterator run_it;
@@ -2995,6 +3030,24 @@ namespace sogen::fex
                     // free of a small region inside a mostly-unclaimed 4GB window otherwise pays for a
                     // multi-thousand-entry std::set walk just to re-derive a bound known in closed form.
                     run_end = std::min<uint64_t>(end, wow64_guest_address_space_size);
+
+                    // A live mmio region can still fall inside that otherwise-dense run.
+                    // mmio_regions_ is tiny (this backend's only current consumer is KUSD), so checking
+                    // each one directly here is cheap and avoids re-introducing the page-by-page walk
+                    // the comment above avoids.
+                    for (const auto& region : this->mmio_regions_)
+                    {
+                        if (region.host_backing == nullptr)
+                        {
+                            continue;
+                        }
+                        const uint64_t mmio_start = host_page_align_down_apple(region.address);
+                        if (mmio_start > run_start && mmio_start < run_end)
+                        {
+                            run_end = mmio_start;
+                        }
+                    }
+
                     run_it = this->mapped_host_pages_apple_.lower_bound(run_end);
                 }
                 else
