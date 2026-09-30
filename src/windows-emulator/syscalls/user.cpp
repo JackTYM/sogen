@@ -502,6 +502,14 @@ namespace sogen
 
         sxs_class_lookup_result ensure_sxs_window_class(const syscall_context& c, const std::u16string_view class_name)
         {
+            // The syscall handler runs in 64-bit mode, so it can't call the 32-bit RegisterClassNameW
+            // of a WoW64 process. Failing with ERROR_CANNOT_FIND_WND_CLASS instead makes the 32-bit
+            // user32 register the class client-side and retry the syscall, as it does on real Windows.
+            if (c.proc.is_wow64_process)
+            {
+                return {};
+            }
+
             const auto dll_name = find_window_class_owning_dll(c, class_name);
             if (!dll_name.has_value())
             {
