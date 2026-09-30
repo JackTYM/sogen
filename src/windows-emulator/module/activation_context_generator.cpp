@@ -84,6 +84,7 @@ namespace sogen
         struct built_section
         {
             std::vector<std::uint8_t> bytes;
+
             struct element
             {
                 std::uint32_t key_offset;
@@ -91,6 +92,7 @@ namespace sogen
                 std::uint32_t value_offset;
                 std::uint32_t value_length;
             };
+
             std::vector<element> elements;
         };
 
@@ -284,6 +286,7 @@ namespace sogen
 
                 const auto version_name_bytes = to_utf16le(piece.version_specific_class_name);
                 const auto dll_name_bytes = to_utf16le(piece.dll_name);
+                constexpr std::array<std::uint8_t, 2> utf16_terminator{};
 
                 activation_context_data_window_class_redirection redirection{};
                 redirection.size = sizeof(redirection);
@@ -296,9 +299,10 @@ namespace sogen
                 append(tail, redirection);
                 tail.insert(tail.end(), version_name_bytes.begin(), version_name_bytes.end());
                 tail.insert(tail.end(), dll_name_bytes.begin(), dll_name_bytes.end());
+                tail.insert(tail.end(), utf16_terminator.begin(), utf16_terminator.end());
 
-                const auto value_length =
-                    static_cast<std::uint32_t>(sizeof(redirection) + version_name_bytes.size() + dll_name_bytes.size());
+                const auto value_length = static_cast<std::uint32_t>(sizeof(redirection) + version_name_bytes.size() +
+                                                                     dll_name_bytes.size() + utf16_terminator.size());
 
                 elements.push_back(
                     {.key_offset = key_offset, .key_length = key_length, .value_offset = value_offset, .value_length = value_length});
