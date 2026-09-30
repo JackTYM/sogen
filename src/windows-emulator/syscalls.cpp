@@ -865,6 +865,8 @@ namespace sogen
                                 int y_src, DWORD rop, DWORD cr_back_color, FLONG fl);
         BOOL handle_NtGdiStretchBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int dst_width, int dst_height, hdc src_dc,
                                     int x_src, int y_src, int src_width, int src_height, DWORD rop, DWORD cr_back_color);
+        BOOL handle_NtGdiAlphaBlend(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int dst_width, int dst_height, hdc src_dc,
+                                    int x_src, int y_src, int src_width, int src_height, DWORD blend_function, uint64_t color_transform);
         BOOL handle_NtGdiPolyPatBlt(const syscall_context& c, hdc dc, DWORD rop, emulator_pointer poly, DWORD count, DWORD mode);
         BOOL handle_NtGdiExtTextOutW(const syscall_context& c, hdc dc, LONG x, LONG y, UINT options, emulator_pointer rect,
                                      emulator_pointer text, UINT count, emulator_pointer dx, DWORD code_page);
@@ -3843,6 +3845,7 @@ namespace sogen
         add_handler(NtGdiBitBlt);
         add_handler(NtGdiStretchBlt);
         add_handler(NtGdiTransparentBlt);
+        add_handler(NtGdiAlphaBlend);
         add_handler(NtGdiPolyPatBlt);
         add_handler(NtGdiExtTextOutW);
         add_handler(NtGdiGetRealizationInfo);
