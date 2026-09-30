@@ -700,6 +700,7 @@ namespace sogen
         uint64_t handle_NtUserScheduleDispatchNotification(const syscall_context& c, hwnd hwnd);
         uint64_t handle_NtUserSetTimer(const syscall_context& c, hwnd hwnd, uint64_t timer_id, uint32_t elapsed_ms, uint64_t timer_proc);
         uint64_t handle_NtUserSetSystemTimer(const syscall_context& c, hwnd hwnd, uint64_t timer_id, uint32_t elapsed_ms);
+        BOOL handle_NtUserSetWindowDisplayAffinity(const syscall_context& c, hwnd window, uint32_t affinity);
         BOOL handle_NtUserKillTimer(const syscall_context& c, hwnd hwnd, uint64_t timer_id);
         BOOL handle_NtUserValidateTimerCallback(const syscall_context& c, uint64_t timer_proc);
         uint32_t handle_NtUserGetQueueStatusReadonly(const syscall_context& c, UINT flags);
@@ -902,6 +903,9 @@ namespace sogen
                                                      emulator_object<EMU_D3DKMT_GETDISPLAYMODELIST> display_mode_list);
         NTSTATUS handle_NtGdiDdDDIGetSharedPrimaryHandle(const syscall_context& c,
                                                          emulator_object<EMU_D3DKMT_GETSHAREDPRIMARYHANDLE> shared_primary);
+        NTSTATUS handle_NtGdiDdDDIWaitForVerticalBlankEvent(const syscall_context& c, uint64_t wait_description);
+        NTSTATUS handle_NtGdiDdDDIWaitForVerticalBlankEvent2(const syscall_context& c, uint64_t wait_description);
+        NTSTATUS handle_NtGdiDdDDIConfigureSharedResource(const syscall_context& c, uint64_t configure_shared_resource);
         NTSTATUS handle_NtGdiDdDDIGetDeviceState(const syscall_context& c, emulator_object<EMU_D3DKMT_GETDEVICESTATE> device_state);
         NTSTATUS handle_NtGdiDdDDIMarkDeviceAsError(const syscall_context& c, emulator_object<EMU_D3DKMT_MARKDEVICEASERROR> mark_error);
         NTSTATUS handle_NtGdiDdDDIGetCachedHybridQueryValue(const syscall_context& c, emulator_object<uint32_t> value);
@@ -922,6 +926,114 @@ namespace sogen
         NTSTATUS handle_NtDCompositionGetFrameStatistics(const syscall_context& c,
                                                          emulator_object<DCOMPOSITION_FRAME_STATISTICS> statistics,
                                                          emulator_pointer reserved);
+
+        NTSTATUS handle_NtDCompositionCreateChannel(const syscall_context& c, emulator_object<handle> channel_handle,
+                                                    emulator_object<uint64_t> section_size, emulator_object<uint64_t> section_base);
+        NTSTATUS handle_NtDCompositionDestroyChannel(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                     uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionCommitChannel(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                    uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionProcessChannelBatchBuffer(const syscall_context& c, handle channel_handle, uint32_t batch_size,
+                                                                emulator_object<uint32_t> commands_processed,
+                                                                emulator_object<uint8_t> flag);
+        NTSTATUS handle_NtDCompositionWaitForChannel(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                     uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionSetChannelCommitCompletionEvent(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                      uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionCreateAndBindSharedSection(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                 uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionCreateSharedResourceHandle(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                 uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionDuplicateHandleToProcess(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                               uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionSynchronize(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                  uint64_t a6);
+        NTSTATUS handle_NtDCompositionReleaseAllResources(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                          uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionGetBatchId(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                 uint64_t a6);
+        NTSTATUS handle_NtDCompositionGetChannels(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                  uint64_t a6);
+        NTSTATUS handle_NtDCompositionEnableMMCSS(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                  uint64_t a6);
+        NTSTATUS handle_NtDCompositionSetChannelConnectionId(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                             uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionCreateConnection(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                       uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionDestroyConnection(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                        uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionConnectPipe(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                  uint64_t a6);
+        NTSTATUS handle_NtDCompositionBeginFrame(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                 uint64_t a6);
+        NTSTATUS handle_NtDCompositionConfirmFrame(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                   uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionRetireFrame(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                  uint64_t a6);
+        NTSTATUS handle_NtDCompositionDiscardFrame(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                   uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionGetDeletedResources(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                          uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionGetFrameSurfaceUpdates(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                             uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionGetTargetStatistics(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                          uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionCreateSynchronizationObject(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                  uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionCommitSynchronizationObject(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                  uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionSetChildRootVisual(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                         uint64_t a5, uint64_t a6);
+
+        NTSTATUS handle_NtBindCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
+                                                 uint64_t a6);
+        NTSTATUS handle_NtUnBindCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                   uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtCreateCompositionSurfaceHandle(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                         uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtNotifyPresentToCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                            uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtSetCompositionSurfaceBufferUsage(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                           uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtSetCompositionSurfaceDirectFlipState(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                               uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtSetCompositionSurfaceIndependentFlipInfo(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                   uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtSetCompositionSurfaceStatistics(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                          uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtSetCompositionSurfaceAnalogExclusive(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                               uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtQueryCompositionSurfaceBinding(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                         uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtQueryCompositionSurfaceHDRMetaData(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                             uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtQueryCompositionSurfaceRenderingRealization(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                      uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtQueryCompositionSurfaceStatistics(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                            uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtOpenCompositionSurfaceDirtyRegion(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                            uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtOpenCompositionSurfaceSectionInfo(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                            uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtOpenCompositionSurfaceSwapChainHandleInfo(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                    uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtValidateCompositionSurfaceHandle(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                           uint64_t a5, uint64_t a6);
+        BOOL handle_NtUserCreateDCompositionHwndTarget(const syscall_context& c, hwnd window, uint32_t topmost,
+                                                       emulator_object<handle> target_handle);
+        BOOL handle_NtUserDestroyDCompositionHwndTarget(const syscall_context& c, hwnd window, handle target_handle);
+        NTSTATUS handle_NtUserGetDCompositionHwndBitmap(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                        uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtUserGetResizeDCompositionSynchronizationObject(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                         uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtModerncoreCreateDCompositionHwndTarget(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                 uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtModerncoreDestroyDCompositionHwndTarget(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3,
+                                                                  uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtModerncoreGetResizeDCompositionSynchronizationObject(const syscall_context& c, uint64_t a1, uint64_t a2,
+                                                                               uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtGdiDdDDIGetPostCompositionCaps(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                                                         uint64_t a5, uint64_t a6);
 
         // syscalls/trace.cpp:
         NTSTATUS handle_NtTraceControl(const syscall_context& c, ULONG function_code, uint64_t input_buffer, ULONG input_buffer_length,
@@ -1799,6 +1911,9 @@ namespace sogen
         add_handler(NtGdiDdDDIGetDisplayModeList);
         add_handler(NtGdiDdDDIGetSharedPrimaryHandle);
         add_handler(NtGdiDdDDIGetDeviceState);
+        add_handler(NtGdiDdDDIConfigureSharedResource);
+        add_handler(NtGdiDdDDIWaitForVerticalBlankEvent);
+        add_handler(NtGdiDdDDIWaitForVerticalBlankEvent2);
         add_handler(NtGdiDdDDIMarkDeviceAsError);
         add_handler(NtGdiDdDDIGetCachedHybridQueryValue);
         add_handler(NtGdiDdDDICacheHybridQueryValue);
@@ -1818,12 +1933,66 @@ namespace sogen
         add_handler(NtGdiDdDDIOpenAdapterFromLuid);
         add_handler(NtGdiDdDDIOpenAdapterFromHdc);
         add_handler(NtDCompositionGetFrameStatistics);
+        add_handler(NtBindCompositionSurface);
+        add_handler(NtUnBindCompositionSurface);
+        add_handler(NtCreateCompositionSurfaceHandle);
+        add_handler(NtNotifyPresentToCompositionSurface);
+        add_handler(NtSetCompositionSurfaceBufferUsage);
+        add_handler(NtSetCompositionSurfaceDirectFlipState);
+        add_handler(NtSetCompositionSurfaceIndependentFlipInfo);
+        add_handler(NtSetCompositionSurfaceStatistics);
+        add_handler(NtSetCompositionSurfaceAnalogExclusive);
+        add_handler(NtQueryCompositionSurfaceBinding);
+        add_handler(NtQueryCompositionSurfaceHDRMetaData);
+        add_handler(NtQueryCompositionSurfaceRenderingRealization);
+        add_handler(NtQueryCompositionSurfaceStatistics);
+        add_handler(NtOpenCompositionSurfaceDirtyRegion);
+        add_handler(NtOpenCompositionSurfaceSectionInfo);
+        add_handler(NtOpenCompositionSurfaceSwapChainHandleInfo);
+        add_handler(NtValidateCompositionSurfaceHandle);
+        add_handler(NtUserCreateDCompositionHwndTarget);
+        add_handler(NtUserDestroyDCompositionHwndTarget);
+        add_handler(NtUserGetDCompositionHwndBitmap);
+        add_handler(NtUserGetResizeDCompositionSynchronizationObject);
+        add_handler(NtModerncoreCreateDCompositionHwndTarget);
+        add_handler(NtModerncoreDestroyDCompositionHwndTarget);
+        add_handler(NtModerncoreGetResizeDCompositionSynchronizationObject);
+        add_handler(NtGdiDdDDIGetPostCompositionCaps);
+        add_handler(NtDCompositionCreateChannel);
+        add_handler(NtDCompositionDestroyChannel);
+        add_handler(NtDCompositionCommitChannel);
+        add_handler(NtDCompositionProcessChannelBatchBuffer);
+        add_handler(NtDCompositionWaitForChannel);
+        add_handler(NtDCompositionSetChannelCommitCompletionEvent);
+        add_handler(NtDCompositionCreateAndBindSharedSection);
+        add_handler(NtDCompositionCreateSharedResourceHandle);
+        add_handler(NtDCompositionDuplicateHandleToProcess);
+        add_handler(NtDCompositionSynchronize);
+        add_handler(NtDCompositionReleaseAllResources);
+        add_handler(NtDCompositionGetBatchId);
+        add_handler(NtDCompositionGetChannels);
+        add_handler(NtDCompositionEnableMMCSS);
+        add_handler(NtDCompositionSetChannelConnectionId);
+        add_handler(NtDCompositionCreateConnection);
+        add_handler(NtDCompositionDestroyConnection);
+        add_handler(NtDCompositionConnectPipe);
+        add_handler(NtDCompositionBeginFrame);
+        add_handler(NtDCompositionConfirmFrame);
+        add_handler(NtDCompositionRetireFrame);
+        add_handler(NtDCompositionDiscardFrame);
+        add_handler(NtDCompositionGetDeletedResources);
+        add_handler(NtDCompositionGetFrameSurfaceUpdates);
+        add_handler(NtDCompositionGetTargetStatistics);
+        add_handler(NtDCompositionCreateSynchronizationObject);
+        add_handler(NtDCompositionCommitSynchronizationObject);
+        add_handler(NtDCompositionSetChildRootVisual);
         add_handler(NtGdiSelectFont);
         add_handler(NtUserInitThreadCoreMessagingIocp2);
         add_handler(NtUserDrainThreadCoreMessagingCompletions2);
         add_handler(NtUserSetTimer);
         add_handler(NtUserSetSystemTimer);
         add_handler(NtUserKillTimer);
+        add_handler(NtUserSetWindowDisplayAffinity);
         add_handler(NtUserValidateTimerCallback);
         add_handler(NtAllocateReserveObject);
         add_handler(NtUserMsgWaitForMultipleObjectsEx);

@@ -5136,6 +5136,27 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS wait_for_vertical_blank(const syscall_context& c)
+        {
+            constexpr int64_t refresh_period_100ns = 166667;
+
+            LARGE_INTEGER delay{};
+            delay.QuadPart = -refresh_period_100ns;
+            c.thread().await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), delay);
+            c.win_emu.yield_thread(c.vcpu, false);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIWaitForVerticalBlankEvent(const syscall_context& c, const uint64_t /*wait_description*/)
+        {
+            return wait_for_vertical_blank(c);
+        }
+
+        NTSTATUS handle_NtGdiDdDDIWaitForVerticalBlankEvent2(const syscall_context& c, const uint64_t /*wait_description*/)
+        {
+            return wait_for_vertical_blank(c);
+        }
+
         NTSTATUS handle_NtGdiDdDDIGetDeviceState(const syscall_context& c, const emulator_object<EMU_D3DKMT_GETDEVICESTATE> device_state)
         {
             if (!device_state)
@@ -5154,6 +5175,11 @@ namespace sogen
                 state.State = state.StateType == d3dkmt_devicestate_execution ? d3dkmt_deviceexecution_active : 0;
             });
 
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIConfigureSharedResource(const syscall_context& /*c*/, const uint64_t /*configure_shared_resource*/)
+        {
             return STATUS_SUCCESS;
         }
 
@@ -5529,12 +5555,17 @@ namespace sogen
             const auto now = c.win_emu.clock().steady_now().time_since_epoch().count();
             const auto frequency = c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.QpcFrequency; });
 
+            constexpr uint32_t refresh_rate_hz = 60;
+            const auto frame_period = static_cast<int64_t>(frequency / refresh_rate_hz);
+
             statistics.access([&](DCOMPOSITION_FRAME_STATISTICS& stats) {
                 stats = {};
-                stats.lastFrameTime.QuadPart = now;
+                stats.lastFrameTime.QuadPart = now - frame_period;
+                stats.currentCompositionRate.Numerator = refresh_rate_hz;
+                stats.currentCompositionRate.Denominator = 1;
                 stats.currentTime.QuadPart = now;
                 stats.timeFrequency.QuadPart = frequency;
-                stats.nextEstimatedFrameTime.QuadPart = now;
+                stats.nextEstimatedFrameTime.QuadPart = now + frame_period;
             });
 
             if (reserved != 0)

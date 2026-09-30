@@ -14,6 +14,14 @@
 
 namespace sogen
 {
+    namespace
+    {
+        constexpr uint32_t MEM_RESERVE_PLACEHOLDER = 0x00040000;
+        constexpr uint32_t MEM_REPLACE_PLACEHOLDER = 0x00004000;
+        constexpr uint32_t MEM_COALESCE_PLACEHOLDERS = 0x00000001;
+        constexpr uint32_t MEM_PRESERVE_PLACEHOLDER = 0x00000002;
+    }
+
     namespace syscalls
     {
         namespace
@@ -769,9 +777,35 @@ namespace sogen
             const bool reserve = allocation_type & MEM_RESERVE;
             const bool commit = allocation_type & MEM_COMMIT;
 
-            if ((allocation_type & ~(MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN | MEM_WRITE_WATCH)) || (!commit && !reserve))
+            constexpr uint32_t placeholder_flags = MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
+            if ((allocation_type & ~(MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN | MEM_WRITE_WATCH | placeholder_flags)) ||
+                (!commit && !reserve))
             {
                 return STATUS_INVALID_PARAMETER;
+            }
+
+            if ((allocation_type & MEM_REPLACE_PLACEHOLDER) != 0)
+            {
+                if (requested_base == 0 || (allocation_type & MEM_RESERVE_PLACEHOLDER) != 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto replaced = c.win_emu.memory.replace_placeholder(potential_base, static_cast<size_t>(allocation_bytes),
+                                                                           commit ? std::optional{*protection} : std::nullopt);
+                return replaced ? STATUS_SUCCESS : STATUS_CONFLICTING_ADDRESSES;
+            }
+
+            if ((allocation_type & MEM_RESERVE_PLACEHOLDER) != 0)
+            {
+                if (commit || !reserve || base_protection != PAGE_NOACCESS)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                return c.win_emu.memory.reserve_placeholder(potential_base, static_cast<size_t>(allocation_bytes))
+                           ? STATUS_SUCCESS
+                           : STATUS_MEMORY_NOT_ALLOCATED;
             }
 
             if (commit && !reserve && c.win_emu.memory.commit_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection))
@@ -841,6 +875,35 @@ namespace sogen
 
             const auto allocation_base = base_address.read();
             const auto allocation_size = bytes_to_allocate.read();
+
+            if ((free_type & MEM_RELEASE) && (free_type & (MEM_PRESERVE_PLACEHOLDER | MEM_COALESCE_PLACEHOLDERS)) != 0)
+            {
+                const auto placeholder_base = page_align_down(allocation_base);
+                const auto placeholder_size = static_cast<size_t>(page_align_up(allocation_base + allocation_size) - placeholder_base);
+
+                bool succeeded = false;
+                if ((free_type & MEM_COALESCE_PLACEHOLDERS) != 0)
+                {
+                    succeeded = c.win_emu.memory.coalesce_placeholders(placeholder_base, placeholder_size);
+                }
+                else if (c.win_emu.memory.is_placeholder(placeholder_base))
+                {
+                    succeeded = c.win_emu.memory.split_placeholder(placeholder_base, placeholder_size);
+                }
+                else
+                {
+                    succeeded = c.win_emu.memory.preserve_as_placeholder(placeholder_base, placeholder_size);
+                }
+
+                if (!succeeded)
+                {
+                    return STATUS_CONFLICTING_ADDRESSES;
+                }
+
+                base_address.write(placeholder_base);
+                bytes_to_allocate.write(static_cast<uint64_t>(placeholder_size));
+                return STATUS_SUCCESS;
+            }
 
             if (free_type & MEM_RELEASE)
             {

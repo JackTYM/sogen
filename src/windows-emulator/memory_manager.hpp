@@ -77,6 +77,9 @@ namespace sogen
             committed_region_map committed_regions{};
             memory_region_kind kind{memory_region_kind::private_allocation};
             std::u16string mapped_filename{};
+            // A reservation with no backing that can be split, merged and later replaced by a real allocation
+            // or view (VirtualAlloc2's MEM_RESERVE_PLACEHOLDER family).
+            bool placeholder{false};
         };
 
         using reserved_region_map = std::map<uint64_t, reserved_region>;
@@ -141,6 +144,15 @@ namespace sogen
         bool decommit_memory(uint64_t address, size_t size);
 
         bool release_memory(uint64_t address, size_t size);
+
+        bool reserve_placeholder(uint64_t address, size_t size);
+        bool is_placeholder(uint64_t address) const;
+        bool split_placeholder(uint64_t address, size_t size);
+        bool coalesce_placeholders(uint64_t address, size_t size);
+        bool preserve_as_placeholder(uint64_t address, size_t size);
+        // Turns the placeholder that is exactly [address, address + size) into an ordinary reservation,
+        // committing it when permissions are given.
+        bool replace_placeholder(uint64_t address, size_t size, std::optional<nt_memory_permission> commit_permissions);
 
         void unmap_all_memory();
 

@@ -5004,6 +5004,17 @@ namespace sogen
             return old_parent;
         }
 
+        BOOL handle_NtUserSetWindowDisplayAffinity(const syscall_context& c, const hwnd window, const uint32_t /*affinity*/)
+        {
+            if (!c.proc.windows.get(window))
+            {
+                set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
+                return FALSE;
+            }
+
+            return TRUE;
+        }
+
         BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd /*hwnd_insert_after*/, const int x,
                                        const int y, const int cx, const int cy, const UINT flags)
         {

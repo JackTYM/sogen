@@ -530,6 +530,49 @@ namespace sogen
 
                     break;
                 }
+                case handle_types::section:
+                case handle_types::event:
+                case handle_types::mutant:
+                case handle_types::semaphore:
+                case handle_types::timer: {
+                    const auto name = [&]() -> std::optional<std::u16string> {
+                        switch (effective_handle.value.type)
+                        {
+                        case handle_types::section: {
+                            const auto* entry = c.proc.sections.get(effective_handle);
+                            return entry ? std::optional{entry->object->name} : std::nullopt;
+                        }
+                        case handle_types::event: {
+                            const auto* entry = c.proc.events.get(effective_handle);
+                            return entry ? std::optional{entry->name} : std::nullopt;
+                        }
+                        case handle_types::mutant: {
+                            const auto* entry = c.proc.mutants.get(effective_handle);
+                            return entry ? std::optional{entry->name} : std::nullopt;
+                        }
+                        case handle_types::semaphore: {
+                            const auto* entry = c.proc.semaphores.get(effective_handle);
+                            return entry ? std::optional{entry->name} : std::nullopt;
+                        }
+                        default: {
+                            const auto* entry = c.proc.timers.get(effective_handle);
+                            return entry ? std::optional{entry->name} : std::nullopt;
+                        }
+                        }
+                    }();
+
+                    if (!name)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+
+                    if (!name->empty())
+                    {
+                        device_path = u"\\Sessions\\1\\BaseNamedObjects\\" + *name;
+                    }
+
+                    break;
+                }
                 default:
                     c.win_emu.log.error("Unsupported handle type for name information query: %X\n", effective_handle.value.type);
                     c.emu.stop();

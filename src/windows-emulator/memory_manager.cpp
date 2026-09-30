@@ -93,6 +93,7 @@ namespace sogen
             buffer.write(region.initial_permission);
             buffer.write<uint64_t>(region.length);
             buffer.write_map(region.committed_regions);
+            buffer.write(region.placeholder);
         }
 
         static void deserialize(buffer_deserializer& buffer, memory_manager::reserved_region& region)
@@ -102,6 +103,7 @@ namespace sogen
             buffer.read(region.initial_permission);
             region.length = static_cast<size_t>(buffer.read<uint64_t>());
             buffer.read_map(region.committed_regions);
+            buffer.read(region.placeholder);
         }
     }
 
@@ -1417,6 +1419,109 @@ namespace sogen
         }
 
         entry->second.mapped_filename = std::move(filename);
+    }
+
+    bool memory_manager::reserve_placeholder(const uint64_t address, const size_t size)
+    {
+        if (!this->allocate_memory(address, size, nt_memory_permission(memory_permission::none), true))
+        {
+            return false;
+        }
+
+        this->find_reserved_region(address)->second.placeholder = true;
+        return true;
+    }
+
+    bool memory_manager::is_placeholder(const uint64_t address) const
+    {
+        const auto entry = const_cast<memory_manager*>(this)->find_reserved_region(address);
+        return entry != this->reserved_regions_.end() && entry->second.placeholder;
+    }
+
+    bool memory_manager::split_placeholder(const uint64_t address, const size_t size)
+    {
+        const auto entry = this->find_reserved_region(address);
+        if (entry == this->reserved_regions_.end() || !entry->second.placeholder)
+        {
+            return false;
+        }
+
+        const auto start = entry->first;
+        const auto end = start + entry->second.length;
+        if (address + size > end)
+        {
+            return false;
+        }
+
+        const auto template_region = entry->second;
+        this->reserved_regions_.erase(entry);
+
+        const auto insert_piece = [&](const uint64_t piece_start, const uint64_t piece_end) {
+            if (piece_end > piece_start)
+            {
+                auto piece = template_region;
+                piece.length = static_cast<size_t>(piece_end - piece_start);
+                this->reserved_regions_.emplace(piece_start, std::move(piece));
+            }
+        };
+
+        insert_piece(start, address);
+        insert_piece(address, address + size);
+        insert_piece(address + size, end);
+        this->update_layout_version();
+        return true;
+    }
+
+    bool memory_manager::coalesce_placeholders(const uint64_t address, const size_t size)
+    {
+        const auto end = address + size;
+        auto entry = this->reserved_regions_.find(address);
+        if (entry == this->reserved_regions_.end())
+        {
+            return false;
+        }
+
+        auto merged = entry->second;
+        auto cursor = entry->first;
+        while (cursor < end)
+        {
+            const auto piece = this->reserved_regions_.find(cursor);
+            if (piece == this->reserved_regions_.end() || !piece->second.placeholder)
+            {
+                return false;
+            }
+
+            cursor += piece->second.length;
+        }
+
+        if (cursor != end)
+        {
+            return false;
+        }
+
+        this->reserved_regions_.erase(this->reserved_regions_.find(address), this->reserved_regions_.lower_bound(end));
+        merged.length = size;
+        this->reserved_regions_.emplace(address, std::move(merged));
+        this->update_layout_version();
+        return true;
+    }
+
+    bool memory_manager::preserve_as_placeholder(const uint64_t address, const size_t size)
+    {
+        return this->release_memory(address, size) && this->reserve_placeholder(address, size);
+    }
+
+    bool memory_manager::replace_placeholder(const uint64_t address, const size_t size,
+                                             const std::optional<nt_memory_permission> commit_permissions)
+    {
+        const auto entry = this->reserved_regions_.find(address);
+        if (entry == this->reserved_regions_.end() || !entry->second.placeholder || entry->second.length != size)
+        {
+            return false;
+        }
+
+        entry->second.placeholder = false;
+        return !commit_permissions.has_value() || this->commit_memory(address, size, *commit_permissions);
     }
 
     memory_manager::reserved_region_map::iterator memory_manager::find_reserved_region(const uint64_t address)
