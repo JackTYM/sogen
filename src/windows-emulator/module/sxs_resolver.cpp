@@ -14,22 +14,22 @@ namespace sogen
             return value;
         }
 
-        std::string arch_prefix(const std::string& processor_architecture)
+        std::string arch_prefix(const std::string& processor_architecture, const bool is_wow64_process)
         {
             const auto arch = to_lower(processor_architecture);
-            if (arch == "x86")
+            if (arch == "x86" || (arch == "*" && is_wow64_process))
             {
                 return "x86_";
             }
-            // "amd64", "*", and anything else requesting a 64-bit process resolve against the
-            // amd64_ prefix - "*" (any architecture) is what most manifests actually specify,
-            // and the caller only ever resolves within a single process's own bitness.
+            // "*" (any architecture) is what most manifests actually specify, and it resolves to
+            // the architecture of the requesting process itself.
             return "amd64_";
         }
 
-        std::string identity_prefix(const assembly_identity& identity)
+        std::string identity_prefix(const assembly_identity& identity, const bool is_wow64_process)
         {
-            return arch_prefix(identity.processor_architecture) + to_lower(identity.name) + "_" + to_lower(identity.public_key_token) + "_";
+            return arch_prefix(identity.processor_architecture, is_wow64_process) + to_lower(identity.name) + "_" +
+                   to_lower(identity.public_key_token) + "_";
         }
 
         std::optional<std::string> strip_manifest_suffix(const std::string& filename)
@@ -44,9 +44,9 @@ namespace sogen
     }
 
     std::optional<std::string> resolve_assembly(const assembly_identity& identity, const winners_lookup_fn& winners,
-                                                const std::vector<std::string>& manifest_filenames)
+                                                const std::vector<std::string>& manifest_filenames, const bool is_wow64_process)
     {
-        const auto prefix = identity_prefix(identity);
+        const auto prefix = identity_prefix(identity, is_wow64_process);
 
         std::vector<std::string> matching_dirs{};
         for (const auto& filename : manifest_filenames)

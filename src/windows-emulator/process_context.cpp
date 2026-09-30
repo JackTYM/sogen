@@ -589,8 +589,8 @@ namespace sogen
         });
 
         std::uint64_t activation_context_data_address = 0;
-        if (const auto activation_context_blob = build_activation_context_blob(win_emu.memory, win_emu.registry, win_emu.file_sys,
-                                                                               executable.image_base, executable.module_path);
+        if (const auto activation_context_blob = build_activation_context_blob(
+                win_emu.memory, win_emu.registry, win_emu.file_sys, executable.image_base, executable.module_path, this->is_wow64_process);
             activation_context_blob.has_value())
         {
             const auto blob_address = allocator.reserve(activation_context_blob->size(), alignof(std::uint32_t));
@@ -715,6 +715,7 @@ namespace sogen
 
                 // Use the dedicated 32-bit ApiSetMap for PEB32
                 p32.ApiSetMap = static_cast<uint32_t>(apiset_map_address_32);
+                p32.ActivationContextData = static_cast<uint32_t>(activation_context_data_address);
 
                 // Copy similar settings from PEB64
                 p32.ProcessHeap = 0;

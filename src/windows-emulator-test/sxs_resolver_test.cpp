@@ -25,7 +25,7 @@ namespace sogen
             return std::nullopt;
         };
 
-        const auto resolved = resolve_assembly(identity, winners, manifests);
+        const auto resolved = resolve_assembly(identity, winners, manifests, false);
         ASSERT_TRUE(resolved.has_value());
         EXPECT_EQ(*resolved, "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a");
     }
@@ -45,7 +45,7 @@ namespace sogen
 
         const auto no_winners = [](const std::string&) -> std::optional<std::string> { return std::nullopt; };
 
-        const auto resolved = resolve_assembly(identity, no_winners, manifests);
+        const auto resolved = resolve_assembly(identity, no_winners, manifests, false);
         ASSERT_TRUE(resolved.has_value());
         EXPECT_EQ(*resolved, "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a");
     }
@@ -64,7 +64,28 @@ namespace sogen
 
         const auto no_winners = [](const std::string&) -> std::optional<std::string> { return std::nullopt; };
 
-        EXPECT_FALSE(resolve_assembly(identity, no_winners, manifests).has_value());
+        EXPECT_FALSE(resolve_assembly(identity, no_winners, manifests, false).has_value());
+    }
+
+    TEST(SxsResolver, WildcardArchitectureFollowsProcessBitness)
+    {
+        const assembly_identity identity{.name = "Microsoft.Windows.Common-Controls",
+                                         .version = "6.0.0.0",
+                                         .processor_architecture = "*",
+                                         .public_key_token = "6595b64144ccf1df",
+                                         .language = "*"};
+
+        const std::vector<std::string> manifests = {
+            "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a.manifest",
+            "x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33296_none_35e18d58ef6e765a.manifest",
+        };
+
+        const auto no_winners = [](const std::string&) -> std::optional<std::string> { return std::nullopt; };
+
+        EXPECT_EQ(resolve_assembly(identity, no_winners, manifests, false),
+                  "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a");
+        EXPECT_EQ(resolve_assembly(identity, no_winners, manifests, true),
+                  "x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33296_none_35e18d58ef6e765a");
     }
 
     TEST(SxsResolver, NoMatchReturnsNullopt)
@@ -81,6 +102,6 @@ namespace sogen
 
         const auto no_winners = [](const std::string&) -> std::optional<std::string> { return std::nullopt; };
 
-        EXPECT_FALSE(resolve_assembly(identity, no_winners, manifests).has_value());
+        EXPECT_FALSE(resolve_assembly(identity, no_winners, manifests, false).has_value());
     }
 }

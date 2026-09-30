@@ -59,7 +59,7 @@ namespace sogen
 
     std::optional<std::vector<std::uint8_t>> build_activation_context_blob(memory_interface& memory, registry_manager& registry,
                                                                            const file_system& files, const std::uint64_t image_base,
-                                                                           const windows_path& image_path)
+                                                                           const windows_path& image_path, const bool is_wow64_process)
     {
         const auto manifest_text = find_manifest_resource(memory, image_base);
         if (!manifest_text.has_value())
@@ -80,7 +80,7 @@ namespace sogen
 
         for (const auto& identity : dependent_identities)
         {
-            const auto directory_name = resolve_assembly(identity, winners, manifest_filenames);
+            const auto directory_name = resolve_assembly(identity, winners, manifest_filenames, is_wow64_process);
             if (!directory_name.has_value())
             {
                 continue;

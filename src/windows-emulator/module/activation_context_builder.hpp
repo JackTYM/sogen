@@ -19,5 +19,5 @@ namespace sogen
     // matching real Windows' behavior for unmanifested/dependency-free processes.
     std::optional<std::vector<std::uint8_t>> build_activation_context_blob(memory_interface& memory, registry_manager& registry,
                                                                            const file_system& files, std::uint64_t image_base,
-                                                                           const windows_path& image_path);
+                                                                           const windows_path& image_path, bool is_wow64_process);
 }
