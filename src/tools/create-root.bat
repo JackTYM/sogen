@@ -85,6 +85,7 @@ CALL :collect dhcpcsvc.DLL
 CALL :collect diagnosticdatasettings.dll
 CALL :collect dinput8.dll
 CALL :collect dnsapi.dll
+CALL :collect dpapi.dll
 CALL :collect dsound.dll
 CALL :collect dwmapi.dll
 CALL :collect DWrite.dll
@@ -146,6 +147,7 @@ CALL :collect normaliz.dll
 CALL :collect nsi.dll
 CALL :collect ntasn1.dll
 CALL :collect ntdll.dll
+CALL :collect ntmarta.dll
 CALL :collect ole32.dll
 CALL :collect OLEACC.dll
 CALL :collect oleaut32.dll
