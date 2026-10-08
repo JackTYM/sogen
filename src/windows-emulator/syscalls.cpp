@@ -906,6 +906,11 @@ namespace sogen
         NTSTATUS handle_NtGdiDdDDIWaitForVerticalBlankEvent(const syscall_context& c, uint64_t wait_description);
         NTSTATUS handle_NtGdiDdDDIWaitForVerticalBlankEvent2(const syscall_context& c, uint64_t wait_description);
         NTSTATUS handle_NtGdiDdDDIConfigureSharedResource(const syscall_context& c, uint64_t configure_shared_resource);
+        NTSTATUS handle_NtGdiDdDDICreateSynchronizationObject(const syscall_context& c, uint64_t argument);
+        NTSTATUS handle_NtGdiDdDDIDestroySynchronizationObject(const syscall_context& c, uint64_t argument);
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObject(const syscall_context& c, uint64_t argument);
+        NTSTATUS handle_NtGdiDdDDIShareObjects(const syscall_context& c, uint32_t object_count, uint64_t objects,
+                                               uint64_t object_attributes, uint32_t desired_access, emulator_object<handle> shared_handle);
         NTSTATUS handle_NtGdiDdDDIGetDeviceState(const syscall_context& c, emulator_object<EMU_D3DKMT_GETDEVICESTATE> device_state);
         NTSTATUS handle_NtGdiDdDDIMarkDeviceAsError(const syscall_context& c, emulator_object<EMU_D3DKMT_MARKDEVICEASERROR> mark_error);
         NTSTATUS handle_NtGdiDdDDIGetCachedHybridQueryValue(const syscall_context& c, emulator_object<uint32_t> value);
@@ -1911,6 +1916,11 @@ namespace sogen
         add_handler(NtGdiDdDDIGetDisplayModeList);
         add_handler(NtGdiDdDDIGetSharedPrimaryHandle);
         add_handler(NtGdiDdDDIGetDeviceState);
+        add_handler(NtGdiDdDDIShareObjects);
+        add_handler(NtGdiDdDDICreateSynchronizationObject);
+        add_handler(NtGdiDdDDIDestroySynchronizationObject);
+        add_handler(NtGdiDdDDISignalSynchronizationObject);
+
         add_handler(NtGdiDdDDIConfigureSharedResource);
         add_handler(NtGdiDdDDIWaitForVerticalBlankEvent);
         add_handler(NtGdiDdDDIWaitForVerticalBlankEvent2);

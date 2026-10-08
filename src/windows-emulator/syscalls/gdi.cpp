@@ -5183,6 +5183,45 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtGdiDdDDICreateSynchronizationObject(const syscall_context& c, const uint64_t create_sync_object)
+        {
+            constexpr uint64_t sync_object_offset = 72;
+            static uint32_t next_sync_object_handle = 0x7100;
+
+            if (!create_sync_object)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            c.emu.write_memory<uint32_t>(create_sync_object + sync_object_offset, next_sync_object_handle++);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIDestroySynchronizationObject(const syscall_context& /*c*/, const uint64_t /*destroy_sync_object*/)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObject(const syscall_context& /*c*/, const uint64_t /*signal_sync_object*/)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIShareObjects(const syscall_context& c, const uint32_t object_count, const uint64_t /*objects*/,
+                                               const uint64_t /*object_attributes*/, const uint32_t /*desired_access*/,
+                                               const emulator_object<handle> shared_handle)
+        {
+            if (object_count == 0 || !shared_handle)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            event shared{};
+            shared.type = NotificationEvent;
+            shared_handle.write(c.proc.events.store(std::move(shared)));
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtGdiDdDDIMarkDeviceAsError(const syscall_context& c,
                                                     const emulator_object<EMU_D3DKMT_MARKDEVICEASERROR> mark_error)
         {
