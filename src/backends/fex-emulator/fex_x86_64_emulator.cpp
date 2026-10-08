@@ -98,6 +98,11 @@
 #include <utils/finally.hpp>
 #include <utils/ios_device_log.hpp>
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+// Defined in the SogenIOS app target (Sources/JIT/JIT26.c); sends the JIT26 "detach" command to the debugger script.
+extern "C" void jit26_detach(void);
+#endif
+
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
 // the CMake glue gates this whole target behind SOGEN_ENABLE_FEX so non-ARM builds never reach here.
 #include <FEXCore/Config/Config.h>
@@ -5134,6 +5139,23 @@ namespace sogen::fex
                           static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread_),
                           static_cast<unsigned long long>(this->staged_state_.rip), static_cast<void*>(this->thread_->InterruptFaultPage));
             sogen::utils::log_ios_device_milestone(diag);
+        }
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        {
+            // FEXCore has blessed its whole JIT region by now. Keeping the debugger attached makes it swallow every
+            // guest fault (e.g. each KUSD read, which can never be mapped inside a 64-bit iOS process's low 4GiB),
+            // so release it and let faults reach sogen's own signal handlers like on the other platforms.
+            static std::once_flag detach_once;
+            std::call_once(detach_once, [] {
+                if (std::getenv("EMULATOR_FEX_KEEP_JIT_DEBUGGER") == nullptr)
+                {
+                    sogen::utils::log_ios_device_milestone("[jit] FEX JIT region is blessed; detaching the JIT debugger");
+                    jit26_detach();
+                    sogen::utils::log_ios_device_milestone("[jit] JIT debugger detached");
+                }
+            });
         }
 #endif
 
