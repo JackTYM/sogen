@@ -8,6 +8,7 @@
 #include "ports/dns_resolver.hpp"
 #include "ports/lsa_policy_lookup.hpp"
 #include "ports/lsa_sspirpc.hpp"
+#include "ports/protected_storage.hpp"
 #include "ports/service_control.hpp"
 #include "binary_writer.hpp"
 
@@ -49,6 +50,11 @@ namespace sogen
         if (port == u"\\Windows\\ApiPort")
         {
             return create_api_port();
+        }
+
+        if (port == u"\\RPC Control\\protected_storage")
+        {
+            return create_protected_storage_port();
         }
 
         if (port == u"\\RPC Control\\DNSResolver")
