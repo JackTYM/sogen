@@ -5294,7 +5294,8 @@ namespace sogen
 
             present_desc.access([&](const EMU_D3DKMT_PRESENT& present) {
                 constexpr uint32_t k_present_flag_blt = 0x1;
-                if ((present.Flags & k_present_flag_blt) == 0 || present.hWindow == 0)
+                const auto target_window = present.hWindow != 0 ? present.hWindow : c.proc.dcomp_target_window;
+                if (target_window == 0 || (present.hWindow != 0 && (present.Flags & k_present_flag_blt) == 0))
                 {
                     return;
                 }
@@ -5308,11 +5309,11 @@ namespace sogen
                 const auto pixels =
                     c.emu.read_memory(allocation->backing_memory, static_cast<size_t>(allocation->pitch) * allocation->height);
 
-                c.win_emu.ui().present_surface(present.hWindow, ui_surface_desc{.width = static_cast<int>(allocation->width),
-                                                                                .height = static_cast<int>(allocation->height),
-                                                                                .stride = static_cast<int>(allocation->pitch),
-                                                                                .format = ui_surface_format::bgra8,
-                                                                                .pixels = pixels.data()});
+                c.win_emu.ui().present_surface(target_window, ui_surface_desc{.width = static_cast<int>(allocation->width),
+                                                                              .height = static_cast<int>(allocation->height),
+                                                                              .stride = static_cast<int>(allocation->pitch),
+                                                                              .format = ui_surface_format::bgra8,
+                                                                              .pixels = pixels.data()});
 
                 dxgk_info(c, "NtGdiDdDDIPresent: hWindow=0x%llX hSource=0x%X %ux%u", present.hWindow, present.hSource, allocation->width,
                           allocation->height);

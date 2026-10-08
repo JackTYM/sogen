@@ -750,6 +750,8 @@ namespace sogen
 
         // DirectComposition command-buffer mapping of every channel this process created, keyed by channel handle.
         std::map<uint64_t, uint64_t> dcomp_channel_buffers{};
+        // Window the DirectComposition device last bound a target to; composition swap chains present into it.
+        uint64_t dcomp_target_window{};
         handle_store<handle_types::token, process_token> tokens{};
         user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         user_handle_store<handle_types::cursor_icon, cursor_icon> icons{user_handles};

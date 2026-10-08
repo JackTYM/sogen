@@ -44,6 +44,8 @@ namespace sogen::syscalls
             return FALSE;
         }
 
+        c.proc.dcomp_target_window = window;
+
         event target{};
         target.type = NotificationEvent;
         target_handle.write(c.proc.events.store(std::move(target)));
