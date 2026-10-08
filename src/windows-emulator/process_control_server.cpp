@@ -421,7 +421,7 @@ namespace sogen
             const auto description = read_description_from_request(request);
 
             handle adopted{};
-            response.status = adopt_shareable_object(target.process, description, adopted);
+            response.status = adopt_shareable_object(target, description, adopted);
             if (NT_SUCCESS(response.status))
             {
                 response.minted_handle_bits = adopted.bits;

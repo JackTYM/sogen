@@ -134,7 +134,7 @@ namespace sogen
                 }
 
                 handle adopted{};
-                if (const auto status = adopt_shareable_object(c.proc, description, adopted); !NT_SUCCESS(status))
+                if (const auto status = adopt_shareable_object(c.win_emu, description, adopted); !NT_SUCCESS(status))
                 {
                     return status;
                 }

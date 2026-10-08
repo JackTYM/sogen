@@ -1,5 +1,7 @@
 #include "std_include.hpp"
 #include "shareable_object.hpp"
+#include "windows_emulator.hpp"
+#include "devices/named_pipe.hpp"
 
 namespace sogen
 {
@@ -58,7 +60,7 @@ namespace sogen
     bool is_shareable_object_type(const handle_types::type type)
     {
         return type == handle_types::section || type == handle_types::event || type == handle_types::mutant ||
-               type == handle_types::semaphore;
+               type == handle_types::semaphore || type == handle_types::device || type == handle_types::file;
     }
 
     NTSTATUS describe_shareable_object(process_context& process, const handle resolved_handle, shared_object_description& description)
@@ -97,13 +99,57 @@ namespace sogen
         case handle_types::semaphore:
             return describe_synchronization_object(process, process.semaphores.get(resolved_handle), description);
 
+        case handle_types::file: {
+            const auto* const source = process.files.get(resolved_handle);
+            if (!source)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            // The receiver reopens the same host file at the same position.
+            utils::buffer_serializer buffer{};
+            source->serialize_object(buffer);
+            description.object_bytes = buffer.get_buffer();
+            description.granted_access = source->access_mask;
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::device: {
+            auto* const container = process.devices.get(resolved_handle);
+            auto* const pipe = container ? container->get_internal_device<named_pipe>() : nullptr;
+            if (!pipe)
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            // A named pipe is routed by name, so the receiver only needs an instance with the same
+            // identity and parameters; it takes over the end the sender had.
+            utils::buffer_serializer buffer{};
+            buffer.write(pipe->name);
+            buffer.write(pipe->is_server_instance);
+            buffer.write(pipe->is_synchronous_handle);
+            buffer.write(pipe->access);
+            buffer.write(pipe->pipe_type);
+            buffer.write(pipe->read_mode);
+            buffer.write(pipe->completion_mode);
+            buffer.write(pipe->max_instances);
+            buffer.write(pipe->inbound_quota);
+            buffer.write(pipe->outbound_quota);
+            buffer.write(pipe->default_timeout.QuadPart);
+            buffer.write(pipe->client_connected);
+            buffer.write_vector(std::vector<std::string>(pipe->write_queue.begin(), pipe->write_queue.end()));
+            description.object_bytes = buffer.get_buffer();
+            return STATUS_SUCCESS;
+        }
+
         default:
             return STATUS_NOT_SUPPORTED;
         }
     }
 
-    NTSTATUS adopt_shareable_object(process_context& process, const shared_object_description& description, handle& adopted_handle)
+    NTSTATUS adopt_shareable_object(windows_emulator& win_emu, const shared_object_description& description, handle& adopted_handle)
     {
+        auto& process = win_emu.process;
         utils::buffer_deserializer buffer{description.object_bytes};
 
         switch (description.type)
@@ -139,6 +185,51 @@ namespace sogen
             s.deserialize_object(buffer);
             adopt_shared_state(process, description, s);
             adopted_handle = process.semaphores.store(std::move(s));
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::file: {
+            file f{};
+            try
+            {
+                f.deserialize_object(buffer);
+            }
+            catch (const std::exception&)
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            adopted_handle = process.files.store(std::move(f));
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::device: {
+            io_device_creation_data data{};
+            io_device_container container{u"NamedPipe", win_emu, data};
+            auto* const pipe = container.get_internal_device<named_pipe>();
+            if (!pipe)
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            buffer.read(pipe->name);
+            buffer.read(pipe->is_server_instance);
+            buffer.read(pipe->is_synchronous_handle);
+            buffer.read(pipe->access);
+            buffer.read(pipe->pipe_type);
+            buffer.read(pipe->read_mode);
+            buffer.read(pipe->completion_mode);
+            buffer.read(pipe->max_instances);
+            buffer.read(pipe->inbound_quota);
+            buffer.read(pipe->outbound_quota);
+            buffer.read(pipe->default_timeout.QuadPart);
+            buffer.read(pipe->client_connected);
+
+            std::vector<std::string> queued{};
+            buffer.read_vector(queued);
+            pipe->write_queue.assign(queued.begin(), queued.end());
+
+            adopted_handle = process.devices.store(std::move(container));
             return STATUS_SUCCESS;
         }
 

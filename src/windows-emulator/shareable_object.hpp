@@ -6,6 +6,8 @@
 
 namespace sogen
 {
+    class windows_emulator;
+
     // A kernel object being handed to another sogen host process (NtDuplicateObject across the
     // process boundary). Objects whose state lives in shared memory are described by where that state
     // is, so the receiver ends up referring to the very same state; only when the state cannot be shared
@@ -31,7 +33,7 @@ namespace sogen
     NTSTATUS describe_shareable_object(process_context& process, handle resolved_handle, shared_object_description& description);
 
     // Creates a local object from a description and stores it in the process's handle table.
-    NTSTATUS adopt_shareable_object(process_context& process, const shared_object_description& description, handle& adopted_handle);
+    NTSTATUS adopt_shareable_object(windows_emulator& win_emu, const shared_object_description& description, handle& adopted_handle);
 
     void write_description_to_request(const shared_object_description& description, process_control_request& request);
     shared_object_description read_description_from_request(const process_control_request& request);
