@@ -572,6 +572,41 @@ namespace sogen
             });
         }
 
+        void dump_threads_periodically(windows_emulator& win_emu)
+        {
+            static const auto interval_seconds = [] {
+                const auto* value = std::getenv("SOGEN_DUMP_THREADS_EVERY_SEC");
+                return value ? std::strtoul(value, nullptr, 10) : 0UL;
+            }();
+
+            if (interval_seconds == 0)
+            {
+                return;
+            }
+
+            static auto next_dump = std::chrono::steady_clock::now() + std::chrono::seconds(interval_seconds);
+            const auto now = std::chrono::steady_clock::now();
+            if (now < next_dump)
+            {
+                return;
+            }
+
+            next_dump = now + std::chrono::seconds(interval_seconds);
+
+            for (const auto& thread : win_emu.process.threads | std::views::values)
+            {
+                const auto* mod = win_emu.mod_manager.find_by_address(thread.current_ip);
+                win_emu.log.error(
+                    "[thread-dump] pid=%u tid=%u ip=%s+0x%llx waiting_for_alert=%d await_objects=%zu await_time=%d await_msg=%d "
+                    "await_io_completion=%d suspended=%u terminated=%d\n",
+                    win_emu.process.process_id, thread.id, mod ? mod->name.c_str() : "?",
+                    mod ? static_cast<unsigned long long>(thread.current_ip - mod->image_base)
+                        : static_cast<unsigned long long>(thread.current_ip),
+                    thread.waiting_for_alert, thread.await_objects.size(), thread.await_time.has_value(), thread.await_msg.has_value(),
+                    thread.await_io_completion.has_value(), thread.suspended, thread.is_terminated());
+            }
+        }
+
         void perform_context_switch_work(windows_emulator& win_emu, vcpu_context& vcpu)
         {
             auto& threads = win_emu.process.threads;
@@ -610,6 +645,8 @@ namespace sogen
             win_emu.pump_pipe_ipc();
             win_emu.pump_process_control_server();
             win_emu.pump_child_exit_notifications();
+
+            dump_threads_periodically(win_emu);
 
             auto& devices = win_emu.process.devices;
 
