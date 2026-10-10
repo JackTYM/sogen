@@ -150,6 +150,48 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            // Pick a base from sogen's current view, then confirm just that window is still free at
+            // the host level (host_window_is_free - a bounded, usually single-syscall probe) before
+            // committing to it. Without some fresh check here, find_free_allocation_base can pick a
+            // base against a stale snapshot that the subsequent allocate_memory() call (which itself
+            // only confirms its own window, not the whole address space) then either rejects as
+            // overlapping a live host region - failing auto-placement with
+            // STATUS_MEMORY_NOT_ALLOCATED - or, worse, clobbers with a MAP_FIXED mmap on backends
+            // that run guest VA == host VA (FEX on Apple), where the host process's own mappings
+            // (JIT code buffers, a framework's lazy allocation, a GCD worker stack) share the guest
+            // address space and can appear at any point during execution. Only on an actual
+            // collision - rare - rescan and retry, mirroring the pick/confirm/retry loop
+            // memory_manager::find_free_host_allocation_base uses for the same reason.
+            //
+            // The rescan is BOTH the full reserve_host_memory_ranges() AND the windowed
+            // reserve_host_memory_ranges_in(pick, size) - see find_free_host_allocation_base for the full
+            // rationale. In short: the full scan retires every currently-visible foreign range at once so
+            // a pick at the low edge of a large host-occupied region jumps clear of the whole region,
+            // while the windowed record covers ranges the full scan deliberately omits but the windowed
+            // host_window_is_free probe still reports occupied - without it, a pick landing on such a
+            // range is never recorded as reserved and the loop re-picks the same base until exhaustion.
+            uint64_t find_auto_placement_base(const syscall_context& c, const size_t size,
+                                              const allocation_address_requirements& requirements)
+            {
+                for (int attempt = 0;; ++attempt)
+                {
+                    const auto base = c.win_emu.memory.find_free_allocation_base(size, 0, requirements.alignment,
+                                                                                 requirements.lowest_address, requirements.highest_address);
+                    if (!base || c.win_emu.memory.host_window_is_free(base, size))
+                    {
+                        return base;
+                    }
+
+                    if (attempt >= max_host_reserved_retries)
+                    {
+                        return 0;
+                    }
+
+                    c.win_emu.memory.reserve_host_memory_ranges();
+                    c.win_emu.memory.reserve_host_memory_ranges_in(base, size);
+                }
+            }
+
             constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
             constexpr ACCESS_MASK PROCESS_VM_WRITE = 0x0020;
             constexpr ACCESS_MASK PROCESS_VM_OPERATION = 0x0008;
@@ -715,46 +757,7 @@ namespace sogen
             auto potential_base = requested_base;
             if (!potential_base)
             {
-                // Pick a base from sogen's current view, then confirm just that window is still free at
-                // the host level (host_window_is_free - a bounded, usually single-syscall probe) before
-                // committing to it. Without some fresh check here, find_free_allocation_base can pick a
-                // base against a stale snapshot that the subsequent allocate_memory() call (which itself
-                // only confirms its own window, not the whole address space) then either rejects as
-                // overlapping a live host region - failing auto-placement with
-                // STATUS_MEMORY_NOT_ALLOCATED - or, worse, clobbers with a MAP_FIXED mmap on backends
-                // that run guest VA == host VA (FEX on Apple), where the host process's own mappings
-                // (JIT code buffers, a framework's lazy allocation, a GCD worker stack) share the guest
-                // address space and can appear at any point during execution. Only on an actual
-                // collision - rare - rescan and retry, mirroring the pick/confirm/retry loop
-                // memory_manager::find_free_host_allocation_base uses for the same reason.
-                //
-                // The rescan is BOTH the full reserve_host_memory_ranges() AND the windowed
-                // reserve_host_memory_ranges_in(pick, size) - see find_free_host_allocation_base for the full
-                // rationale. In short: the full scan retires every currently-visible foreign range at once so
-                // a pick at the low edge of a large host-occupied region jumps clear of the whole region,
-                // while the windowed record covers ranges the full scan deliberately omits but the windowed
-                // host_window_is_free probe still reports occupied - without it, a pick landing on such a
-                // range is never recorded as reserved and the loop re-picks the same base until exhaustion.
-                for (int attempt = 0;; ++attempt)
-                {
-                    potential_base = c.win_emu.memory.find_free_allocation_base(
-                        static_cast<size_t>(allocation_bytes), 0, address_requirements.alignment, address_requirements.lowest_address,
-                        address_requirements.highest_address);
-
-                    if (!potential_base || c.win_emu.memory.host_window_is_free(potential_base, static_cast<size_t>(allocation_bytes)))
-                    {
-                        break;
-                    }
-
-                    if (attempt >= max_host_reserved_retries)
-                    {
-                        potential_base = 0;
-                        break;
-                    }
-
-                    c.win_emu.memory.reserve_host_memory_ranges();
-                    c.win_emu.memory.reserve_host_memory_ranges_in(potential_base, static_cast<size_t>(allocation_bytes));
-                }
+                potential_base = find_auto_placement_base(c, static_cast<size_t>(allocation_bytes), address_requirements);
             }
             else
             {
@@ -817,8 +820,26 @@ namespace sogen
 
             c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, false);
 
-            const bool allocated =
-                c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit);
+            bool allocated = c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit);
+
+            // The host window is only confirmed free before the claim, so a host thread allocating
+            // in between (guest VA == host VA on FEX) can still make an auto-placed claim collide.
+            for (int attempt = 0; !allocated && !requested_base && attempt < max_host_reserved_retries; ++attempt)
+            {
+                c.win_emu.memory.reserve_host_memory_ranges();
+                c.win_emu.memory.reserve_host_memory_ranges_in(potential_base, static_cast<size_t>(allocation_bytes));
+
+                potential_base = find_auto_placement_base(c, static_cast<size_t>(allocation_bytes), address_requirements);
+                if (!potential_base)
+                {
+                    break;
+                }
+
+                base_address.write(potential_base);
+                c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, false);
+                allocated = c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit);
+            }
+
             trace_vm_accounting("NtAllocateVirtualMemory", allocated, allocation_bytes);
             return allocated ? STATUS_SUCCESS : STATUS_MEMORY_NOT_ALLOCATED;
         }

@@ -2379,77 +2379,130 @@ namespace sogen::fex
 
             const uint64_t start = host_page_align_down_apple(address);
             const uint64_t end = host_page_align_up_apple(address + size);
-            std::vector<uint64_t> claimed_this_call;
-            for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
+            std::vector<std::pair<uint64_t, uint64_t>> claimed_this_call;
+            uint64_t host_page = start;
+            while (host_page < end)
             {
-                if (this->mapped_host_pages_apple_.contains(host_page))
+                const auto next_mapped = this->mapped_host_pages_apple_.lower_bound(host_page);
+                if (next_mapped != this->mapped_host_pages_apple_.end() && *next_mapped == host_page)
                 {
+                    host_page += host_page_size_apple;
                     continue;
                 }
 
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-
-                // Bug 4 fix: claim via mach_vm_allocate(VM_FLAGS_FIXED) WITHOUT VM_FLAGS_OVERWRITE -
-                // the kernel refuses (KERN_NO_SPACE) instead of silently overwriting an intervening
-                // foreign mapping another vCPU's concurrent syscall placed here between an earlier
-                // free-space probe and this claim.
-                mach_vm_address_t target = host_page + rebase;
-                const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, host_page_size_apple, VM_FLAGS_FIXED);
-                if (result != KERN_SUCCESS)
+                uint64_t run_end = next_mapped == this->mapped_host_pages_apple_.end() ? end : std::min(end, *next_mapped);
+                if (host_page < wow64_guest_address_space_size)
                 {
-                    if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
-                    {
-                        mach_vm_address_t region_addr = host_page + rebase;
-                        mach_vm_size_t region_size = 0;
-                        vm_region_basic_info_data_64_t info{};
-                        mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
-                        mach_port_t object_name = MACH_PORT_NULL;
-                        const kern_return_t probe_result =
-                            ::mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
-                                             reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
-                        fprintf(stderr,
-                                "[alloc-fail-trace] reserve_guest_address_range: mach_vm_allocate(VM_FLAGS_FIXED) failed "
-                                "host_page=0x%llx rebase=0x%llx target=0x%llx kern_return=%d is_wow64_process=%d "
-                                "wow64_host_window_reserved=%d | probe(next-region-at-or-after-target): result=%d "
-                                "region_addr=0x%llx region_size=0x%llx protection=%d\n",
-                                static_cast<unsigned long long>(host_page), static_cast<unsigned long long>(rebase),
-                                static_cast<unsigned long long>(host_page + rebase), static_cast<int>(result), this->is_wow64_process_,
-                                this->wow64_host_window_reserved_, static_cast<int>(probe_result),
-                                static_cast<unsigned long long>(region_addr), static_cast<unsigned long long>(region_size),
-                                probe_result == KERN_SUCCESS ? info.protection : 0);
-                        fflush(stderr);
-                    }
+                    run_end = std::min(run_end, wow64_guest_address_space_size);
+                }
 
-                    if (result == KERN_INVALID_ADDRESS)
+                if (!this->claim_host_page_run_apple(host_page, run_end))
+                {
+                    // Roll back every run claimed earlier in this same call so a partial claim never
+                    // leaks as a permanently-orphaned host range. Collision means return false, not
+                    // throw: the interface contract (memory_interface.hpp) has the caller re-pick a
+                    // different address on false - memory_manager's auto-placement retry loop tests
+                    // the return value and has no try/catch, so a throw here escapes as a fatal
+                    // syscall failure instead of triggering the retry.
+                    for (const auto& [run_start, claimed_end] : claimed_this_call)
                     {
-                        // Unlike KERN_NO_SPACE (a real, mach_vm_region-visible occupant that
-                        // reserved_host_ranges()'s next rescan will discover and record on its own),
-                        // KERN_INVALID_ADDRESS means the kernel refuses this exact address regardless
-                        // of occupancy - there is no host range for mach_vm_region to ever report here,
-                        // so memory_manager's retry loop would otherwise keep re-picking this same
-                        // address forever. Record it so reserved_host_ranges()/reserved_host_ranges_in()
-                        // below can report it as occupied too.
-                        this->unusable_host_pages_apple_.insert(host_page);
-                    }
-
-                    // Roll back every page claimed earlier in this same multi-page call so a partial
-                    // claim never leaks as a permanently-orphaned host page. Collision means return
-                    // false, not throw: the interface contract (memory_interface.hpp) has the caller
-                    // re-pick a different address on false - memory_manager's auto-placement retry
-                    // loop tests the return value and has no try/catch, so a throw here escapes as a
-                    // fatal syscall failure instead of triggering the retry.
-                    for (const auto rollback_page : claimed_this_call)
-                    {
-                        const auto rollback_rebase = rebase_for(this->is_wow64_process_, rollback_page);
-                        traced_munmap(reinterpret_cast<void*>(rollback_page + rollback_rebase), host_page_size_apple, "rollback_page");
-                        this->mapped_host_pages_apple_.erase(rollback_page);
+                        this->release_host_page_run_apple(run_start, claimed_end);
                     }
                     return false;
                 }
-                this->mapped_host_pages_apple_.insert(host_page);
-                claimed_this_call.push_back(host_page);
+
+                claimed_this_call.emplace_back(host_page, run_end);
+                host_page = run_end;
             }
             return true;
+        }
+
+        // Claims [run_start, run_end) with a single mach_vm_allocate(VM_FLAGS_FIXED) so the whole run
+        // is taken atomically: claiming a multi-GB reservation page by page takes long enough for
+        // another host thread's allocation (a JIT code buffer, a thread stack) to land inside the
+        // window after it was confirmed free. Only a failed multi-page claim falls back to single
+        // pages, to pinpoint which page the kernel refuses.
+        bool claim_host_page_run_apple(const uint64_t run_start, const uint64_t run_end)
+        {
+            const auto rebase = rebase_for(this->is_wow64_process_, run_start);
+
+            // Bug 4 fix: claim via mach_vm_allocate(VM_FLAGS_FIXED) WITHOUT VM_FLAGS_OVERWRITE -
+            // the kernel refuses (KERN_NO_SPACE) instead of silently overwriting an intervening
+            // foreign mapping another vCPU's concurrent syscall placed here between an earlier
+            // free-space probe and this claim.
+            mach_vm_address_t target = run_start + rebase;
+            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, run_end - run_start, VM_FLAGS_FIXED);
+            if (result == KERN_SUCCESS)
+            {
+                auto hint = this->mapped_host_pages_apple_.lower_bound(run_start);
+                for (uint64_t host_page = run_start; host_page < run_end; host_page += host_page_size_apple)
+                {
+                    hint = std::next(this->mapped_host_pages_apple_.insert(hint, host_page));
+                }
+                return true;
+            }
+
+            if (run_end - run_start > host_page_size_apple)
+            {
+                for (uint64_t host_page = run_start; host_page < run_end; host_page += host_page_size_apple)
+                {
+                    if (!this->claim_host_page_run_apple(host_page, host_page + host_page_size_apple))
+                    {
+                        this->release_host_page_run_apple(run_start, host_page);
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            const uint64_t host_page = run_start;
+            if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+            {
+                mach_vm_address_t region_addr = host_page + rebase;
+                mach_vm_size_t region_size = 0;
+                vm_region_basic_info_data_64_t info{};
+                mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t object_name = MACH_PORT_NULL;
+                const kern_return_t probe_result = ::mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+                                                                    reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+                fprintf(stderr,
+                        "[alloc-fail-trace] reserve_guest_address_range: mach_vm_allocate(VM_FLAGS_FIXED) failed "
+                        "host_page=0x%llx rebase=0x%llx target=0x%llx kern_return=%d is_wow64_process=%d "
+                        "wow64_host_window_reserved=%d | probe(next-region-at-or-after-target): result=%d "
+                        "region_addr=0x%llx region_size=0x%llx protection=%d\n",
+                        static_cast<unsigned long long>(host_page), static_cast<unsigned long long>(rebase),
+                        static_cast<unsigned long long>(host_page + rebase), static_cast<int>(result), this->is_wow64_process_,
+                        this->wow64_host_window_reserved_, static_cast<int>(probe_result), static_cast<unsigned long long>(region_addr),
+                        static_cast<unsigned long long>(region_size), probe_result == KERN_SUCCESS ? info.protection : 0);
+                fflush(stderr);
+            }
+
+            if (result == KERN_INVALID_ADDRESS)
+            {
+                // Unlike KERN_NO_SPACE (a real, mach_vm_region-visible occupant that
+                // reserved_host_ranges()'s next rescan will discover and record on its own),
+                // KERN_INVALID_ADDRESS means the kernel refuses this exact address regardless
+                // of occupancy - there is no host range for mach_vm_region to ever report here,
+                // so memory_manager's retry loop would otherwise keep re-picking this same
+                // address forever. Record it so reserved_host_ranges()/reserved_host_ranges_in()
+                // below can report it as occupied too.
+                this->unusable_host_pages_apple_.insert(host_page);
+            }
+
+            return false;
+        }
+
+        void release_host_page_run_apple(const uint64_t run_start, const uint64_t run_end)
+        {
+            if (run_start == run_end)
+            {
+                return;
+            }
+
+            const auto rebase = rebase_for(this->is_wow64_process_, run_start);
+            traced_munmap(reinterpret_cast<void*>(run_start + rebase), run_end - run_start, "rollback_page");
+            this->mapped_host_pages_apple_.erase(this->mapped_host_pages_apple_.lower_bound(run_start),
+                                                 this->mapped_host_pages_apple_.lower_bound(run_end));
         }
 
         void release_guest_address_range(uint64_t address, size_t size) override
