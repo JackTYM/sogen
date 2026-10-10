@@ -936,7 +936,7 @@ namespace sogen::test
         EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 2u);
     }
 
-    TEST(FexBreakpointTest, AutomaticModeStaysNoOp)
+    TEST(FexBreakpointTest, AutomaticModeUsesInt3Breakpoints)
     {
         const auto emu = try_create_fex_emulator();
         if (!emu)
@@ -951,19 +951,18 @@ namespace sogen::test
         ASSERT_NE(code, 0u);
         stop_on_interrupt(*emu);
 
-        bool fired = false;
-        auto* hook = emu->hook_memory_execution(code, [&](cpu_interface&, uint64_t) { fired = true; });
+        int hit_count = 0;
+        auto* hook = emu->hook_memory_execution(code, [&](cpu_interface&, uint64_t) { ++hit_count; });
         ASSERT_NE(hook, nullptr);
 
         uint8_t byte_at_code = 0;
         ASSERT_TRUE(emu->try_read_memory(code, &byte_at_code, 1));
         EXPECT_EQ(byte_at_code, 0xB8);
-        EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(code), 0xB8);
 
         emu->reg(x86_register::rip, code);
         emu->start(0);
 
-        EXPECT_FALSE(fired);
+        EXPECT_EQ(hit_count, 1);
         EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 1u);
 
         emu->delete_hook(hook);

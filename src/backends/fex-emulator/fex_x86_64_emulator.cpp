@@ -1873,16 +1873,16 @@ namespace sogen::fex
         // Like the KVM backend, FEX runs the guest natively, so fine-grained memory/basic-block hooks
         // cannot fire. They are accepted (and tracked, so delete_hook works) for API compatibility.
         // Only instruction hooks for `syscall` are actually wired (see the syscall bridge), plus
-        // single-address execution hooks in int3 mode (Apple only), which plant a real 0xCC. Hook
+        // single-address execution hooks (Apple only), which plant a real 0xCC. Hook
         // tables are registered once globally (not per-vCPU): every fex_vcpu's hook_*() forwards
         // here, since a hook must fire for whichever vCPU's guest thread triggers it, not just the
         // vCPU it happened to be registered through.
 
 #ifdef __APPLE__
-        void set_memory_execution_hook_mode(const memory_execution_hook_mode mode) override
+        // A planted 0xCC is the only way this backend can observe execution of a single address, so
+        // automatic mode resolves to int3 as well.
+        void set_memory_execution_hook_mode(const memory_execution_hook_mode /*mode*/) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
-            this->memory_execution_hook_mode_ = mode;
         }
 #endif
 
@@ -1904,22 +1904,17 @@ namespace sogen::fex
                 const std::unique_lock lock(this->tables_mutex_);
                 hook = this->make_hook();
 #ifdef __APPLE__
-                if (this->memory_execution_hook_mode_ == memory_execution_hook_mode::int3)
-                {
-                    needs_invalidate = this->install_patched_execution_breakpoint(address);
-                    this->memory_execution_hooks_[hook] =
-                        execution_hook_entry{.address = address, .patched_breakpoint = true, .callback = std::move(callback)};
-                }
-                else
+                needs_invalidate = this->install_patched_execution_breakpoint(address);
+                this->memory_execution_hooks_[hook] =
+                    execution_hook_entry{.address = address, .patched_breakpoint = true, .callback = std::move(callback)};
+#else
+                this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
 #endif
-                {
-                    this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
-                }
             }
 #ifdef __APPLE__
             if (needs_invalidate)
             {
-                this->invalidate_code_range_locked(address, 1);
+                this->invalidate_patched_breakpoint_code(address);
             }
 #endif
             return hook;
@@ -3587,7 +3582,6 @@ namespace sogen::fex
         uintptr_t next_hook_id_ = 1;
 
 #ifdef __APPLE__
-        memory_execution_hook_mode memory_execution_hook_mode_ = memory_execution_hook_mode::automatic;
         std::unordered_map<uint64_t, patched_execution_breakpoint> patched_execution_breakpoints_;
 #endif
     };

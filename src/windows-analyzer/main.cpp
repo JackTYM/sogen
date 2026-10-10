@@ -1110,7 +1110,7 @@ namespace sogen
             app.add_option("--report-format", options.report_format, "Report format (supported: jsonl)")->capture_default_str();
             app.add_option("--stdout", options.stdout_path, "Write guest console output to a file");
             app.add_option("--whp-exec-hook", options.whp_execution_hook_mode,
-                           "Memory execution hook mode (auto/int3); honored by the WHP and FEX backends")
+                           "Memory execution hook mode (auto/int3) for the WHP backend; FEX always plants int3 breakpoints")
                 ->capture_default_str()
                 ->check(CLI::IsMember({"auto", "int3"}));
             app.add_option("-r,--registry", options.registry_path, "Set registry path");
