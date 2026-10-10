@@ -574,18 +574,12 @@ namespace sogen
                     backing_data = section_entry->object->ensure_backing(backing_size).data();
                 }
 
-                const auto view_address = c.win_emu.memory.find_free_allocation_base(view_length);
+                const auto view_address =
+                    reserve_only
+                        ? c.win_emu.memory.allocate_memory(view_length, protection, true, 0, memory_region_kind::pagefile_section_view)
+                        : c.win_emu.memory.allocate_host_memory(view_length, backing_data + aligned_offset, protection,
+                                                                memory_region_kind::pagefile_section_view);
                 if (!view_address)
-                {
-                    return STATUS_NO_MEMORY;
-                }
-
-                const auto mapped = reserve_only
-                                        ? c.win_emu.memory.allocate_memory(view_address, view_length, protection, true,
-                                                                           memory_region_kind::pagefile_section_view)
-                                        : c.win_emu.memory.allocate_host_memory(view_address, view_length, backing_data + aligned_offset,
-                                                                                protection, memory_region_kind::pagefile_section_view);
-                if (!mapped)
                 {
                     return STATUS_NO_MEMORY;
                 }
@@ -641,9 +635,9 @@ namespace sogen
                     std::memcpy(section.backing->data(), file_data.data(), file_size);
                 }
 
-                address = c.win_emu.memory.find_free_allocation_base(aligned_size);
-                if (!address || !c.win_emu.memory.allocate_host_memory(address, aligned_size, section.backing->data() + offset, protection,
-                                                                       memory_region_kind::file_section_view))
+                address = c.win_emu.memory.allocate_host_memory(aligned_size, section.backing->data() + offset, protection,
+                                                                memory_region_kind::file_section_view);
+                if (!address)
                 {
                     return STATUS_NO_MEMORY;
                 }

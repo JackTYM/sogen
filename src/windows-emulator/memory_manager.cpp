@@ -398,6 +398,11 @@ namespace sogen
     bool memory_manager::allocate_host_memory(const uint64_t address, const size_t size, void* host_pointer,
                                               const nt_memory_permission permissions, const memory_region_kind kind)
     {
+        // The backend aliases host_pointer over the target window and may overwrite whatever is mapped
+        // there, so a foreign host mapping (e.g. a malloc zone on a backend sharing the guest address space)
+        // must be recorded and rejected first, exactly like the fixed-address allocate_memory overload.
+        this->reserve_host_memory_ranges_in(address, size);
+
         if (this->overlaps_reserved_region(address, size))
         {
             return false;
@@ -1025,6 +1030,26 @@ namespace sogen
         // reserved_regions_, so find_free_allocation_base is guaranteed to make progress; this cap only
         // guards against pathological churn.
         constexpr int max_host_reserved_retries = 8;
+    }
+
+    uint64_t memory_manager::allocate_host_memory(const size_t size, void* host_pointer, const nt_memory_permission permissions,
+                                                  const memory_region_kind kind)
+    {
+        for (int attempt = 0; attempt <= max_host_reserved_retries; ++attempt)
+        {
+            const auto address = this->find_free_host_allocation_base(size, 0);
+            if (!address)
+            {
+                return 0;
+            }
+
+            if (this->allocate_host_memory(address, size, host_pointer, permissions, kind))
+            {
+                return address;
+            }
+        }
+
+        return 0;
     }
 
     uint64_t memory_manager::allocate_memory(const size_t size, const nt_memory_permission permissions, const bool reserve_only,

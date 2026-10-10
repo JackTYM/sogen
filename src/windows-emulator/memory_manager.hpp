@@ -130,6 +130,10 @@ namespace sogen
         // NtQueryVirtualMemory/NtFreeVirtualMemory report and gate on it exactly like any other section view.
         bool allocate_host_memory(uint64_t address, size_t size, void* host_pointer, nt_memory_permission permissions,
                                   memory_region_kind kind = memory_region_kind::mmio);
+        // Picks a base that is free at the host level too (see find_free_host_allocation_base) and aliases it
+        // like the fixed-address overload. Returns 0 if no base could be claimed.
+        uint64_t allocate_host_memory(size_t size, void* host_pointer, nt_memory_permission permissions,
+                                      memory_region_kind kind = memory_region_kind::mmio);
 
         // Backend coherency hooks for host-aliased memory (see memory_interface). Device emulation such as
         // the GPU bridge uses these to make guest writes visible to the host GPU on backends (e.g. KVM) that
