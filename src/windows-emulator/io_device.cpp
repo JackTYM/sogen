@@ -179,10 +179,11 @@ namespace sogen
 
         // A handle associated with an I/O completion port (NtSetInformationFile's FileCompletionInformation,
         // i.e. CreateIoCompletionPort on an already-open handle) posts a completion packet for every finished
-        // request on real Windows, independent of the Event parameter above and regardless of whether the
-        // request completed synchronously - callers built around GetQueuedCompletionStatus (e.g. any IOCP-based
-        // network server) never poll the event or the synchronous return value at all.
-        if (result != STATUS_PENDING)
+        // request on real Windows, even one that completed synchronously - callers built around
+        // GetQueuedCompletionStatus never poll the event or the synchronous return value. Requests without an
+        // APC context (no OVERLAPPED, e.g. mswsock's internal synchronous AFD calls) and requests that fail
+        // immediately post nothing; a thread pool TP_IO would otherwise receive completions it never started.
+        if (result != STATUS_PENDING && c.apc_context != 0 && !NT_ERROR(result))
         {
             if (const auto association = this->get_completion_port())
             {
