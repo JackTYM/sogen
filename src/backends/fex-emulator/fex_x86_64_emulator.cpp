@@ -1862,7 +1862,7 @@ namespace sogen::fex
 #ifdef __APPLE__
             for (const auto bp_address : breakpoints_replanted)
             {
-                this->invalidate_code_range_locked(bp_address, 1);
+                this->invalidate_patched_breakpoint_code(bp_address);
             }
 #endif
             return true;
@@ -2039,7 +2039,7 @@ namespace sogen::fex
 #ifdef __APPLE__
             if (needs_invalidate)
             {
-                this->invalidate_code_range_locked(invalidate_address, 1);
+                this->invalidate_patched_breakpoint_code(invalidate_address);
             }
 #endif
         }
@@ -2367,7 +2367,7 @@ namespace sogen::fex
 #ifdef __APPLE__
             for (const auto bp_address : breakpoints_applied)
             {
-                this->invalidate_code_range_locked(bp_address, 1);
+                this->invalidate_patched_breakpoint_code(bp_address);
             }
 #endif
         }
@@ -2637,7 +2637,7 @@ namespace sogen::fex
 #ifdef __APPLE__
             for (const auto bp_address : breakpoints_applied)
             {
-                this->invalidate_code_range_locked(bp_address, 1);
+                this->invalidate_patched_breakpoint_code(bp_address);
             }
 #endif
         }
@@ -2980,7 +2980,7 @@ namespace sogen::fex
             return false;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
         bool try_apply_patched_execution_breakpoint(uint64_t address, patched_execution_breakpoint& breakpoint)
         {
             const auto current = this->peek_breakpoint_byte(address);
@@ -2999,7 +2999,7 @@ namespace sogen::fex
             return true;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
         bool install_patched_execution_breakpoint(uint64_t address)
         {
             static const bool trace = std::getenv("SOGEN_TRACE_PATCHED_BREAKPOINT") != nullptr;
@@ -3057,7 +3057,7 @@ namespace sogen::fex
             return wrote;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
         bool uninstall_patched_execution_breakpoint(uint64_t address)
         {
             auto existing = this->patched_execution_breakpoints_.find(address);
@@ -3083,11 +3083,18 @@ namespace sogen::fex
             return wrote;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
         bool set_patched_execution_breakpoint_state(uint64_t address, bool applied)
         {
             const auto existing = this->patched_execution_breakpoints_.find(address);
             if (existing == this->patched_execution_breakpoints_.end())
+            {
+                return false;
+            }
+
+            // Another vCPU may still be stepping over its own restored original instruction here -
+            // the last one to finish re-plants.
+            if (applied && this->is_stepping_over_patched_breakpoint(address))
             {
                 return false;
             }
@@ -3107,7 +3114,7 @@ namespace sogen::fex
             return true;
         }
 
-        // Appends every address it wrote to `written` (caller must invalidate_code_range_locked for
+        // Appends every address it wrote to `written` (caller must invalidate_patched_breakpoint_code for
         // each, after releasing tables_mutex_).
         void apply_patched_execution_breakpoints_in_range(uint64_t address, size_t size, std::vector<uint64_t>& written)
         {
@@ -3496,6 +3503,12 @@ namespace sogen::fex
             }
         }
 
+        // A WoW64 process's other FEXCore context may hold a translation of the same byte too.
+        void invalidate_patched_breakpoint_code(const uint64_t address)
+        {
+            this->invalidate_code_range_locked(address, 1, true);
+        }
+
         void invalidate_code_range_locked(uint64_t address, size_t size, bool include_inactive_contexts = false)
         {
             for (auto& vcpu : this->vcpus_)
@@ -3765,23 +3778,23 @@ namespace sogen::fex
         if (this->deferred_patched_breakpoint_)
         {
             const auto deferred_address = *this->deferred_patched_breakpoint_;
-            this->deferred_patched_breakpoint_.reset();
-            if (this->cpu_state().rip == deferred_address)
+            bool wrote = false;
             {
-                this->arm_execution_single_step(count == 1);
-                this->pending_execution_step_->patched_breakpoint = deferred_address;
-            }
-            else
-            {
-                bool wrote = false;
+                const std::unique_lock lock(this->emulator_.tables_mutex_);
+                this->deferred_patched_breakpoint_.reset();
+                if (this->cpu_state().rip == deferred_address)
                 {
-                    const std::unique_lock lock(this->emulator_.tables_mutex_);
+                    this->arm_execution_single_step(count == 1);
+                    this->pending_execution_step_->patched_breakpoint = deferred_address;
+                }
+                else
+                {
                     wrote = this->emulator_.set_patched_execution_breakpoint_state(deferred_address, true);
                 }
-                if (wrote)
-                {
-                    this->emulator_.invalidate_code_range_locked(deferred_address, 1);
-                }
+            }
+            if (wrote)
+            {
+                this->emulator_.invalidate_patched_breakpoint_code(deferred_address);
             }
         }
 
@@ -4274,19 +4287,19 @@ namespace sogen::fex
             return false;
         }
 
-        const auto state = this->take_pending_execution_step();
-
-        if (state.patched_breakpoint)
+        pending_execution_step state{};
+        bool wrote = false;
         {
-            bool wrote = false;
+            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            state = this->take_pending_execution_step();
+            if (state.patched_breakpoint)
             {
-                const std::unique_lock lock(this->emulator_.tables_mutex_);
                 wrote = this->emulator_.set_patched_execution_breakpoint_state(*state.patched_breakpoint, true);
             }
-            if (wrote)
-            {
-                this->emulator_.invalidate_code_range_locked(*state.patched_breakpoint, 1);
-            }
+        }
+        if (wrote)
+        {
+            this->emulator_.invalidate_patched_breakpoint_code(*state.patched_breakpoint);
         }
 
         if (state.stop_after_step)
@@ -4308,6 +4321,7 @@ namespace sogen::fex
             return;
         }
 
+        const std::unique_lock lock(this->emulator_.tables_mutex_);
         const auto state = this->take_pending_execution_step();
 
         if (state.patched_breakpoint)
@@ -4338,32 +4352,11 @@ namespace sogen::fex
         }
 
         std::vector<memory_execution_hook_callback> callbacks;
-        uint64_t vacated_address = 0;
-        bool replant_vacated = false;
-        bool wrote_this_address = false;
         {
-            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            const std::shared_lock lock(this->emulator_.tables_mutex_);
             if (!this->emulator_.patched_execution_breakpoints_.contains(address))
             {
                 return false;
-            }
-
-            // Confirmed match: normalize RIP back to the 0xCC's own address so the callback and the
-            // step-over below both see/resume from it, same as KVM/WHP already report for their own
-            // breakpoints.
-            this->cpu_state().rip = address;
-
-            wrote_this_address = this->emulator_.set_patched_execution_breakpoint_state(address, false);
-            this->deferred_patched_breakpoint_ = address;
-
-            if (this->pending_execution_step_)
-            {
-                const auto vacated = std::exchange(this->pending_execution_step_->patched_breakpoint, std::nullopt);
-                if (vacated && *vacated != address)
-                {
-                    vacated_address = *vacated;
-                    replant_vacated = true;
-                }
             }
 
             for (const auto& [_, hook] : this->emulator_.memory_execution_hooks_)
@@ -4375,47 +4368,64 @@ namespace sogen::fex
             }
         }
 
-        if (wrote_this_address)
-        {
-            this->emulator_.invalidate_code_range_locked(address, 1);
-        }
-        if (replant_vacated)
-        {
-            bool wrote = false;
-            {
-                const std::unique_lock lock(this->emulator_.tables_mutex_);
-                wrote = this->emulator_.set_patched_execution_breakpoint_state(vacated_address, true);
-            }
-            if (wrote)
-            {
-                this->emulator_.invalidate_code_range_locked(vacated_address, 1);
-            }
-        }
+        // Confirmed match: normalize RIP back to the 0xCC's own address so the callback and the
+        // step-over below both see/resume from it, same as KVM/WHP already report for their own
+        // breakpoints.
+        this->cpu_state().rip = address;
 
+        // The 0xCC stays planted while the callbacks run (they may block on the kernel lock), so
+        // other vCPUs executing this address in the meantime still hit it.
         for (const auto& callback : callbacks)
         {
             callback(*this, address);
         }
 
-        if (this->stop_requested_)
+        std::optional<uint64_t> replanted_address{};
+        bool wrote_this_address = false;
         {
-            return true;
+            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            wrote_this_address = this->emulator_.set_patched_execution_breakpoint_state(address, false);
+
+            if (this->pending_execution_step_)
+            {
+                const auto vacated = std::exchange(this->pending_execution_step_->patched_breakpoint, std::nullopt);
+                if (vacated && this->emulator_.set_patched_execution_breakpoint_state(*vacated, true))
+                {
+                    replanted_address = vacated;
+                }
+            }
+
+            if (this->stop_requested_)
+            {
+                this->deferred_patched_breakpoint_ = address;
+            }
+            else
+            {
+                if (!this->pending_execution_step_)
+                {
+                    this->arm_execution_single_step(false);
+                }
+                else
+                {
+                    // The trap on the 0xCC used up the one instruction EmitTFCheck lets run after TF is
+                    // set, so without re-arming TF here the #DB would fire before the original instruction
+                    // (now restored) executes.
+                    this->write_rflags(this->read_rflags() | trap_flag_bit);
+                }
+
+                this->pending_execution_step_->patched_breakpoint = address;
+            }
         }
 
-        this->deferred_patched_breakpoint_.reset();
-        if (!this->pending_execution_step_)
+        if (wrote_this_address)
         {
-            this->arm_execution_single_step(false);
+            this->emulator_.invalidate_patched_breakpoint_code(address);
         }
-        else
+        if (replanted_address)
         {
-            // The trap on the 0xCC used up the one instruction EmitTFCheck lets run after TF is
-            // set, so without re-arming TF here the #DB would fire before the original instruction
-            // (now restored) executes.
-            this->write_rflags(this->read_rflags() | trap_flag_bit);
+            this->emulator_.invalidate_patched_breakpoint_code(*replanted_address);
         }
 
-        this->pending_execution_step_->patched_breakpoint = address;
         return true;
     }
 #endif
