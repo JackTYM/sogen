@@ -348,6 +348,17 @@ namespace sogen
 
                 worker_factory_support::on_io_completion_message_dequeued(process, message);
 
+                static const bool trace_dequeue = std::getenv("SOGEN_TRACE_WAIT_PACKETS") != nullptr;
+                if (trace_dequeue)
+                {
+                    fprintf(stderr,
+                            "[wait-packet-trace] dequeued guest_pid=%u port=0x%llx index=%u/%u key=0x%llx apc=0x%llx packet=0x%llx "
+                            "release=%d\n",
+                            process.process_id, static_cast<unsigned long long>(io_completion_handle.bits), removed, max_count,
+                            static_cast<unsigned long long>(message.key_context), static_cast<unsigned long long>(message.apc_context),
+                            static_cast<unsigned long long>(message.wait_packet_handle.bits), message.worker_factory_release);
+                }
+
                 FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>> entry{};
                 entry.KeyContext = message.key_context;
                 entry.ApcContext = message.apc_context;
