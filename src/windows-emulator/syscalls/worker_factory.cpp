@@ -10,6 +10,158 @@ namespace sogen
 {
     namespace worker_factory_support
     {
+        namespace
+        {
+            void prune_worker_threads(process_context& process, worker_factory& factory)
+            {
+                const auto is_gone = [&](const handle thread_handle) {
+                    const auto* thread = process.threads.get(thread_handle);
+                    return thread == nullptr || thread->is_terminated();
+                };
+
+                std::erase_if(factory.worker_threads, is_gone);
+                std::erase_if(factory.starting_worker_threads, is_gone);
+            }
+
+            uint32_t get_worker_thread_limit(const worker_factory& factory)
+            {
+                uint32_t limit = std::numeric_limits<uint32_t>::max();
+
+                if (factory.max_thread_count != 0)
+                {
+                    limit = std::min(limit, factory.max_thread_count);
+                }
+
+                if (factory.thread_maximum != 0)
+                {
+                    limit = std::min(limit, factory.thread_maximum);
+                }
+
+                if (factory.thread_soft_maximum != 0)
+                {
+                    limit = std::min(limit, factory.thread_soft_maximum);
+                }
+
+                return limit;
+            }
+
+            bool can_create_workers(const worker_factory& factory)
+            {
+                return !factory.shutdown && factory.paused == 0 && factory.start_routine != 0;
+            }
+
+            void create_worker_thread(windows_emulator& win_emu, worker_factory& factory)
+            {
+                const auto stack_size =
+                    factory.stack_reserve != 0 ? factory.stack_reserve : win_emu.mod_manager.executable->size_of_stack_reserve;
+                const auto create_flags = (factory.flags & WORKER_FACTORY_FLAG_LOADER_POOL) ? THREAD_CREATE_FLAGS_LOADER_WORKER : 0;
+                const auto thread_handle =
+                    win_emu.process.create_thread(win_emu.memory, factory.start_routine, factory.start_parameter, stack_size, create_flags);
+                factory.worker_threads.push_back(thread_handle);
+                factory.starting_worker_threads.push_back(thread_handle);
+            }
+
+            bool is_waiting_on(const emulator_thread& thread, const handle io_completion_handle)
+            {
+                return thread.await_io_completion.has_value() && thread.await_io_completion->io_completion_handle == io_completion_handle;
+            }
+
+            bool is_runnable(const emulator_thread& thread)
+            {
+                return thread.suspended == 0 && !thread.await_io_completion.has_value() && thread.await_objects.empty() &&
+                       !thread.await_time.has_value() && !thread.await_msg_mask.has_value() && !thread.waiting_for_alert &&
+                       !thread.await_host_condition;
+            }
+
+            bool has_available_worker(process_context& process, const worker_factory& factory)
+            {
+                if (!factory.starting_worker_threads.empty())
+                {
+                    return true;
+                }
+
+                return std::ranges::any_of(factory.worker_threads, [&](const handle thread_handle) {
+                    const auto* thread = process.threads.get(thread_handle);
+                    return thread && !thread->is_terminated() &&
+                           (is_waiting_on(*thread, factory.io_completion_handle) || is_runnable(*thread));
+                });
+            }
+        }
+
+        void mark_worker_ready(process_context& process, worker_factory& factory, const emulator_thread& thread)
+        {
+            std::erase_if(factory.starting_worker_threads,
+                          [&](const handle thread_handle) { return process.threads.get(thread_handle) == &thread; });
+        }
+
+        void ensure_minimum_workers(windows_emulator& win_emu, worker_factory& factory)
+        {
+            if (!can_create_workers(factory))
+            {
+                return;
+            }
+
+            prune_worker_threads(win_emu.process, factory);
+
+            const auto limit = get_worker_thread_limit(factory);
+            if (limit == 0)
+            {
+                return;
+            }
+
+            auto desired = std::max(factory.thread_minimum, factory.binding_count);
+            if (factory.release_pending || factory.pending_release_count != 0)
+            {
+                desired = std::max(desired, 1u);
+            }
+
+            desired = std::min(desired, limit);
+
+            while (factory.worker_threads.size() < desired)
+            {
+                create_worker_thread(win_emu, factory);
+            }
+        }
+
+        // The NT worker factory creates a worker on demand whenever its completion port holds work that no
+        // worker is free to take. ntdll lets idle workers exit on timeout and relies on this, so without it a
+        // pool whose workers all retired never runs another callback (e.g. a RegisterWaitForSingleObject wait
+        // on an event signaled by another process).
+        void create_workers_for_pending_work(windows_emulator& win_emu)
+        {
+            auto& process = win_emu.process;
+
+            for (auto& factory : process.worker_factories | std::views::values)
+            {
+                if (!can_create_workers(factory))
+                {
+                    continue;
+                }
+
+                prune_worker_threads(process, factory);
+
+                if (factory.worker_threads.size() >= get_worker_thread_limit(factory) || has_available_worker(process, factory))
+                {
+                    continue;
+                }
+
+                io_completion_wait::materialize_signaled_wait_packets(process, factory.io_completion_handle);
+
+                const auto* completion = process.io_completions.get(factory.io_completion_handle);
+                if (completion && !completion->queue.empty())
+                {
+                    if (std::getenv("SOGEN_TRACE_WAIT_PACKETS"))
+                    {
+                        win_emu.log.info("[wait-packet-trace] creating worker guest_pid=%u port=0x%llx workers=%zu queued=%zu\n",
+                                         process.process_id, static_cast<unsigned long long>(factory.io_completion_handle.bits),
+                                         factory.worker_threads.size(), completion->queue.size());
+                    }
+
+                    create_worker_thread(win_emu, factory);
+                }
+            }
+        }
+
         bool enqueue_release_completion(process_context& process, const handle worker_factory_handle)
         {
             auto* factory = process.worker_factories.get(worker_factory_handle);
@@ -85,70 +237,6 @@ namespace sogen
                 return read_unicode_string(c.emu, attributes.ObjectName);
             }
 
-            void prune_worker_factory_threads(const syscall_context& c, worker_factory& factory)
-            {
-                std::erase_if(factory.worker_threads, [&](const handle thread_handle) {
-                    const auto* thread = c.proc.threads.get(thread_handle);
-                    return thread == nullptr || thread->is_terminated();
-                });
-            }
-
-            uint32_t get_worker_factory_thread_limit(const worker_factory& factory)
-            {
-                uint32_t limit = std::numeric_limits<uint32_t>::max();
-
-                if (factory.max_thread_count != 0)
-                {
-                    limit = std::min(limit, factory.max_thread_count);
-                }
-
-                if (factory.thread_maximum != 0)
-                {
-                    limit = std::min(limit, factory.thread_maximum);
-                }
-
-                if (factory.thread_soft_maximum != 0)
-                {
-                    limit = std::min(limit, factory.thread_soft_maximum);
-                }
-
-                return limit;
-            }
-
-            void ensure_worker_factory_threads(const syscall_context& c, worker_factory& factory)
-            {
-                if (factory.shutdown || factory.paused != 0 || factory.start_routine == 0)
-                {
-                    return;
-                }
-
-                prune_worker_factory_threads(c, factory);
-
-                const auto limit = get_worker_factory_thread_limit(factory);
-                if (limit == 0)
-                {
-                    return;
-                }
-
-                auto desired = std::max(factory.thread_minimum, factory.binding_count);
-                if (factory.release_pending || factory.pending_release_count != 0)
-                {
-                    desired = std::max(desired, 1u);
-                }
-
-                desired = std::min(desired, limit);
-
-                while (factory.worker_threads.size() < desired)
-                {
-                    const auto stack_size =
-                        factory.stack_reserve != 0 ? factory.stack_reserve : c.win_emu.mod_manager.executable->size_of_stack_reserve;
-                    const auto create_flags = (factory.flags & WORKER_FACTORY_FLAG_LOADER_POOL) ? THREAD_CREATE_FLAGS_LOADER_WORKER : 0;
-                    const auto thread_handle =
-                        c.proc.create_thread(c.win_emu.memory, factory.start_routine, factory.start_parameter, stack_size, create_flags);
-                    factory.worker_threads.push_back(thread_handle);
-                }
-            }
-
         }
 
         NTSTATUS handle_NtCreateWorkerFactory(const syscall_context& c, const emulator_object<handle> worker_factory_handle,
@@ -204,7 +292,7 @@ namespace sogen
             factory.thread_maximum = max_thread_count;
 
             auto [stored_handle, stored_factory] = c.proc.worker_factories.store_and_get(std::move(factory));
-            ensure_worker_factory_threads(c, *stored_factory);
+            worker_factory_support::ensure_minimum_workers(c.win_emu, *stored_factory);
             worker_factory_handle.write(stored_handle);
 
             if (std::getenv("SOGEN_TRACE_PIPE_IO"))
@@ -228,7 +316,9 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            ensure_worker_factory_threads(c, *factory);
+            worker_factory_support::mark_worker_ready(c.proc, *factory, c.thread());
+
+            worker_factory_support::ensure_minimum_workers(c.win_emu, *factory);
             return STATUS_SUCCESS;
         }
 
@@ -328,7 +418,7 @@ namespace sogen
                         next > std::numeric_limits<uint32_t>::max() ? std::numeric_limits<uint32_t>::max() : static_cast<uint32_t>(next);
                 }
 
-                ensure_worker_factory_threads(c, *factory);
+                worker_factory_support::ensure_minimum_workers(c.win_emu, *factory);
 
                 if (std::getenv("SOGEN_TRACE_PIPE_IO"))
                 {
@@ -383,7 +473,7 @@ namespace sogen
                     break;
                 }
 
-                ensure_worker_factory_threads(c, *factory);
+                worker_factory_support::ensure_minimum_workers(c.win_emu, *factory);
                 return STATUS_SUCCESS;
             }
 
@@ -451,7 +541,7 @@ namespace sogen
                 }
             }
 
-            ensure_worker_factory_threads(c, *factory);
+            worker_factory_support::ensure_minimum_workers(c.win_emu, *factory);
             return STATUS_SUCCESS;
         }
 

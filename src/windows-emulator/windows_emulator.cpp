@@ -19,6 +19,7 @@
 #include "devices/named_pipe.hpp"
 #include "process_control_server.hpp"
 #include "address_utils.hpp"
+#include "worker_factory_support.hpp"
 
 namespace sogen
 {
@@ -645,6 +646,8 @@ namespace sogen
             win_emu.pump_pipe_ipc();
             win_emu.pump_process_control_server();
             win_emu.pump_child_exit_notifications();
+
+            worker_factory_support::create_workers_for_pending_work(win_emu);
 
             dump_threads_periodically(win_emu);
 
