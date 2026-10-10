@@ -458,6 +458,7 @@ namespace sogen
         NTSTATUS handle_NtSetTimerEx(const syscall_context& c, handle timer_handle, uint32_t timer_set_info_class,
                                      uint64_t timer_set_information, ULONG timer_set_information_length);
         NTSTATUS handle_NtCancelTimer(const syscall_context& c, handle timer_handle, emulator_object<BOOLEAN> current_state);
+        NTSTATUS handle_NtCancelTimer2(const syscall_context& c, handle timer_handle, uint64_t parameters);
 
         // syscalls/token.cpp:
         NTSTATUS
@@ -1848,6 +1849,7 @@ namespace sogen
         add_handler(NtSetTimer2);
         add_handler(NtSetTimerEx);
         add_handler(NtCancelTimer);
+        add_handler(NtCancelTimer2);
         add_handler(NtAssociateWaitCompletionPacket);
         add_handler(NtCancelWaitCompletionPacket);
         add_handler(NtSetWnfProcessNotificationEvent);

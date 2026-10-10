@@ -184,6 +184,18 @@ namespace sogen
             current_state.write_if_valid(was_signaled ? TRUE : FALSE);
             return STATUS_SUCCESS;
         }
+
+        NTSTATUS handle_NtCancelTimer2(const syscall_context& c, const handle timer_handle, const uint64_t /*parameters*/)
+        {
+            auto* const t = c.proc.timers.get(timer_handle);
+            if (!t)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            t->active = false;
+            return STATUS_SUCCESS;
+        }
     }
 
 } // namespace sogen
