@@ -137,7 +137,8 @@ namespace sogen::fex
 
         int traced_munmap(void* addr, size_t length, const char* site)
         {
-            if (::getenv("SOGEN_TRACE_MUNMAP") != nullptr)
+            static const bool trace_munmap = ::getenv("SOGEN_TRACE_MUNMAP") != nullptr;
+            if (trace_munmap)
             {
                 fprintf(stderr, "[munmap-trace] site=%s addr=%p len=0x%zx\n", site, addr, length);
                 fflush(stderr);
@@ -2550,10 +2551,22 @@ namespace sogen::fex
                 }
                 else
                 {
-                    const auto rebase = rebase_for(this->is_wow64_process_, *it);
-                    void* const host_ptr = reinterpret_cast<void*>(*it + rebase);
-                    traced_munmap(host_ptr, host_page_size_apple, "host_ptr_cleanup");
-                    it = this->mapped_host_pages_apple_.erase(it);
+                    const auto run_start = *it;
+                    const auto rebase = rebase_for(this->is_wow64_process_, run_start);
+                    auto run_end = run_start + host_page_size_apple;
+                    auto run_last = std::next(it);
+                    while (run_last != this->mapped_host_pages_apple_.end() && *run_last == run_end &&
+                           *run_last + host_page_size_apple <= end &&
+                           !(this->wow64_host_window_reserved_ && *run_last < wow64_guest_address_space_size) &&
+                           rebase_for(this->is_wow64_process_, *run_last) == rebase)
+                    {
+                        run_end += host_page_size_apple;
+                        ++run_last;
+                    }
+
+                    void* const host_ptr = reinterpret_cast<void*>(run_start + rebase);
+                    traced_munmap(host_ptr, run_end - run_start, "host_ptr_cleanup");
+                    it = this->mapped_host_pages_apple_.erase(it, run_last);
                 }
             }
         }
