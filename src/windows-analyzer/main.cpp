@@ -15,6 +15,7 @@
 #include "jsonl_reporter.hpp"
 #include "stdout_file_reporter.hpp"
 #include "tenet_tracer.hpp"
+#include "hook_tracer.hpp"
 #include "child_process_spawn.hpp"
 
 #include <devices/named_pipe.hpp>
@@ -22,6 +23,7 @@
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
 #include <utils/file_handle.hpp>
+#include <utils/io.hpp>
 
 #if defined(OS_EMSCRIPTEN) && !defined(SOGEN_EMSCRIPTEN_SUPPORT_NODEJS)
 #include <event_handler.hpp>
@@ -73,6 +75,7 @@ namespace sogen
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
             std::filesystem::path stdout_path{};
+            std::filesystem::path trace_hooks_path{};
             std::string report_format{"jsonl"};
             std::string whp_execution_hook_mode{"auto"};
             std::optional<backend_type> backend{};
@@ -634,6 +637,7 @@ namespace sogen
             config.reproducible = options.reproducible;
             config.disable_instruction_precision = options.disable_instruction_precision;
             config.whp_execution_hook_mode = options.whp_execution_hook_mode;
+            config.trace_hooks_path = options.trace_hooks_path;
             config.debug_child_pattern = options.debug_child_pattern;
             config.debug_host = options.gdb_host;
             config.debug_port = options.gdb_port;
@@ -877,6 +881,15 @@ namespace sogen
             }
 
             register_analysis_callbacks(context);
+
+            std::optional<hook_tracer> hook_tracer{};
+            if (!options.trace_hooks_path.empty())
+            {
+                const auto spec_data = utils::io::read_file(options.trace_hooks_path);
+                hook_tracer.emplace(
+                    *win_emu, parse_trace_hook_specs(std::string_view(reinterpret_cast<const char*>(spec_data.data()), spec_data.size())));
+            }
+
             watch_system_objects(context, options.modules, options.verbose_logging, options.concise_logging);
 
             const auto& exe = *win_emu->mod_manager.executable;
@@ -1113,6 +1126,12 @@ namespace sogen
                            "Memory execution hook mode (auto/int3) for the WHP backend; FEX always plants int3 breakpoints")
                 ->capture_default_str()
                 ->check(CLI::IsMember({"auto", "int3"}));
+            app.add_option("--trace-hooks", options.trace_hooks_path,
+                           "Log guest execution hooks listed in a file, one per line: "
+                           "<module> <0xRVA|export> <name> [reg...] [mem=<expr>:<len>...] [ret=<reg>[,<reg>...]], "
+                           "where <expr> is a register or number, or [<expr>] to dereference, with optional +/-<n> terms")
+                ->check(CLI::ExistingFile)
+                ->transform([](const std::string& path) { return std::filesystem::absolute(path).string(); });
             app.add_option("-r,--registry", options.registry_path, "Set registry path");
 
             app.add_option("--vcpus", options.vcpu_count, "Number of virtual CPUs (requires a backend with multi-vCPU support)")

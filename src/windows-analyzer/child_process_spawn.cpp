@@ -399,6 +399,12 @@ namespace sogen
             argv.emplace_back("--whp-exec-hook");
             argv.push_back(config.whp_execution_hook_mode);
 
+            if (!config.trace_hooks_path.empty())
+            {
+                argv.emplace_back("--trace-hooks");
+                argv.push_back(config.trace_hooks_path.string());
+            }
+
             if (!config.debug_child_pattern.empty())
             {
                 argv.emplace_back("--debug-child");
