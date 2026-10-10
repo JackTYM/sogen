@@ -165,6 +165,18 @@ namespace sogen
                 deferred_delete_ = delete_information{.filepath = std::move(name)};
             }
 
+            std::optional<std::filesystem::path> take_deferred_delete()
+            {
+                if (!deferred_delete_)
+                {
+                    return std::nullopt;
+                }
+
+                auto path = std::move(deferred_delete_->filepath);
+                deferred_delete_ = {};
+                return path;
+            }
+
             // Holds an advisory shared lock on `path` for the remaining lifetime of this host
             // process (the fd is intentionally never closed - the kernel releases the lock on
             // process exit). Used by a freshly-spawned child process (NtCreateUserProcess) to

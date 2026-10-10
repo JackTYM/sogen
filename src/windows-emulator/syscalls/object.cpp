@@ -239,6 +239,17 @@ namespace sogen
                 auto* file = c.proc.files.get(h);
                 if (file && file->ref_count == 1)
                 {
+                    // A delete-pending file stays alive until its last handle closes, not just the one that marked it.
+                    if (auto pending_delete = file->handle.take_deferred_delete())
+                    {
+                        auto remaining = std::ranges::find_if(c.proc.files, [&](auto& entry) {
+                            return &entry.second != file && entry.second.is_file() && entry.second.host_path == file->host_path;
+                        });
+
+                        auto& successor = remaining != c.proc.files.end() ? remaining->second : *file;
+                        successor.handle.defer_delete(std::move(*pending_delete));
+                    }
+
                     for (auto it = c.proc.file_locks.begin(); it != c.proc.file_locks.end();)
                     {
                         auto& locks = it->second.locks;
