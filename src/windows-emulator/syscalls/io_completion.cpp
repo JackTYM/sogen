@@ -395,6 +395,12 @@ namespace sogen
 
             const auto resolved_target_handle = c.proc.resolve_object_pseudo_handle(target_object_handle, c.vcpu.active_thread);
 
+            if (std::getenv("SOGEN_TRACE_WAIT_PACKETS"))
+            {
+                c.win_emu.log.info("[wait-packet-trace] associate guest_pid=%u target=0x%llx\n", c.proc.process_id,
+                                   static_cast<unsigned long long>(resolved_target_handle.bits));
+            }
+
             if (std::getenv("SOGEN_TRACE_PIPE_IO"))
             {
                 c.win_emu.log.info("[pipe-io-trace] NtAssociateWaitCompletionPacket wait_packet=0x%llx io_completion=0x%llx target=0x%llx "

@@ -288,6 +288,13 @@ namespace sogen
 
                 consume_wait_completion_target(process, wait_packet.target_object_handle);
 
+                static const bool trace_wait_packets = std::getenv("SOGEN_TRACE_WAIT_PACKETS") != nullptr;
+                if (trace_wait_packets)
+                {
+                    fprintf(stderr, "[wait-packet-trace] completed guest_pid=%u target=0x%llx\n", process.process_id,
+                            static_cast<unsigned long long>(wait_packet.target_object_handle.bits));
+                }
+
                 enqueue_wait_packet_completion(process, *completion, process.wait_completion_packets.make_handle(packet_id), wait_packet);
                 wait_packet.queued_completion = true;
             }
