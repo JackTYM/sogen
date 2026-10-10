@@ -30,6 +30,17 @@ namespace sogen
         constexpr size_t MAX_INSTRUCTION_BYTES = 15;
         constexpr uint64_t SYSCALL_INSTRUCTION_SIZE = 2;
 
+        // Execution hooks fire lock-free on whichever vCPU hit them; without dispatch_on_cpu,
+        // current_thread() would resolve to vCPU 0, which can be idle under --vcpus > 1.
+        template <typename Callback>
+        emulator_hook* hook_dispatched_execution(windows_emulator* win_emu, const uint64_t address, Callback callback)
+        {
+            return win_emu->emu().hook_memory_execution(
+                address, [win_emu, callback = std::move(callback)](cpu_interface& cpu, const uint64_t hit_address) mutable {
+                    win_emu->dispatch_on_cpu(cpu, [&] { callback(cpu, hit_address); });
+                });
+        }
+
         // mojo::IncomingInvitation::AcceptIsolated's RVA in msedge.dll 150.0.7871.187,
         // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #269).
         constexpr uint64_t ACCEPT_ISOLATED_RVA = 0xa6bef06;
@@ -3418,7 +3429,7 @@ namespace sogen
                     win_emu->log.error("[gpu-device-init-hook-trace] watching %s at 0x%llx (%s loaded)\n", name,
                                        static_cast<unsigned long long>(address), mod.name.c_str());
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto rsp = emu.read_stack_pointer();
 
@@ -3456,7 +3467,7 @@ namespace sogen
                     win_emu->log.error("[ipcz-channel-error-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto rsp = emu.read_stack_pointer();
 
@@ -3494,7 +3505,7 @@ namespace sogen
                     win_emu->log.error("[ipcz-channel-create-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto rsp = emu.read_stack_pointer();
 
@@ -3529,7 +3540,7 @@ namespace sogen
                                    "TryDispatchMessage header decode at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto header_ptr = emu.reg<uint64_t>(x86_register::r15);
                     const auto available_bytes = emu.reg<uint64_t>(x86_register::rsi);
@@ -3648,7 +3659,7 @@ namespace sogen
                     win_emu->log.error("[ipcz-accept-parcel-dispatch-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto rsp = emu.read_stack_pointer();
 
@@ -3686,7 +3697,7 @@ namespace sogen
                     win_emu->log.error("[ipcz-send-outbound-parcel-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto rsp = emu.read_stack_pointer();
 
@@ -3719,7 +3730,7 @@ namespace sogen
                                    "HandleIncomingMessage/HandleValidatedMessage name read at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto name = emu.reg<uint32_t>(x86_register::edi);
                     const auto header_ptr = emu.reg<uint64_t>(x86_register::rax);
@@ -3746,7 +3757,7 @@ namespace sogen
                                    "incoming_receiver_->Accept() virtual call site at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto receiver_this = emu.reg<uint64_t>(x86_register::rcx);
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
@@ -3773,7 +3784,7 @@ namespace sogen
                                    "target_->Accept() virtual call site at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto target_this = emu.reg<uint64_t>(x86_register::rcx);
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
@@ -3806,7 +3817,7 @@ namespace sogen
                                    "call site at 0x%llx, filtering for embedded_browser::mojom ordinals\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
 
@@ -3855,7 +3866,7 @@ namespace sogen
                     "[mojo-validation-error-hook-trace] watching mojo::internal::ReportValidationErrorForMessage at 0x%llx\n",
                     static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rcx);
                     const auto error = emu.reg<uint32_t>(x86_register::rdx);
@@ -3883,7 +3894,7 @@ namespace sogen
                     win_emu->log.error("[embedded-browser-init-chain-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto rsp = emu.read_stack_pointer();
 
@@ -3910,7 +3921,7 @@ namespace sogen
                                    "own args at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto rsp = emu.read_stack_pointer();
                     const auto profile = emu.reg<uint64_t>(x86_register::r9);
@@ -3940,7 +3951,7 @@ namespace sogen
                                    "resolved dispatch target at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
 
@@ -3979,7 +3990,7 @@ namespace sogen
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit %s at 0x%llx\n", name,
                                            static_cast<unsigned long long>(address));
                     });
@@ -4001,7 +4012,7 @@ namespace sogen
                                    "dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
 
@@ -4033,7 +4044,7 @@ namespace sogen
                                    "ContinueInitializeWithProfile's own reply-to-sldim.exe call at 0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     // Real disassembly: rdx points at a local `StructPtr<EmbeddedBrowserCreationData>`
                     // wrapper whose own first field is the real `EmbeddedBrowserCreationData*`; that
                     // struct's error field lives at byte offset 16 (DWORD index 4), matching the exact
@@ -4070,7 +4081,7 @@ namespace sogen
                                    "indirect dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(run_dispatch_address));
 
-                win_emu->emu().hook_memory_execution(run_dispatch_address, [win_emu, run_dispatch_address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, run_dispatch_address, [win_emu, run_dispatch_address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
                     const auto bind_state = emu.reg<uint64_t>(x86_register::rcx);
@@ -4105,22 +4116,23 @@ namespace sogen
                                    "BindPostTaskTrampoline's own indirect dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(post_task_dispatch_address));
 
-                win_emu->emu().hook_memory_execution(post_task_dispatch_address, [win_emu, post_task_dispatch_address](cpu_interface&,
-                                                                                                                       uint64_t) {
-                    auto& emu = win_emu->emu();
-                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
-                    const auto trampoline_state = emu.reg<uint64_t>(x86_register::rcx);
+                hook_dispatched_execution(
+                    win_emu, post_task_dispatch_address, [win_emu, post_task_dispatch_address](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+                        const auto trampoline_state = emu.reg<uint64_t>(x86_register::rcx);
 
-                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
-                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
-                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+                        const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                        const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                        const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
 
-                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit BindPostTaskTrampoline's own indirect "
-                                       "dispatch at 0x%llx, tid=%u call_target=0x%llx (%s+0x%llx) trampoline_state=0x%llx\n",
-                                       static_cast<unsigned long long>(post_task_dispatch_address), win_emu->current_thread().id,
-                                       static_cast<unsigned long long>(call_target), target_mod_name,
-                                       static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(trampoline_state));
-                });
+                        win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit BindPostTaskTrampoline's own indirect "
+                                           "dispatch at 0x%llx, tid=%u call_target=0x%llx (%s+0x%llx) trampoline_state=0x%llx\n",
+                                           static_cast<unsigned long long>(post_task_dispatch_address), win_emu->current_thread().id,
+                                           static_cast<unsigned long long>(call_target), target_mod_name,
+                                           static_cast<unsigned long long>(target_offset),
+                                           static_cast<unsigned long long>(trampoline_state));
+                    });
 
                 // `#559`'s own resolution of the previous hook's dispatch target landed exactly on
                 // `embedded_browser::mojom::EmbeddedBrowser_Initialize_ProxyToResponder::Run` (RVA
@@ -4137,7 +4149,7 @@ namespace sogen
                 win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching "
                                    "EmbeddedBrowser_Initialize_ProxyToResponder::Run entry at 0x%llx\n",
                                    static_cast<unsigned long long>(proxy_responder_entry));
-                win_emu->emu().hook_memory_execution(proxy_responder_entry, [win_emu, proxy_responder_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, proxy_responder_entry, [win_emu, proxy_responder_entry](cpu_interface&, uint64_t) {
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit "
                                        "EmbeddedBrowser_Initialize_ProxyToResponder::Run entry at 0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(proxy_responder_entry), win_emu->current_thread().id);
@@ -4147,7 +4159,7 @@ namespace sogen
                 win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching the real "
                                    "SendMojoMessage call at 0x%llx\n",
                                    static_cast<unsigned long long>(send_mojo_message_call));
-                win_emu->emu().hook_memory_execution(send_mojo_message_call, [win_emu, send_mojo_message_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, send_mojo_message_call, [win_emu, send_mojo_message_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto message_receiver = emu.reg<uint64_t>(x86_register::rcx);
                     const auto message = emu.reg<uint64_t>(x86_register::rdx);
@@ -4176,7 +4188,7 @@ namespace sogen
                 win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching the real "
                                    "MojoWriteMessage call at 0x%llx\n",
                                    static_cast<unsigned long long>(write_message_call));
-                win_emu->emu().hook_memory_execution(write_message_call, [win_emu, write_message_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, write_message_call, [win_emu, write_message_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto mojo_handle = emu.reg<uint64_t>(x86_register::rcx);
                     const auto mojo_message = emu.reg<uint64_t>(x86_register::rdx);
@@ -4190,7 +4202,7 @@ namespace sogen
                 win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching MojoWriteMessage's own "
                                    "return value at 0x%llx\n",
                                    static_cast<unsigned long long>(write_message_return));
-                win_emu->emu().hook_memory_execution(write_message_return, [win_emu, write_message_return](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, write_message_return, [win_emu, write_message_return](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit MojoWriteMessage's own return value at "
@@ -4220,7 +4232,7 @@ namespace sogen
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching checkpoint '%s' at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit checkpoint '%s' at 0x%llx\n", name,
                                            static_cast<unsigned long long>(address));
                     });
@@ -4250,7 +4262,7 @@ namespace sogen
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching %s at 0x%llx\n", name,
                                        static_cast<unsigned long long>(address));
 
-                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                    hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
                         win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit %s at 0x%llx, tid=%u\n", name,
                                            static_cast<unsigned long long>(address), win_emu->current_thread().id);
                     });
@@ -4272,7 +4284,7 @@ namespace sogen
                                    "0x%llx\n",
                                    static_cast<unsigned long long>(address));
 
-                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit AppMojoEnvironment::GetOrCreateInstance at "
                                        "0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(address), win_emu->current_thread().id);
@@ -4298,7 +4310,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching CreateCoreWebView2Controller wrapper "
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(entry_address));
-                win_emu->emu().hook_memory_execution(entry_address, [win_emu, entry_address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, entry_address, [win_emu, entry_address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t this_ptr{};
@@ -4312,14 +4324,14 @@ namespace sogen
                 });
 
                 const auto fail_address = mod.image_base + 0x112185;
-                win_emu->emu().hook_memory_execution(fail_address, [win_emu, fail_address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, fail_address, [win_emu, fail_address](cpu_interface&, uint64_t) {
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit CreateCoreWebView2Controller wrapper "
                                        "SYNCHRONOUS FAIL branch (0x802A000C) at 0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(fail_address), win_emu->current_thread().id);
                 });
 
                 const auto dispatch_address = mod.image_base + 0x112181;
-                win_emu->emu().hook_memory_execution(dispatch_address, [win_emu, dispatch_address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, dispatch_address, [win_emu, dispatch_address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
@@ -4333,7 +4345,7 @@ namespace sogen
                 });
 
                 const auto runonce_address = mod.image_base + 0x117be0;
-                win_emu->emu().hook_memory_execution(runonce_address, [win_emu, runonce_address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, runonce_address, [win_emu, runonce_address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t hresult{};
@@ -4362,7 +4374,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching InitializeWebViewCompleted mojo "
                                    "reply entry at 0x%llx\n",
                                    static_cast<unsigned long long>(init_completed_address));
-                win_emu->emu().hook_memory_execution(init_completed_address, [win_emu, init_completed_address](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, init_completed_address, [win_emu, init_completed_address](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t reply_ptr{};
@@ -4392,7 +4404,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "InterfaceEndpointClient::HandleValidatedMessage entry at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_validated_entry));
-                win_emu->emu().hook_memory_execution(handle_validated_entry, [win_emu, handle_validated_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, handle_validated_entry, [win_emu, handle_validated_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
@@ -4409,7 +4421,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "InterfaceEndpointClient::HandleValidatedMessage's own return value at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_validated_return));
-                win_emu->emu().hook_memory_execution(handle_validated_return, [win_emu, handle_validated_return](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, handle_validated_return, [win_emu, handle_validated_return](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto dispatched = emu.reg<uint32_t>(x86_register::ebx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
@@ -4429,7 +4441,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Channel::OnReadComplete entry at "
                                    "0x%llx\n",
                                    static_cast<unsigned long long>(on_read_complete_entry));
-                win_emu->emu().hook_memory_execution(on_read_complete_entry, [win_emu, on_read_complete_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, on_read_complete_entry, [win_emu, on_read_complete_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
@@ -4482,7 +4494,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnReadComplete's own outer "
                                    "buffered-bytes gate at 0x%llx\n",
                                    static_cast<unsigned long long>(outer_gate_cmp));
-                win_emu->emu().hook_memory_execution(outer_gate_cmp, [win_emu, outer_gate_cmp](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, outer_gate_cmp, [win_emu, outer_gate_cmp](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto available_bytes = emu.reg<uint32_t>(x86_register::edx);
                     const auto required_bytes = emu.reg<uint32_t>(x86_register::ebx);
@@ -4509,7 +4521,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own "
                                    "declared-size-vs-available check at 0x%llx\n",
                                    static_cast<unsigned long long>(size_sufficiency_cmp));
-                win_emu->emu().hook_memory_execution(size_sufficiency_cmp, [win_emu, size_sufficiency_cmp](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, size_sufficiency_cmp, [win_emu, size_sufficiency_cmp](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto declared_num_bytes = emu.reg<uint32_t>(x86_register::ebx);
                     const auto edx = emu.reg<uint32_t>(x86_register::edx);
@@ -4550,7 +4562,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own "
                                    "handle-count field check at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_count_check));
-                win_emu->emu().hook_memory_execution(handle_count_check, [win_emu, handle_count_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, handle_count_check, [win_emu, handle_count_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto handle_count_field = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own "
@@ -4573,7 +4585,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
                                    "delegate dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(real_delegate_dispatch));
-                win_emu->emu().hook_memory_execution(real_delegate_dispatch, [win_emu, real_delegate_dispatch](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, real_delegate_dispatch, [win_emu, real_delegate_dispatch](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::edi);
                     const auto delegate_this = emu.reg<uint32_t>(x86_register::ecx);
@@ -4597,7 +4609,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Transport::OnChannelMessage's own "
                                    "inner ipcz accept call at 0x%llx\n",
                                    static_cast<unsigned long long>(ipcz_accept_call));
-                win_emu->emu().hook_memory_execution(ipcz_accept_call, [win_emu, ipcz_accept_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, ipcz_accept_call, [win_emu, ipcz_accept_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     // `#572` traced the resolved target (`ipcz::_anonymous_namespace_::NotifyTransport`,
@@ -4619,7 +4631,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Transport::OnChannelMessage's own "
                                    "inner ipcz accept result at 0x%llx\n",
                                    static_cast<unsigned long long>(ipcz_accept_result));
-                win_emu->emu().hook_memory_execution(ipcz_accept_result, [win_emu, ipcz_accept_result](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, ipcz_accept_result, [win_emu, ipcz_accept_result](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto result_code = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Transport::OnChannelMessage's own inner ipcz "
@@ -4640,7 +4652,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching ipcz::NodeLink::OnAcceptParcel "
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(node_link_accept_parcel));
-                win_emu->emu().hook_memory_execution(node_link_accept_parcel, [win_emu, node_link_accept_parcel](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, node_link_accept_parcel, [win_emu, node_link_accept_parcel](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
@@ -4663,8 +4675,8 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching ipcz::Router::AcceptInboundParcel "
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(router_accept_inbound_parcel));
-                win_emu->emu().hook_memory_execution(
-                    router_accept_inbound_parcel, [win_emu, router_accept_inbound_parcel](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(
+                    win_emu, router_accept_inbound_parcel, [win_emu, router_accept_inbound_parcel](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                         // A live run just proved `Connector::ReadMessage`'s own `portal_handle`
@@ -4698,7 +4710,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching AcceptInboundParcel's own "
                                    "notify-gate check at 0x%llx\n",
                                    static_cast<unsigned long long>(notify_gate_check));
-                win_emu->emu().hook_memory_execution(notify_gate_check, [win_emu, notify_gate_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, notify_gate_check, [win_emu, notify_gate_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
                     uint32_t gate_flag{};
@@ -4713,7 +4725,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TrapSet::NotifyNewLocalParcel call "
                                    "at 0x%llx\n",
                                    static_cast<unsigned long long>(notify_call));
-                win_emu->emu().hook_memory_execution(notify_call, [win_emu, notify_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, notify_call, [win_emu, notify_call](cpu_interface&, uint64_t) {
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapSet::NotifyNewLocalParcel call "
                                        "at 0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(notify_call), win_emu->current_thread().id);
@@ -4735,7 +4747,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TrapEventDispatcher::DispatchAll's "
                                    "own event-count check at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_count_check));
-                win_emu->emu().hook_memory_execution(dispatch_count_check, [win_emu, dispatch_count_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, dispatch_count_check, [win_emu, dispatch_count_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto masked_count = emu.reg<uint32_t>(x86_register::ebx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapEventDispatcher::DispatchAll's own "
@@ -4748,7 +4760,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TrapEventDispatcher::DispatchAll's "
                                    "own real callback call at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_callback_call));
-                win_emu->emu().hook_memory_execution(dispatch_callback_call, [win_emu, dispatch_callback_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, dispatch_callback_call, [win_emu, dispatch_callback_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapEventDispatcher::DispatchAll's own real "
@@ -4771,7 +4783,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching MojoTrap::DispatchOrQueueEvent "
                                    "call at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_or_queue_call));
-                win_emu->emu().hook_memory_execution(dispatch_or_queue_call, [win_emu, dispatch_or_queue_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, dispatch_or_queue_call, [win_emu, dispatch_or_queue_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto trap_ptr = emu.reg<uint32_t>(x86_register::esi);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit MojoTrap::DispatchOrQueueEvent "
@@ -4792,8 +4804,8 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchOrQueueEvent's own real "
                                    "watcher callback call at 0x%llx\n",
                                    static_cast<unsigned long long>(real_watcher_callback_call));
-                win_emu->emu().hook_memory_execution(
-                    real_watcher_callback_call, [win_emu, real_watcher_callback_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(
+                    win_emu, real_watcher_callback_call, [win_emu, real_watcher_callback_call](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                         win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchOrQueueEvent's own real watcher "
@@ -4818,7 +4830,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Notify's own direct "
                                    "OnHandleReady call at 0x%llx\n",
                                    static_cast<unsigned long long>(direct_on_handle_ready));
-                win_emu->emu().hook_memory_execution(direct_on_handle_ready, [win_emu, direct_on_handle_ready](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, direct_on_handle_ready, [win_emu, direct_on_handle_ready](cpu_interface&, uint64_t) {
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Notify's own direct "
                                        "OnHandleReady call at 0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(direct_on_handle_ready), win_emu->current_thread().id);
@@ -4828,7 +4840,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Notify's own PostTask call at "
                                    "0x%llx\n",
                                    static_cast<unsigned long long>(post_task_call));
-                win_emu->emu().hook_memory_execution(post_task_call, [win_emu, post_task_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, post_task_call, [win_emu, post_task_call](cpu_interface&, uint64_t) {
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Notify's own PostTask call at "
                                        "0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(post_task_call), win_emu->current_thread().id);
@@ -4860,7 +4872,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own raw entry "
                                    "args at 0x%llx\n",
                                    static_cast<unsigned long long>(on_handle_ready_entry));
-                win_emu->emu().hook_memory_execution(on_handle_ready_entry, [win_emu, on_handle_ready_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, on_handle_ready_entry, [win_emu, on_handle_ready_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t a2_watch_id{};
@@ -4895,7 +4907,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching the resolved Connector error "
                                    "call at 0x%llx\n",
                                    static_cast<unsigned long long>(connector_error_call));
-                win_emu->emu().hook_memory_execution(connector_error_call, [win_emu, connector_error_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, connector_error_call, [win_emu, connector_error_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::esi);
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
@@ -4927,7 +4939,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "Connector::ReadAllAvailableMessages entry at 0x%llx\n",
                                    static_cast<unsigned long long>(read_all_entry));
-                win_emu->emu().hook_memory_execution(read_all_entry, [win_emu, read_all_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, read_all_entry, [win_emu, read_all_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     uint8_t guard_0x83{};
@@ -4945,7 +4957,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "ReadAllAvailableMessages's own guard-bail exit at 0x%llx\n",
                                    static_cast<unsigned long long>(read_all_guard_bail));
-                win_emu->emu().hook_memory_execution(read_all_guard_bail, [win_emu, read_all_guard_bail](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, read_all_guard_bail, [win_emu, read_all_guard_bail](cpu_interface&, uint64_t) {
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
                                        "ReadAllAvailableMessages's own guard-bail exit at 0x%llx, tid=%u\n",
                                        static_cast<unsigned long long>(read_all_guard_bail), win_emu->current_thread().id);
@@ -4955,7 +4967,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Connector::ReadMessage "
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(read_message_entry));
-                win_emu->emu().hook_memory_execution(read_message_entry, [win_emu, read_message_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, read_message_entry, [win_emu, read_message_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     // `#574`'s own recommendation (a): capture the portal handle this Connector
@@ -4975,7 +4987,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Connector::ReadMessage's own "
                                    "post-MojoReadMessage result at 0x%llx\n",
                                    static_cast<unsigned long long>(read_message_post_call));
-                win_emu->emu().hook_memory_execution(read_message_post_call, [win_emu, read_message_post_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, read_message_post_call, [win_emu, read_message_post_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto mojo_read_message_result = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Connector::ReadMessage's own "
@@ -4994,25 +5006,25 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
                                    "incoming_receiver_ null-check at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_receiver_null_check));
-                win_emu->emu().hook_memory_execution(
-                    dispatch_receiver_null_check, [win_emu, dispatch_receiver_null_check](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
-                        const auto connector_this = emu.reg<uint32_t>(x86_register::esi);
-                        uint32_t incoming_receiver{};
-                        emu.try_read_memory(connector_this + 0xc, &incoming_receiver, sizeof(incoming_receiver));
-                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
-                                           "incoming_receiver_ null-check at 0x%llx, tid=%u connector_this=0x%x "
-                                           "incoming_receiver_=0x%x\n",
-                                           static_cast<unsigned long long>(dispatch_receiver_null_check), win_emu->current_thread().id,
-                                           connector_this, incoming_receiver);
-                    });
+                hook_dispatched_execution(win_emu, dispatch_receiver_null_check,
+                                          [win_emu, dispatch_receiver_null_check](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto connector_this = emu.reg<uint32_t>(x86_register::esi);
+                                              uint32_t incoming_receiver{};
+                                              emu.try_read_memory(connector_this + 0xc, &incoming_receiver, sizeof(incoming_receiver));
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
+                                                                 "incoming_receiver_ null-check at 0x%llx, tid=%u connector_this=0x%x "
+                                                                 "incoming_receiver_=0x%x\n",
+                                                                 static_cast<unsigned long long>(dispatch_receiver_null_check),
+                                                                 win_emu->current_thread().id, connector_this, incoming_receiver);
+                                          });
 
                 const auto dispatch_receiver_null_skip = mod.image_base + 0x35adb5;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
                                    "incoming_receiver_-is-null skip target at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_receiver_null_skip));
-                win_emu->emu().hook_memory_execution(
-                    dispatch_receiver_null_skip, [win_emu, dispatch_receiver_null_skip](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(
+                    win_emu, dispatch_receiver_null_skip, [win_emu, dispatch_receiver_null_skip](cpu_interface&, uint64_t) {
                         win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
                                            "incoming_receiver_-is-null skip target at 0x%llx, tid=%u\n",
                                            static_cast<unsigned long long>(dispatch_receiver_null_skip), win_emu->current_thread().id);
@@ -5022,7 +5034,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own real "
                                    "incoming_receiver_->Accept() call at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_accept_call));
-                win_emu->emu().hook_memory_execution(dispatch_accept_call, [win_emu, dispatch_accept_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, dispatch_accept_call, [win_emu, dispatch_accept_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto receiver_this = emu.reg<uint32_t>(x86_register::ecx);
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::eax);
@@ -5038,7 +5050,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
                                    "incoming_receiver_->Accept() return value at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_accept_return));
-                win_emu->emu().hook_memory_execution(dispatch_accept_return, [win_emu, dispatch_accept_return](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, dispatch_accept_return, [win_emu, dispatch_accept_return](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto accept_result = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
@@ -5059,7 +5071,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
                                    "CreateFromMessageHandle result check at 0x%llx\n",
                                    static_cast<unsigned long long>(msg_create_check));
-                win_emu->emu().hook_memory_execution(msg_create_check, [win_emu, msg_create_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, msg_create_check, [win_emu, msg_create_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
                     uint32_t message_handle{};
@@ -5073,7 +5085,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching DispatchMessageW's own "
                                    "MessageHeaderValidator::Accept result check at 0x%llx\n",
                                    static_cast<unsigned long long>(header_validate_check));
-                win_emu->emu().hook_memory_execution(header_validate_check, [win_emu, header_validate_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, header_validate_check, [win_emu, header_validate_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto al = emu.reg<uint8_t>(x86_register::al);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
@@ -5086,7 +5098,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching Connector::HandleError entry "
                                    "at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_error_entry));
-                win_emu->emu().hook_memory_execution(handle_error_entry, [win_emu, handle_error_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, handle_error_entry, [win_emu, handle_error_entry](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
@@ -5115,23 +5127,23 @@ namespace sogen
                                    "MessageHeaderValidator::Accept's own ValidateStructHeaderAndClaimMemory "
                                    "result at 0x%llx\n",
                                    static_cast<unsigned long long>(validate_struct_header_result));
-                win_emu->emu().hook_memory_execution(
-                    validate_struct_header_result, [win_emu, validate_struct_header_result](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
-                        const auto al = emu.reg<uint8_t>(x86_register::al);
-                        const auto edi = emu.reg<uint32_t>(x86_register::edi);
-                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
-                                           "MessageHeaderValidator::Accept's own ValidateStructHeaderAndClaimMemory "
-                                           "result at 0x%llx, tid=%u struct_header_claim_ok=%u edi=0x%x\n",
-                                           static_cast<unsigned long long>(validate_struct_header_result), win_emu->current_thread().id, al,
-                                           edi);
-                    });
+                hook_dispatched_execution(win_emu, validate_struct_header_result,
+                                          [win_emu, validate_struct_header_result](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto al = emu.reg<uint8_t>(x86_register::al);
+                                              const auto edi = emu.reg<uint32_t>(x86_register::edi);
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                                                 "MessageHeaderValidator::Accept's own ValidateStructHeaderAndClaimMemory "
+                                                                 "result at 0x%llx, tid=%u struct_header_claim_ok=%u edi=0x%x\n",
+                                                                 static_cast<unsigned long long>(validate_struct_header_result),
+                                                                 win_emu->current_thread().id, al, edi);
+                                          });
 
                 const auto switch_dispatch_point = mod.image_base + 0x35eac2;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "MessageHeaderValidator::Accept's own version-switch dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(switch_dispatch_point));
-                win_emu->emu().hook_memory_execution(switch_dispatch_point, [win_emu, switch_dispatch_point](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, switch_dispatch_point, [win_emu, switch_dispatch_point](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto header_num_bytes = emu.reg<uint32_t>(x86_register::eax);
                     const auto header_version = emu.reg<uint32_t>(x86_register::ecx);
@@ -5157,8 +5169,8 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "ValidateStructHeaderAndClaimMemory entry at 0x%llx\n",
                                    static_cast<unsigned long long>(validate_struct_header_entry));
-                win_emu->emu().hook_memory_execution(
-                    validate_struct_header_entry, [win_emu, validate_struct_header_entry](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(
+                    win_emu, validate_struct_header_entry, [win_emu, validate_struct_header_entry](cpu_interface&, uint64_t) {
                         auto& emu = win_emu->emu();
                         const auto esp = emu.reg<uint32_t>(x86_register::esp);
                         uint32_t struct_ptr{};
@@ -5190,49 +5202,49 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "CreateFromMessageHandle's own first MojoGetMessageData result at 0x%llx\n",
                                    static_cast<unsigned long long>(get_message_data_first_call_result));
-                win_emu->emu().hook_memory_execution(
-                    get_message_data_first_call_result, [win_emu, get_message_data_first_call_result](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
-                        const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
-                        const auto esp = emu.reg<uint32_t>(x86_register::esp);
-                        uint32_t buffer_out_addr{};
-                        emu.try_read_memory(esp + 8, &buffer_out_addr, sizeof(buffer_out_addr));
-                        uint32_t num_bytes_out_addr{};
-                        emu.try_read_memory(esp + 0xc, &num_bytes_out_addr, sizeof(num_bytes_out_addr));
-                        uint32_t buffer_ptr{};
-                        emu.try_read_memory(buffer_out_addr, &buffer_ptr, sizeof(buffer_ptr));
-                        uint32_t num_bytes{};
-                        emu.try_read_memory(num_bytes_out_addr, &num_bytes, sizeof(num_bytes));
-                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
-                                           "CreateFromMessageHandle's own first MojoGetMessageData result at 0x%llx, "
-                                           "tid=%u mojo_result=%u buffer_ptr=0x%x num_bytes=%u\n",
-                                           static_cast<unsigned long long>(get_message_data_first_call_result),
-                                           win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
-                    });
+                hook_dispatched_execution(win_emu, get_message_data_first_call_result,
+                                          [win_emu, get_message_data_first_call_result](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
+                                              const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                                              uint32_t buffer_out_addr{};
+                                              emu.try_read_memory(esp + 8, &buffer_out_addr, sizeof(buffer_out_addr));
+                                              uint32_t num_bytes_out_addr{};
+                                              emu.try_read_memory(esp + 0xc, &num_bytes_out_addr, sizeof(num_bytes_out_addr));
+                                              uint32_t buffer_ptr{};
+                                              emu.try_read_memory(buffer_out_addr, &buffer_ptr, sizeof(buffer_ptr));
+                                              uint32_t num_bytes{};
+                                              emu.try_read_memory(num_bytes_out_addr, &num_bytes, sizeof(num_bytes));
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                                                 "CreateFromMessageHandle's own first MojoGetMessageData result at 0x%llx, "
+                                                                 "tid=%u mojo_result=%u buffer_ptr=0x%x num_bytes=%u\n",
+                                                                 static_cast<unsigned long long>(get_message_data_first_call_result),
+                                                                 win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
+                                          });
 
                 const auto get_message_data_retry_call_result = mod.image_base + 0x35f30f;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "CreateFromMessageHandle's own retry MojoGetMessageData result at 0x%llx\n",
                                    static_cast<unsigned long long>(get_message_data_retry_call_result));
-                win_emu->emu().hook_memory_execution(
-                    get_message_data_retry_call_result, [win_emu, get_message_data_retry_call_result](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
-                        const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
-                        const auto esp = emu.reg<uint32_t>(x86_register::esp);
-                        uint32_t buffer_out_addr{};
-                        emu.try_read_memory(esp + 8, &buffer_out_addr, sizeof(buffer_out_addr));
-                        uint32_t num_bytes_out_addr{};
-                        emu.try_read_memory(esp + 0xc, &num_bytes_out_addr, sizeof(num_bytes_out_addr));
-                        uint32_t buffer_ptr{};
-                        emu.try_read_memory(buffer_out_addr, &buffer_ptr, sizeof(buffer_ptr));
-                        uint32_t num_bytes{};
-                        emu.try_read_memory(num_bytes_out_addr, &num_bytes, sizeof(num_bytes));
-                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
-                                           "CreateFromMessageHandle's own retry MojoGetMessageData result at 0x%llx, "
-                                           "tid=%u mojo_result=%u buffer_ptr=0x%x num_bytes=%u\n",
-                                           static_cast<unsigned long long>(get_message_data_retry_call_result),
-                                           win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
-                    });
+                hook_dispatched_execution(win_emu, get_message_data_retry_call_result,
+                                          [win_emu, get_message_data_retry_call_result](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
+                                              const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                                              uint32_t buffer_out_addr{};
+                                              emu.try_read_memory(esp + 8, &buffer_out_addr, sizeof(buffer_out_addr));
+                                              uint32_t num_bytes_out_addr{};
+                                              emu.try_read_memory(esp + 0xc, &num_bytes_out_addr, sizeof(num_bytes_out_addr));
+                                              uint32_t buffer_ptr{};
+                                              emu.try_read_memory(buffer_out_addr, &buffer_ptr, sizeof(buffer_ptr));
+                                              uint32_t num_bytes{};
+                                              emu.try_read_memory(num_bytes_out_addr, &num_bytes, sizeof(num_bytes));
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                                                 "CreateFromMessageHandle's own retry MojoGetMessageData result at 0x%llx, "
+                                                                 "tid=%u mojo_result=%u buffer_ptr=0x%x num_bytes=%u\n",
+                                                                 static_cast<unsigned long long>(get_message_data_retry_call_result),
+                                                                 win_emu->current_thread().id, mojo_result, buffer_ptr, num_bytes);
+                                          });
 
                 // Traced one level deeper still: `MojoMessage::GetData` faithfully reports
                 // `this+12`/`this+16` (data ptr/size), which `MojoMessage::SetParcel` sets from a
@@ -5249,19 +5261,19 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
                                    "MojoMessage::SetParcel's own real ipcz Get call result at 0x%llx\n",
                                    static_cast<unsigned long long>(set_parcel_get_call_result));
-                win_emu->emu().hook_memory_execution(
-                    set_parcel_get_call_result, [win_emu, set_parcel_get_call_result](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
-                        const auto ipcz_result = emu.reg<uint32_t>(x86_register::eax);
-                        const auto size_out_addr = emu.reg<uint32_t>(x86_register::esi);
-                        uint32_t size_value{};
-                        emu.try_read_memory(size_out_addr, &size_value, sizeof(size_value));
-                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
-                                           "MojoMessage::SetParcel's own real ipcz Get call result at 0x%llx, tid=%u "
-                                           "ipcz_result=%u size_out_addr=0x%x size_value=%u\n",
-                                           static_cast<unsigned long long>(set_parcel_get_call_result), win_emu->current_thread().id,
-                                           ipcz_result, size_out_addr, size_value);
-                    });
+                hook_dispatched_execution(win_emu, set_parcel_get_call_result,
+                                          [win_emu, set_parcel_get_call_result](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto ipcz_result = emu.reg<uint32_t>(x86_register::eax);
+                                              const auto size_out_addr = emu.reg<uint32_t>(x86_register::esi);
+                                              uint32_t size_value{};
+                                              emu.try_read_memory(size_out_addr, &size_value, sizeof(size_value));
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
+                                                                 "MojoMessage::SetParcel's own real ipcz Get call result at 0x%llx, tid=%u "
+                                                                 "ipcz_result=%u size_out_addr=0x%x size_value=%u\n",
+                                                                 static_cast<unsigned long long>(set_parcel_get_call_result),
+                                                                 win_emu->current_thread().id, ipcz_result, size_out_addr, size_value);
+                                          });
 
                 // `#573` proved the byte count survives perfectly through `Transport::
                 // OnChannelMessage` for every message this run, ruling out loss at that boundary.
@@ -5280,21 +5292,22 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching NodeLink::OnAcceptParcel's own "
                                    "inline-vs-fragment gate check at 0x%llx\n",
                                    static_cast<unsigned long long>(accept_parcel_inline_vs_fragment_check));
-                win_emu->emu().hook_memory_execution(
-                    accept_parcel_inline_vs_fragment_check, [win_emu, accept_parcel_inline_vs_fragment_check](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
-                        const auto gate_result = emu.reg<uint8_t>(x86_register::al);
-                        const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
-                        uint8_t flag_0x28{};
-                        emu.try_read_memory(message_ptr + 0x28, &flag_0x28, sizeof(flag_0x28));
-                        uint8_t flag_0x1c{};
-                        emu.try_read_memory(message_ptr + 0x1c, &flag_0x1c, sizeof(flag_0x1c));
-                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit NodeLink::OnAcceptParcel's own "
-                                           "inline-vs-fragment gate check at 0x%llx, tid=%u message_ptr=0x%x "
-                                           "gate_result=%u flag_0x28=%u flag_0x1c=%u\n",
-                                           static_cast<unsigned long long>(accept_parcel_inline_vs_fragment_check),
-                                           win_emu->current_thread().id, message_ptr, gate_result, flag_0x28, flag_0x1c);
-                    });
+                hook_dispatched_execution(win_emu, accept_parcel_inline_vs_fragment_check,
+                                          [win_emu, accept_parcel_inline_vs_fragment_check](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto gate_result = emu.reg<uint8_t>(x86_register::al);
+                                              const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
+                                              uint8_t flag_0x28{};
+                                              emu.try_read_memory(message_ptr + 0x28, &flag_0x28, sizeof(flag_0x28));
+                                              uint8_t flag_0x1c{};
+                                              emu.try_read_memory(message_ptr + 0x1c, &flag_0x1c, sizeof(flag_0x1c));
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit NodeLink::OnAcceptParcel's own "
+                                                                 "inline-vs-fragment gate check at 0x%llx, tid=%u message_ptr=0x%x "
+                                                                 "gate_result=%u flag_0x28=%u flag_0x1c=%u\n",
+                                                                 static_cast<unsigned long long>(accept_parcel_inline_vs_fragment_check),
+                                                                 win_emu->current_thread().id, message_ptr, gate_result, flag_0x28,
+                                                                 flag_0x1c);
+                                          });
 
                 // The inline-vs-fragment gate above always passes (`#574` live run). The real
                 // fork happens next: `OnAcceptParcel` reads a `FragmentDescriptor` out of the
@@ -5310,73 +5323,75 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnAcceptParcel's own "
                                    "fragment-descriptor sentinel check at 0x%llx\n",
                                    static_cast<unsigned long long>(fragment_descriptor_sentinel_check));
-                win_emu->emu().hook_memory_execution(fragment_descriptor_sentinel_check, [win_emu, fragment_descriptor_sentinel_check](
-                                                                                             cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
-                    const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
-                    const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
-                    uint32_t descriptor_lo{};
-                    emu.try_read_memory(message_ptr + 0x70, &descriptor_lo, sizeof(descriptor_lo));
-                    uint32_t descriptor_hi{};
-                    emu.try_read_memory(message_ptr + 0x74, &descriptor_hi, sizeof(descriptor_hi));
-                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnAcceptParcel's own "
-                                       "fragment-descriptor sentinel check at 0x%llx, tid=%u message_ptr=0x%x "
-                                       "anded_result=0x%x descriptor_lo=0x%x descriptor_hi=0x%x is_absent=%d\n",
-                                       static_cast<unsigned long long>(fragment_descriptor_sentinel_check), win_emu->current_thread().id,
-                                       message_ptr, anded_result, descriptor_lo, descriptor_hi, anded_result == 0xFFFFFFFFu);
-                });
+                hook_dispatched_execution(win_emu, fragment_descriptor_sentinel_check,
+                                          [win_emu, fragment_descriptor_sentinel_check](cpu_interface&, uint64_t) {
+                                              auto& emu = win_emu->emu();
+                                              const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
+                                              const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
+                                              uint32_t descriptor_lo{};
+                                              emu.try_read_memory(message_ptr + 0x70, &descriptor_lo, sizeof(descriptor_lo));
+                                              uint32_t descriptor_hi{};
+                                              emu.try_read_memory(message_ptr + 0x74, &descriptor_hi, sizeof(descriptor_hi));
+                                              win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnAcceptParcel's own "
+                                                                 "fragment-descriptor sentinel check at 0x%llx, tid=%u message_ptr=0x%x "
+                                                                 "anded_result=0x%x descriptor_lo=0x%x descriptor_hi=0x%x is_absent=%d\n",
+                                                                 static_cast<unsigned long long>(fragment_descriptor_sentinel_check),
+                                                                 win_emu->current_thread().id, message_ptr, anded_result, descriptor_lo,
+                                                                 descriptor_hi, anded_result == 0xFFFFFFFFu);
+                                          });
 
                 const auto get_fragment_result_sentinel_check = mod.image_base + 0x8ffde;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnAcceptParcel's own "
                                    "NodeLinkMemory::GetFragment result sentinel check at 0x%llx\n",
                                    static_cast<unsigned long long>(get_fragment_result_sentinel_check));
-                win_emu->emu().hook_memory_execution(get_fragment_result_sentinel_check, [win_emu, get_fragment_result_sentinel_check](
-                                                                                             cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
-                    const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
-                    const auto fragment_out_ptr = emu.reg<uint32_t>(x86_register::ebx);
-                    uint32_t fragment_lo{};
-                    emu.try_read_memory(fragment_out_ptr, &fragment_lo, sizeof(fragment_lo));
-                    uint32_t fragment_hi{};
-                    emu.try_read_memory(fragment_out_ptr + 4, &fragment_hi, sizeof(fragment_hi));
-                    // `ipcz::Parcel::AdoptDataFragment` (real symbol, decompiled) reads THIS
-                    // SAME Fragment struct's own `+8`/`+12`/`+16` fields directly: `+12` must be
-                    // `>= 9`, `+8`'s low 3 bits must be 0 (alignment), and critically `+16` is the
-                    // Fragment's own RESOLVED MAPPED MEMORY POINTER - if that's null, adoption
-                    // fails immediately and the parcel ends up with genuinely empty data, with no
-                    // error surfaced anywhere. This is the single most direct field left to check.
-                    uint32_t fragment_offset8{};
-                    emu.try_read_memory(fragment_out_ptr + 8, &fragment_offset8, sizeof(fragment_offset8));
-                    uint32_t fragment_size12{};
-                    emu.try_read_memory(fragment_out_ptr + 12, &fragment_size12, sizeof(fragment_size12));
-                    uint32_t fragment_mapped_ptr16{};
-                    emu.try_read_memory(fragment_out_ptr + 16, &fragment_mapped_ptr16, sizeof(fragment_mapped_ptr16));
-                    // `#576`'s own decompile of `AdoptDataFragment` shows it reads `v5 = *v4`
-                    // where `v4` IS this same `fragment_mapped_ptr16` - i.e. it dereferences
-                    // the FIRST 4 BYTES OF THE SHARED MEMORY CONTENT ITSELF (a self-described
-                    // length prefix the sender is supposed to have written) to compute the
-                    // parcel's own real data size, separately from the Fragment's own
-                    // metadata (address/capacity, already proven correct). If that in-memory
-                    // prefix is zero even though the Fragment's own mapping is valid, that
-                    // would be a genuine cross-process shared-memory visibility bug rather
-                    // than a metadata bug - read it directly to test this.
-                    uint32_t shared_memory_length_prefix{};
-                    emu.try_read_memory(fragment_mapped_ptr16, &shared_memory_length_prefix, sizeof(shared_memory_length_prefix));
-                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnAcceptParcel's own "
-                                       "NodeLinkMemory::GetFragment result sentinel check at 0x%llx, tid=%u "
-                                       "fragment_out_ptr=0x%x anded_result=0x%x fragment_lo=0x%x fragment_hi=0x%x "
-                                       "is_invalid_fragment=%d fragment_offset8=0x%x fragment_size12=%u "
-                                       "fragment_mapped_ptr16=0x%x shared_memory_length_prefix=%u\n",
-                                       static_cast<unsigned long long>(get_fragment_result_sentinel_check), win_emu->current_thread().id,
-                                       fragment_out_ptr, anded_result, fragment_lo, fragment_hi, anded_result == 0xFFFFFFFFu,
-                                       fragment_offset8, fragment_size12, fragment_mapped_ptr16, shared_memory_length_prefix);
-                });
+                hook_dispatched_execution(
+                    win_emu, get_fragment_result_sentinel_check, [win_emu, get_fragment_result_sentinel_check](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
+                        const auto fragment_out_ptr = emu.reg<uint32_t>(x86_register::ebx);
+                        uint32_t fragment_lo{};
+                        emu.try_read_memory(fragment_out_ptr, &fragment_lo, sizeof(fragment_lo));
+                        uint32_t fragment_hi{};
+                        emu.try_read_memory(fragment_out_ptr + 4, &fragment_hi, sizeof(fragment_hi));
+                        // `ipcz::Parcel::AdoptDataFragment` (real symbol, decompiled) reads THIS
+                        // SAME Fragment struct's own `+8`/`+12`/`+16` fields directly: `+12` must be
+                        // `>= 9`, `+8`'s low 3 bits must be 0 (alignment), and critically `+16` is the
+                        // Fragment's own RESOLVED MAPPED MEMORY POINTER - if that's null, adoption
+                        // fails immediately and the parcel ends up with genuinely empty data, with no
+                        // error surfaced anywhere. This is the single most direct field left to check.
+                        uint32_t fragment_offset8{};
+                        emu.try_read_memory(fragment_out_ptr + 8, &fragment_offset8, sizeof(fragment_offset8));
+                        uint32_t fragment_size12{};
+                        emu.try_read_memory(fragment_out_ptr + 12, &fragment_size12, sizeof(fragment_size12));
+                        uint32_t fragment_mapped_ptr16{};
+                        emu.try_read_memory(fragment_out_ptr + 16, &fragment_mapped_ptr16, sizeof(fragment_mapped_ptr16));
+                        // `#576`'s own decompile of `AdoptDataFragment` shows it reads `v5 = *v4`
+                        // where `v4` IS this same `fragment_mapped_ptr16` - i.e. it dereferences
+                        // the FIRST 4 BYTES OF THE SHARED MEMORY CONTENT ITSELF (a self-described
+                        // length prefix the sender is supposed to have written) to compute the
+                        // parcel's own real data size, separately from the Fragment's own
+                        // metadata (address/capacity, already proven correct). If that in-memory
+                        // prefix is zero even though the Fragment's own mapping is valid, that
+                        // would be a genuine cross-process shared-memory visibility bug rather
+                        // than a metadata bug - read it directly to test this.
+                        uint32_t shared_memory_length_prefix{};
+                        emu.try_read_memory(fragment_mapped_ptr16, &shared_memory_length_prefix, sizeof(shared_memory_length_prefix));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnAcceptParcel's own "
+                                           "NodeLinkMemory::GetFragment result sentinel check at 0x%llx, tid=%u "
+                                           "fragment_out_ptr=0x%x anded_result=0x%x fragment_lo=0x%x fragment_hi=0x%x "
+                                           "is_invalid_fragment=%d fragment_offset8=0x%x fragment_size12=%u "
+                                           "fragment_mapped_ptr16=0x%x shared_memory_length_prefix=%u\n",
+                                           static_cast<unsigned long long>(get_fragment_result_sentinel_check),
+                                           win_emu->current_thread().id, fragment_out_ptr, anded_result, fragment_lo, fragment_hi,
+                                           anded_result == 0xFFFFFFFFu, fragment_offset8, fragment_size12, fragment_mapped_ptr16,
+                                           shared_memory_length_prefix);
+                    });
 
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
                                    static_cast<unsigned long long>(watch_id_check));
-                win_emu->emu().hook_memory_execution(watch_id_check, [win_emu, watch_id_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, watch_id_check, [win_emu, watch_id_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto notified_watch_id = emu.reg<uint32_t>(x86_register::eax);
                     const auto watcher_ptr = emu.reg<uint32_t>(x86_register::esi);
@@ -5401,7 +5416,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching RepeatingCallback::Run's own "
                                    "real bound-callback call at 0x%llx\n",
                                    static_cast<unsigned long long>(real_final_callback));
-                win_emu->emu().hook_memory_execution(real_final_callback, [win_emu, real_final_callback](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, real_final_callback, [win_emu, real_final_callback](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
@@ -5421,7 +5436,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching the next hop's own real "
                                    "dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(next_hop_callback));
-                win_emu->emu().hook_memory_execution(next_hop_callback, [win_emu, next_hop_callback](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, next_hop_callback, [win_emu, next_hop_callback](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
@@ -5440,7 +5455,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching the final hop's own real "
                                    "dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(final_hop_callback));
-                win_emu->emu().hook_memory_execution(final_hop_callback, [win_emu, final_hop_callback](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, final_hop_callback, [win_emu, final_hop_callback](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
@@ -5461,7 +5476,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own "
                                    "channel-state check at 0x%llx\n",
                                    static_cast<unsigned long long>(channel_state_check));
-                win_emu->emu().hook_memory_execution(channel_state_check, [win_emu, channel_state_check](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, channel_state_check, [win_emu, channel_state_check](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto channel_ptr = emu.reg<uint32_t>(x86_register::eax);
                     uint32_t state_flag{};
@@ -5477,7 +5492,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
                                    "dispatch call at 0x%llx\n",
                                    static_cast<unsigned long long>(real_dispatch_call));
-                win_emu->emu().hook_memory_execution(real_dispatch_call, [win_emu, real_dispatch_call](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, real_dispatch_call, [win_emu, real_dispatch_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto esi = emu.reg<uint32_t>(x86_register::esi);
                     uint32_t resolved_target{};
@@ -5491,7 +5506,7 @@ namespace sogen
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
                                    "dispatch return value at 0x%llx\n",
                                    static_cast<unsigned long long>(real_dispatch_return));
-                win_emu->emu().hook_memory_execution(real_dispatch_return, [win_emu, real_dispatch_return](cpu_interface&, uint64_t) {
+                hook_dispatched_execution(win_emu, real_dispatch_return, [win_emu, real_dispatch_return](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto al = emu.reg<uint8_t>(x86_register::al);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own real "
