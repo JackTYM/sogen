@@ -4777,6 +4777,49 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // The WARP UMD (d3d10warp.dll) talks to the BasicRender kernel driver through tagged command
+        // buffers: { uint32 tag, uint32 size, uint64 args... }. For "SYNC" it passes up to two event
+        // handles that the driver signals once the submission reaches the GPU, and after the render
+        // callback returns it requires the tag to have been rewritten to "SYAK" (UMContext::
+        // FlushAllRenderingTasks); otherwise it fails with E_OUTOFMEMORY and the device is removed.
+        void acknowledge_warp_sync_command(const syscall_context& c, const EMU_D3DKMT_RENDER& render)
+        {
+            constexpr uint32_t warp_sync_tag = 0x434E5953;
+            constexpr uint32_t warp_sync_ack_tag = 0x4B415953;
+
+            struct warp_sync_command
+            {
+                uint32_t tag;
+                uint32_t size;
+                uint64_t events[2];
+            };
+
+            const auto& command_buffer = c.proc.dxgk.command_buffer;
+            if (render.CommandLength < sizeof(warp_sync_command) || command_buffer.address == 0 ||
+                static_cast<uint64_t>(render.CommandOffset) + sizeof(warp_sync_command) > command_buffer.size)
+            {
+                return;
+            }
+
+            const auto command_address = command_buffer.address + render.CommandOffset;
+            auto command = c.emu.read_memory<warp_sync_command>(command_address);
+            if (command.tag != warp_sync_tag)
+            {
+                return;
+            }
+
+            for (const auto event_handle : command.events)
+            {
+                if (auto* e = event_handle ? c.proc.events.get(event_handle) : nullptr)
+                {
+                    e->set_signaled(true);
+                }
+            }
+
+            command.tag = warp_sync_ack_tag;
+            c.emu.write_memory(command_address, command);
+        }
+
         NTSTATUS handle_NtGdiDdDDIRender(const syscall_context& c, const emulator_object<EMU_D3DKMT_RENDER> render_desc)
         {
             if (!render_desc)
@@ -4789,6 +4832,8 @@ namespace sogen
                 {
                     dxgk_warn(c, "NtGdiDdDDIRender: Unknown context 0x%X", render.hContext);
                 }
+
+                acknowledge_warp_sync_command(c, render);
 
                 // Clamp the guest-controlled sizes: at least the defaults, but never above the caps above.
                 reserve_dxgk_submission_buffers(
