@@ -289,21 +289,35 @@ namespace sogen
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                return duplicate_object_from_child(c, source_process_handle, source_handle, target_handle, desired_access, options);
+                const auto status =
+                    duplicate_object_from_child(c, source_process_handle, source_handle, target_handle, desired_access, options);
+
+                if (std::getenv("SOGEN_TRACE_DUPLICATE_OBJECT_FROM_CHILD"))
+                {
+                    c.win_emu.log.info(
+                        "[duplicate-object-from-child-trace] pid=%u source_process=0x%llx source_handle=0x%llx status=0x%x\n",
+                        c.proc.process_id, static_cast<unsigned long long>(source_process_handle.bits),
+                        static_cast<unsigned long long>(source_handle.bits), static_cast<unsigned>(status));
+                }
+
+                return status;
             }
 
             if (!target_is_current)
             {
                 const auto resolved_for_child = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
 
+                const auto status =
+                    duplicate_object_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
+
                 if (std::getenv("SOGEN_TRACE_DUPLICATE_OBJECT_INTO_CHILD"))
                 {
-                    c.win_emu.log.info("[duplicate-object-into-child-trace] pid=%u source_handle=0x%llx resolved_type=%u\n",
+                    c.win_emu.log.info("[duplicate-object-into-child-trace] pid=%u source_handle=0x%llx resolved_type=%u status=0x%x\n",
                                        c.proc.process_id, static_cast<unsigned long long>(source_handle.bits),
-                                       resolved_for_child.value.type);
+                                       resolved_for_child.value.type, static_cast<unsigned>(status));
                 }
 
-                return duplicate_object_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
+                return status;
             }
 
             const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
@@ -349,7 +363,7 @@ namespace sogen
             case handle_types::file:
                 return u"File";
             case handle_types::device:
-                return u"Device";
+                return u"File";
             case handle_types::event:
                 return u"Event";
             case handle_types::section:
