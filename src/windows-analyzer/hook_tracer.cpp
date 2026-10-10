@@ -244,6 +244,19 @@ namespace sogen
 
             trace_hook_spec spec{};
             spec.module = utils::string::to_lower(std::string(tokens[0]));
+            if (spec.module.ends_with("@x64"))
+            {
+                spec.machine = IMAGE_FILE_MACHINE_AMD64;
+            }
+            else if (spec.module.ends_with("@x86"))
+            {
+                spec.machine = IMAGE_FILE_MACHINE_I386;
+            }
+
+            if (spec.machine)
+            {
+                spec.module.resize(spec.module.size() - 4);
+            }
             spec.name = std::string(tokens[2]);
 
             if (const auto rva = try_parse_number(tokens[1]))
@@ -376,7 +389,7 @@ namespace sogen
 
         for (const auto& spec : this->specs_)
         {
-            if (spec.module != module_name)
+            if (spec.module != module_name || (spec.machine && *spec.machine != mod.machine))
             {
                 continue;
             }

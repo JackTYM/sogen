@@ -27,6 +27,7 @@ namespace sogen
     struct trace_hook_spec
     {
         std::string module{};
+        std::optional<uint16_t> machine{};
         std::variant<uint64_t, std::string> location{};
         std::string name{};
         std::vector<named_register> entry_registers{};
@@ -35,6 +36,7 @@ namespace sogen
     };
 
     // One hook per line: `<module> <rva|export> <name> [reg...] [mem=<expr>:<len>...] [ret=<reg>[,<reg>...]]`.
+    // <module> may end in `@x64` or `@x86` to only hook that flavour (e.g. the native ntdll.dll, not the WOW64 one).
     // <expr> is a register, a number, or `[<expr>]` (a guest-pointer-sized load), each optionally
     // followed by `+<n>`/`-<n>` terms, e.g. `mem=[[rcx+0x28]+0x38]:8`. `#` starts a comment.
     std::vector<trace_hook_spec> parse_trace_hook_specs(std::string_view text);
