@@ -523,8 +523,21 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            if (remove_signaled_packet && wait_packet->queued_completion)
+            if (wait_packet->associated && !wait_packet->queued_completion)
             {
+                io_completion_wait::materialize_signaled_wait_packets(c.proc, wait_packet->io_completion_handle);
+            }
+
+            // ntdll's thread pool relies on these statuses to know whether the wait callback is still coming:
+            // STATUS_PENDING (signaled packet left queued) and STATUS_CANCELLED (nothing associated, i.e. already
+            // delivered) mean it is, STATUS_SUCCESS means the wait was withdrawn and the pool may complete it itself.
+            if (wait_packet->queued_completion)
+            {
+                if (!remove_signaled_packet)
+                {
+                    return STATUS_PENDING;
+                }
+
                 if (auto* completion = c.proc.io_completions.get(wait_packet->io_completion_handle))
                 {
                     if (completion->remove_by_wait_packet(wait_completion_packet_handle))
@@ -532,6 +545,10 @@ namespace sogen
                         (void)c.proc.wait_completion_packets.erase(wait_completion_packet_handle);
                     }
                 }
+            }
+            else if (!wait_packet->associated)
+            {
+                return STATUS_CANCELLED;
             }
 
             release_wait_packet_association(c, *wait_packet);
