@@ -605,6 +605,42 @@ namespace sogen
                         : static_cast<unsigned long long>(thread.current_ip),
                     thread.waiting_for_alert, thread.await_objects.size(), thread.await_time.has_value(), thread.await_msg.has_value(),
                     thread.await_io_completion.has_value(), thread.suspended, thread.is_terminated());
+
+                for (const auto& object : thread.await_objects)
+                {
+                    win_emu.log.error("[thread-dump]   tid=%u awaits object=0x%llx\n", thread.id,
+                                      static_cast<unsigned long long>(object.bits));
+                }
+
+                if (thread.await_io_completion)
+                {
+                    win_emu.log.error("[thread-dump]   tid=%u awaits io_completion=0x%llx\n", thread.id,
+                                      static_cast<unsigned long long>(thread.await_io_completion->io_completion_handle.bits));
+                }
+            }
+
+            for (const auto& [id, packet] : win_emu.process.wait_completion_packets)
+            {
+                if (!packet.associated && !packet.queued_completion)
+                {
+                    continue;
+                }
+
+                const auto* target_event = packet.target_object_handle.value.type == handle_types::event
+                                               ? win_emu.process.events.get(packet.target_object_handle)
+                                               : nullptr;
+                win_emu.log.error("[thread-dump] pid=%u wait_packet=0x%llx io_completion=0x%llx target=0x%llx associated=%d queued=%d "
+                                  "target_event_signaled=%d\n",
+                                  win_emu.process.process_id, static_cast<unsigned long long>(id),
+                                  static_cast<unsigned long long>(packet.io_completion_handle.bits),
+                                  static_cast<unsigned long long>(packet.target_object_handle.bits), packet.associated,
+                                  packet.queued_completion, target_event ? static_cast<int>(target_event->is_signaled()) : -1);
+            }
+
+            for (const auto& [id, completion] : win_emu.process.io_completions)
+            {
+                win_emu.log.error("[thread-dump] pid=%u io_completion_id=0x%llx queued=%zu\n", win_emu.process.process_id,
+                                  static_cast<unsigned long long>(id), completion.queue.size());
             }
         }
 
