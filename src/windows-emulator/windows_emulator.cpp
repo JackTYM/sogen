@@ -20,6 +20,7 @@
 #include "process_control_server.hpp"
 #include "address_utils.hpp"
 #include "worker_factory_support.hpp"
+#include "window_control.hpp"
 
 namespace sogen
 {
@@ -699,6 +700,7 @@ namespace sogen
             }
 
             drive_audio_render_engine(win_emu);
+            win_emu.inject_scheduled_input();
         }
 
         emulator_thread* get_thread_by_id(process_context& process, const uint32_t id)
@@ -1051,6 +1053,27 @@ namespace sogen
         }
 
         this->ui_backend_->set_event_sink([this](const ui_event& event) { this->handle_ui_event(event); });
+
+        // SOGEN_INJECT_INPUT=<window class>@<seconds>:<x>,<y>[;...]
+        if (const auto* inject_input = std::getenv("SOGEN_INJECT_INPUT"))
+        {
+            std::istringstream entries{inject_input};
+            for (std::string entry; std::getline(entries, entry, ';');)
+            {
+                scheduled_click click{};
+                std::array<char, 256> window_class{};
+                double seconds{};
+                if (std::sscanf(entry.c_str(), "%255[^@]@%lf:%d,%d", window_class.data(), &seconds, &click.x, &click.y) != 4)
+                {
+                    throw std::invalid_argument("Invalid SOGEN_INJECT_INPUT entry: " + entry);
+                }
+
+                click.window_class = u8_to_u16(window_class.data());
+                click.delay = std::chrono::milliseconds(static_cast<int64_t>(seconds * 1000.0));
+                this->scheduled_clicks_.push_back(std::move(click));
+            }
+        }
+
 #ifndef OS_WINDOWS
         if (this->emulation_root.empty())
         {
@@ -2685,7 +2708,111 @@ namespace sogen
     void windows_emulator::handle_ui_event(const ui_event& event)
     {
         const std::scoped_lock lock(this->kernel_lock_);
+        this->deliver_ui_event(event);
+    }
 
+    bool windows_emulator::forward_pointer_input_to_foreign_children(const hwnd parent, const uint32_t message, const uint64_t w_param,
+                                                                     const int32_t x, const int32_t y)
+    {
+        const pointer_input_request input{.message = message, .w_param = w_param, .x = x, .y = y};
+        for (auto it = this->process.foreign_child_windows.begin(); it != this->process.foreign_child_windows.end();)
+        {
+            if (it->second != parent)
+            {
+                ++it;
+                continue;
+            }
+
+            const auto response = syscalls::forward_window_control(*this, window_control_op::pointer_input, it->first, 0,
+                                                                   std::as_bytes(std::span{&input, 1}));
+            if (!response)
+            {
+                it = this->process.foreign_child_windows.erase(it);
+                continue;
+            }
+
+            if (static_cast<NTSTATUS>(response->status) == STATUS_SUCCESS)
+            {
+                return true;
+            }
+
+            ++it;
+        }
+
+        return false;
+    }
+
+    bool windows_emulator::deliver_pointer_input_from_parent(const hwnd window, const pointer_input_request& input)
+    {
+        const auto* win = this->process.windows.get(window);
+        if (!win || (win->style & WS_VISIBLE) == 0 || (win->style & WS_DISABLED) != 0)
+        {
+            return false;
+        }
+
+        if (input.x < win->x || input.x >= win->x + win->width || input.y < win->y || input.y >= win->y + win->height)
+        {
+            return false;
+        }
+
+        this->deliver_ui_event(ui_event{
+            .window = window,
+            .message = input.message,
+            .wParam = input.w_param,
+            .lParam = pack_point(input.x - win->x, input.y - win->y),
+        });
+        return true;
+    }
+
+    void windows_emulator::inject_scheduled_input()
+    {
+        for (auto& click : this->scheduled_clicks_)
+        {
+            if (click.delivered)
+            {
+                continue;
+            }
+
+            const window* target = nullptr;
+            for (const auto& win : this->process.windows | std::views::values)
+            {
+                if ((win.style & WS_VISIBLE) != 0 &&
+                    (win.class_name == click.window_class || normalize_builtin_window_class_name(win.class_name) == click.window_class))
+                {
+                    target = &win;
+                }
+            }
+
+            if (!target)
+            {
+                continue;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (!click.window_seen)
+            {
+                click.window_seen = now;
+            }
+
+            if (now - *click.window_seen < click.delay)
+            {
+                continue;
+            }
+
+            click.delivered = true;
+            const auto window = target->handle;
+            const auto point = pack_point(click.x, click.y);
+            this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s)\n", click.x, click.y,
+                           static_cast<unsigned long long>(window), u16_to_u8(click.window_class).c_str());
+
+            this->deliver_ui_event(ui_event{.window = window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
+            this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
+            this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
+        }
+    }
+
+    void windows_emulator::deliver_ui_event(const ui_event& event)
+    {
         const auto* win = this->process.windows.get(event.window);
         if (!win)
         {
@@ -2744,6 +2871,12 @@ namespace sogen
             this->process.foreground_window = event.window;
 
             const auto target = route_pointer(this->process, event.window, point_x(event.lParam), point_y(event.lParam));
+            if (!is_mouse_wheel_message(event.message) &&
+                this->forward_pointer_input_to_foreign_children(target.window, event.message, event.wParam, target.x, target.y))
+            {
+                return;
+            }
+
             m.window = target.window;
             // WM_MOUSEWHEEL/WM_MOUSEHWHEEL carry screen coordinates in lParam, unlike button/move
             // messages which carry client coordinates. Keep the routed target but preserve screen coords.

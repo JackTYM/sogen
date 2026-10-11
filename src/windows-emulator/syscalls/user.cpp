@@ -4876,9 +4876,18 @@ namespace sogen
             {
                 if (is_foreign_window_handle(c, hwnd_child))
                 {
-                    const auto forwarded = forward_window_control(c, window_control_op::set_parent, hwnd_child, hwnd_new_parent);
+                    const auto forwarded = forward_window_control(c.win_emu, window_control_op::set_parent, hwnd_child, hwnd_new_parent);
                     if (forwarded && static_cast<NTSTATUS>(forwarded->status) == STATUS_SUCCESS)
                     {
+                        if (c.proc.windows.get(hwnd_new_parent))
+                        {
+                            c.proc.foreign_child_windows[hwnd_child] = hwnd_new_parent;
+                        }
+                        else
+                        {
+                            c.proc.foreign_child_windows.erase(hwnd_child);
+                        }
+
                         return forwarded->base_address;
                     }
                 }
@@ -5024,8 +5033,8 @@ namespace sogen
                 if (is_foreign_window_handle(c, hWnd))
                 {
                     const window_pos_request position{.x = x, .y = y, .cx = cx, .cy = cy, .flags = flags};
-                    const auto forwarded =
-                        forward_window_control(c, window_control_op::set_window_pos, hWnd, 0, std::as_bytes(std::span{&position, 1}));
+                    const auto forwarded = forward_window_control(c.win_emu, window_control_op::set_window_pos, hWnd, 0,
+                                                                  std::as_bytes(std::span{&position, 1}));
                     if (forwarded && static_cast<NTSTATUS>(forwarded->status) == STATUS_SUCCESS)
                     {
                         return TRUE;
@@ -7036,7 +7045,7 @@ namespace sogen
             return handle_namespace != c.proc.user_handles.handle_namespace();
         }
 
-        std::optional<process_control_response> forward_window_control(const syscall_context& c, const window_control_op op,
+        std::optional<process_control_response> forward_window_control(windows_emulator& win_emu, const window_control_op op,
                                                                        const uint64_t hwnd, const uint64_t argument,
                                                                        const std::span<const std::byte> payload)
         {
@@ -7047,15 +7056,15 @@ namespace sogen
             request.size = argument;
             request.payload.assign(payload.begin(), payload.end());
 
-            for (const auto& record_id : c.proc.child_processes | std::views::keys)
+            for (const auto& record_id : win_emu.process.child_processes | std::views::keys)
             {
-                auto* const channel = c.win_emu.find_child_control_channel(record_id);
+                auto* const channel = win_emu.find_child_control_channel(record_id);
                 if (!channel)
                 {
                     continue;
                 }
 
-                const auto response = send_process_control_request(c, child_target{record_id, channel}, request);
+                const auto response = send_process_control_request(win_emu, child_target{record_id, channel}, request);
                 if (response && static_cast<NTSTATUS>(response->status) != STATUS_INVALID_HANDLE)
                 {
                     return response;
@@ -7082,6 +7091,19 @@ namespace sogen
                 response.base_address = win->parent_handle != 0 ? win->parent_handle : desktop;
                 win->parent_handle = request.size;
                 response.status = STATUS_SUCCESS;
+                return;
+            }
+
+            case window_control_op::pointer_input: {
+                pointer_input_request input{};
+                if (request.payload.size() != sizeof(input))
+                {
+                    response.status = STATUS_INVALID_PARAMETER;
+                    return;
+                }
+
+                std::memcpy(&input, request.payload.data(), sizeof(input));
+                response.status = target.deliver_pointer_input_from_parent(win->handle, input) ? STATUS_SUCCESS : STATUS_NOT_FOUND;
                 return;
             }
 

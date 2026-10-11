@@ -140,17 +140,23 @@ namespace sogen
     std::optional<process_control_response> send_process_control_request(const syscall_context& c, const child_target& target,
                                                                          const process_control_request& request, const int timeout_ms)
     {
+        return send_process_control_request(c.win_emu, target, request, timeout_ms);
+    }
+
+    std::optional<process_control_response> send_process_control_request(windows_emulator& win_emu, const child_target& target,
+                                                                         const process_control_request& request, const int timeout_ms)
+    {
         const auto trace = std::getenv("SOGEN_TRACE_XPROC_CTRL") != nullptr;
 
         if (trace)
         {
-            c.win_emu.log.log("[XPROC_CTRL] -> child=%u op=%s address=0x%llx size=0x%llx allocation_type=0x%x "
-                              "protection=0x%x free_type=0x%x info_class=0x%x exit_status=%d maximum_size=0x%llx "
-                              "page_protection=0x%x allocation_attributes=0x%x granted_access=0x%x payload_size=%zu\n",
-                              target.record_id, process_control_op_name(request.op), static_cast<unsigned long long>(request.address),
-                              static_cast<unsigned long long>(request.size), request.allocation_type, request.protection, request.free_type,
-                              request.info_class, request.exit_status, static_cast<unsigned long long>(request.maximum_size),
-                              request.page_protection, request.allocation_attributes, request.granted_access, request.payload.size());
+            win_emu.log.log("[XPROC_CTRL] -> child=%u op=%s address=0x%llx size=0x%llx allocation_type=0x%x "
+                            "protection=0x%x free_type=0x%x info_class=0x%x exit_status=%d maximum_size=0x%llx "
+                            "page_protection=0x%x allocation_attributes=0x%x granted_access=0x%x payload_size=%zu\n",
+                            target.record_id, process_control_op_name(request.op), static_cast<unsigned long long>(request.address),
+                            static_cast<unsigned long long>(request.size), request.allocation_type, request.protection, request.free_type,
+                            request.info_class, request.exit_status, static_cast<unsigned long long>(request.maximum_size),
+                            request.page_protection, request.allocation_attributes, request.granted_access, request.payload.size());
         }
 
         const auto response = target.channel->request(request, timeout_ms);
@@ -159,23 +165,22 @@ namespace sogen
         {
             if (!response)
             {
-                c.win_emu.log.log("[XPROC_CTRL] <- child=%u op=%s TIMEOUT_OR_DEAD\n", target.record_id,
-                                  process_control_op_name(request.op));
+                win_emu.log.log("[XPROC_CTRL] <- child=%u op=%s TIMEOUT_OR_DEAD\n", target.record_id, process_control_op_name(request.op));
             }
             else
             {
-                c.win_emu.log.log(
-                    "[XPROC_CTRL] <- child=%u op=%s status=0x%x bytes_written=0x%llx base_address=0x%llx "
-                    "region_size=0x%llx old_protection=0x%x previous_suspend_count=%u minted_handle_bits=0x%llx "
-                    "exported_object_type=0x%x allocation_type=0x%x size=0x%llx maximum_size=0x%llx "
-                    "page_protection=0x%x allocation_attributes=0x%x granted_access=0x%x payload_size=%zu\n",
-                    target.record_id, process_control_op_name(request.op), static_cast<unsigned int>(response->status),
-                    static_cast<unsigned long long>(response->bytes_written), static_cast<unsigned long long>(response->base_address),
-                    static_cast<unsigned long long>(response->region_size), response->old_protection, response->previous_suspend_count,
-                    static_cast<unsigned long long>(response->minted_handle_bits), response->exported_object_type,
-                    response->allocation_type, static_cast<unsigned long long>(response->size),
-                    static_cast<unsigned long long>(response->maximum_size), response->page_protection, response->allocation_attributes,
-                    response->granted_access, response->payload.size());
+                win_emu.log.log("[XPROC_CTRL] <- child=%u op=%s status=0x%x bytes_written=0x%llx base_address=0x%llx "
+                                "region_size=0x%llx old_protection=0x%x previous_suspend_count=%u minted_handle_bits=0x%llx "
+                                "exported_object_type=0x%x allocation_type=0x%x size=0x%llx maximum_size=0x%llx "
+                                "page_protection=0x%x allocation_attributes=0x%x granted_access=0x%x payload_size=%zu\n",
+                                target.record_id, process_control_op_name(request.op), static_cast<unsigned int>(response->status),
+                                static_cast<unsigned long long>(response->bytes_written),
+                                static_cast<unsigned long long>(response->base_address),
+                                static_cast<unsigned long long>(response->region_size), response->old_protection,
+                                response->previous_suspend_count, static_cast<unsigned long long>(response->minted_handle_bits),
+                                response->exported_object_type, response->allocation_type, static_cast<unsigned long long>(response->size),
+                                static_cast<unsigned long long>(response->maximum_size), response->page_protection,
+                                response->allocation_attributes, response->granted_access, response->payload.size());
             }
         }
 

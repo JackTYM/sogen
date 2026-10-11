@@ -819,6 +819,9 @@ namespace sogen
         std::map<uint64_t, uint64_t> dcomp_channel_buffers{};
         // Window the DirectComposition device last bound a target to; composition swap chains present into it.
         uint64_t dcomp_target_window{};
+        // Windows owned by a child host process that were reparented under one of this process's windows,
+        // mapped to that parent. Pointer input hitting the parent is offered to them (see window_control).
+        std::map<hwnd, hwnd> foreign_child_windows{};
         handle_store<handle_types::token, process_token> tokens{};
         user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         user_handle_store<handle_types::cursor_icon, cursor_icon> icons{user_handles};

@@ -9,6 +9,7 @@
 namespace sogen
 {
     struct syscall_context;
+    class windows_emulator;
 
     struct child_target
     {
@@ -24,6 +25,9 @@ namespace sogen
     // one place to log a full request/response, gated by SOGEN_TRACE_XPROC_CTRL, instead of
     // duplicating the same diagnostic at every call site.
     std::optional<process_control_response> send_process_control_request(const syscall_context& c, const child_target& target,
+                                                                         const process_control_request& request,
+                                                                         int timeout_ms = process_control_default_timeout_ms);
+    std::optional<process_control_response> send_process_control_request(windows_emulator& win_emu, const child_target& target,
                                                                          const process_control_request& request,
                                                                          int timeout_ms = process_control_default_timeout_ms);
 

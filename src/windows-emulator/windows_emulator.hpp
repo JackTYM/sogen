@@ -26,6 +26,7 @@ namespace sogen
 {
 
     struct io_device;
+    struct pointer_input_request;
     class windows_emulator;
     struct application_settings;
 
@@ -413,6 +414,23 @@ namespace sogen
         // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
         std::set<uint32_t> known_sibling_pids_{};
 
+        // Test tooling (SOGEN_INJECT_INPUT): left clicks delivered through the same path as host UI input,
+        // a given time after a window of the given class first becomes visible.
+        struct scheduled_click
+        {
+            std::u16string window_class{};
+            std::chrono::milliseconds delay{};
+            int32_t x{};
+            int32_t y{};
+            std::optional<std::chrono::steady_clock::time_point> window_seen{};
+            bool delivered{};
+        };
+
+        std::vector<scheduled_click> scheduled_clicks_{};
+
+        void deliver_ui_event(const ui_event& event);
+        bool forward_pointer_input_to_foreign_children(hwnd parent, uint32_t message, uint64_t w_param, int32_t x, int32_t y);
+
       public:
         const std::filesystem::path emulation_root{};
         const fake_environment_config fake_env{};
@@ -585,6 +603,8 @@ namespace sogen
         }
 
         void handle_ui_event(const ui_event& event);
+        bool deliver_pointer_input_from_parent(hwnd window, const pointer_input_request& input);
+        void inject_scheduled_input();
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);
         void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);
         void deliver_raw_keyboard_input(uint16_t vkey, uint16_t scan_code, uint32_t message, bool extended);
