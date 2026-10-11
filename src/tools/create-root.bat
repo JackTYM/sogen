@@ -58,6 +58,7 @@ CALL :collect combase.dll
 CALL :collect comctl32.dll
 CALL :collect comdlg32.dll
 CALL :collect coremessaging.dll
+CALL :collect coreuicomponents.dll
 CALL :collect credui.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
@@ -168,6 +169,7 @@ CALL :collect sppc.dll
 CALL :collect srvcli.dll
 CALL :collect sspicli.dll
 CALL :collect tbs.dll
+CALL :collect textinputframework.dll
 CALL :collect ucrtbase.dll
 CALL :collect ucrtbased.dll
 CALL :collect uiautomationcore.dll
