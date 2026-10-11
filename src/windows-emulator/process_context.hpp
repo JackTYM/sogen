@@ -574,6 +574,7 @@ namespace sogen
                              bool initial_thread = false);
         void terminate_thread(emulator_thread& thread, NTSTATUS thread_exit_status);
 
+        void update_message_key_state(const msg& message);
         void set_foreground_window(hwnd handle);
 
         const windows_hook_entry* find_windows_hook(int32_t id_hook, uint32_t thread_id) const;
@@ -761,6 +762,9 @@ namespace sogen
         // Per-virtual-key transition state for GetAsyncKeyState's low bit. A value of 1 means the key or
         // mouse button was pressed since the last GetAsyncKeyState query for that virtual key.
         std::array<uint8_t, 256> async_key_state{};
+        // Key state as of the keyboard messages already retrieved from the queue (Windows' synchronous key
+        // state). TranslateMessage reads it: key_state may already reflect key-ups that are still queued.
+        std::array<uint8_t, 256> message_key_state{};
 
         // Raw mouse input registration (NtUserRegisterRawInputDevices). When registered, mouse motion
         // synthesizes relative-mouse RAWINPUT delivered as WM_INPUT, so in-game mouse-look works.

@@ -414,6 +414,7 @@ namespace sogen
         std::optional<msg> peek_pending_message(windows_emulator& win_emu, hwnd hwnd_filter = 0, UINT filter_min = 0, UINT filter_max = 0,
                                                 bool remove = false);
         void post_message(windows_emulator& win_emu, msg msg, bool try_coalesce = false);
+        void post_translated_message(windows_emulator& win_emu, msg msg);
         void remove_window_messages(hwnd window);
 
         bool is_terminated() const;

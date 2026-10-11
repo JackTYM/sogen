@@ -914,6 +914,7 @@ namespace sogen
         buffer.write(this->cursor_shape_visible);
         buffer.write(this->key_state);
         buffer.write(this->async_key_state);
+        buffer.write(this->message_key_state);
         buffer.write(this->raw_mouse_registered);
         buffer.write(this->raw_mouse_target);
         buffer.write(this->raw_keyboard_registered);
@@ -1021,6 +1022,7 @@ namespace sogen
         buffer.read(this->cursor_shape_visible);
         buffer.read(this->key_state);
         buffer.read(this->async_key_state);
+        buffer.read(this->message_key_state);
         buffer.read(this->raw_mouse_registered);
         buffer.read(this->raw_mouse_target);
         buffer.read(this->raw_keyboard_registered);
@@ -1295,6 +1297,30 @@ namespace sogen
 
         this->callbacks_->on_thread_create(h, *thr);
         return h;
+    }
+
+    void process_context::update_message_key_state(const msg& message)
+    {
+        const auto virtual_key = static_cast<uint8_t>(message.wParam & 0xFF);
+        auto& state = this->message_key_state[virtual_key];
+
+        switch (message.message)
+        {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if ((state & 0x80) == 0)
+            {
+                state ^= 0x01;
+            }
+            state |= 0x80;
+            break;
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+            state &= 0x01;
+            break;
+        default:
+            break;
+        }
     }
 
     void process_context::set_foreground_window(const hwnd handle)

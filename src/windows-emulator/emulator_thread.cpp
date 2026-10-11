@@ -1045,6 +1045,7 @@ namespace sogen
                 });
 
                 message_queue.erase(it);
+                win_emu.process.update_message_key_state(msg);
             }
             return msg;
         }
@@ -1132,6 +1133,28 @@ namespace sogen
         this->message_queue_status_bits |= bits;
         this->queue_status_changed_bits |= bits;
         message_queue.push_back(msg);
+    }
+
+    void emulator_thread::post_translated_message(windows_emulator& win_emu, msg msg)
+    {
+        // Real Windows retrieves posted messages before hardware input, so the character a key-down
+        // translates to is seen before that key's already queued key-up.
+        msg.time = get_current_message_time(win_emu.clock());
+        msg.pt = {.x = win_emu.process.cursor_x, .y = win_emu.process.cursor_y};
+        const auto bits = get_message_queue_status_bits(msg);
+
+        for_each_queue_status_bit(bits, [this](const uint32_t /*bit*/, const size_t index) { //
+            ++this->message_queue_status_bit_counts[index];
+        });
+
+        this->message_queue_status_bits |= bits;
+        this->queue_status_changed_bits |= bits;
+
+        const auto first_input = std::ranges::find_if(this->message_queue, [](const sogen::msg& queued) {
+            return (queued.message >= WM_KEYDOWN && queued.message <= WM_UNICHAR) ||
+                   (queued.message >= WM_MOUSEMOVE && queued.message <= WM_MOUSEHWHEEL);
+        });
+        this->message_queue.insert(first_input, msg);
     }
 
     void emulator_thread::remove_window_messages(const hwnd window)

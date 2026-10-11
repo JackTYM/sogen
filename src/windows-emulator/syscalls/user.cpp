@@ -5,6 +5,7 @@
 #include "../window_destroy_orchestrator.hpp"
 #include "../window_control.hpp"
 #include "../cross_process.hpp"
+#include "../keyboard_layout.hpp"
 #include "segment_utils.hpp"
 #include "dxgk_adapters.hpp"
 #include "windows-emulator/user_callback_dispatch.hpp"
@@ -4315,9 +4316,43 @@ namespace sogen
             return {};
         }
 
-        BOOL handle_NtUserTranslateMessage(const syscall_context& /*c*/, const emulator_object<msg> /*message*/, const UINT /*flags*/)
+        BOOL handle_NtUserTranslateMessage(const syscall_context& c, const emulator_object<msg> message, const UINT /*flags*/)
         {
-            return FALSE;
+            const auto m = message.read();
+            if (m.message == WM_KEYUP || m.message == WM_SYSKEYUP)
+            {
+                return TRUE;
+            }
+
+            if (m.message != WM_KEYDOWN && m.message != WM_SYSKEYDOWN)
+            {
+                return FALSE;
+            }
+
+            const auto virtual_key = static_cast<uint16_t>(m.wParam & 0xFFFF);
+            const auto character = virtual_key == keyboard_layout::vk_packet
+                                       ? std::optional{static_cast<char16_t>((m.wParam >> 16) & 0xFFFF)}
+                                       : keyboard_layout::character_for_virtual_key(
+                                             virtual_key, keyboard_layout::modifiers_from_key_state(c.proc.message_key_state));
+            if (!character)
+            {
+                return TRUE;
+            }
+
+            const auto* win = c.proc.windows.get(m.window);
+            auto* owner = win ? c.proc.find_thread_by_id(win->thread_id) : &c.thread();
+            if (owner)
+            {
+                owner->post_translated_message(c.win_emu,
+                                               msg{
+                                                   .window = m.window,
+                                                   .message = static_cast<UINT>(m.message == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR),
+                                                   .wParam = *character,
+                                                   .lParam = m.lParam,
+                                               });
+            }
+
+            return TRUE;
         }
 
         BOOL handle_NtUserGetMessage(const syscall_context& c, const emulator_object<msg> message, const hwnd hwnd,
@@ -7230,9 +7265,27 @@ namespace sogen
             return 0;
         }
 
-        NTSTATUS handle_NtUserToUnicodeEx()
+        int32_t handle_NtUserToUnicodeEx(const syscall_context& c, const uint32_t virtual_key, const uint32_t scan_code,
+                                         const emulator_pointer key_state, const emulator_pointer buffer, const int32_t buffer_size,
+                                         const uint32_t /*flags*/, const uint64_t /*keyboard_layout*/)
         {
-            return 0;
+            if ((scan_code & 0x8000) != 0 || key_state == 0 || buffer == 0 || buffer_size <= 0)
+            {
+                return 0;
+            }
+
+            std::array<uint8_t, 256> state{};
+            c.emu.read_memory(key_state, state.data(), state.size());
+
+            const auto character = keyboard_layout::character_for_virtual_key(static_cast<uint16_t>(virtual_key),
+                                                                              keyboard_layout::modifiers_from_key_state(state));
+            if (!character)
+            {
+                return 0;
+            }
+
+            c.emu.write_memory(buffer, &*character, sizeof(*character));
+            return 1;
         }
 
         uint64_t handle_NtUserSetKeyboardState()
