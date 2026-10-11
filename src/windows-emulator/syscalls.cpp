@@ -139,7 +139,7 @@ namespace sogen
         uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context& c, uint64_t keyboard_layout, uint32_t flags);
         uint64_t handle_NtUserGetKeyboardLayout(const syscall_context& c, uint32_t thread_id);
         uint32_t handle_NtUserGetKeyboardLayoutList(const syscall_context& c, uint32_t buffer_count, emulator_pointer keyboard_layouts);
-        BOOL handle_NtUserGetKeyboardLayoutName(const syscall_context& c, emulator_pointer name);
+        BOOL handle_NtUserGetKeyboardLayoutName(const syscall_context& c, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> name);
         NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context&, emulator_object<LANGID> language_id);
         NTSTATUS handle_NtQueryInstallUILanguage(const syscall_context&, emulator_object<LANGID> language_id);
 

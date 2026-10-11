@@ -136,17 +136,31 @@ namespace sogen
             return 1;
         }
 
-        BOOL handle_NtUserGetKeyboardLayoutName(const syscall_context& c, const emulator_pointer name)
+        BOOL handle_NtUserGetKeyboardLayoutName(const syscall_context& c, const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> name)
         {
-            static const std::u16string keyboard_layout_name = u"00000407";
-
-            if (name == 0)
+            if (!name)
             {
                 return FALSE;
             }
 
-            c.emu.write_memory(name, keyboard_layout_name.data(), keyboard_layout_name.size() * sizeof(char16_t));
-            return TRUE;
+            std::array<char, 9> layout_name{};
+            std::snprintf(layout_name.data(), layout_name.size(), "%08X", 0x0407u);
+            const auto layout_name_u16 = u8_to_u16(layout_name.data());
+            const auto name_bytes = layout_name_u16.size() * sizeof(char16_t);
+
+            bool written = false;
+            name.access([&](UNICODE_STRING<EmulatorTraits<Emu64>>& str) {
+                if (!str.Buffer || str.MaximumLength < name_bytes + sizeof(char16_t))
+                {
+                    return;
+                }
+
+                c.emu.write_memory(str.Buffer, layout_name_u16.c_str(), name_bytes + sizeof(char16_t));
+                str.Length = static_cast<USHORT>(name_bytes);
+                written = true;
+            });
+
+            return written ? TRUE : FALSE;
         }
 
         NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context&, const emulator_object<LANGID> language_id)
