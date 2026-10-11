@@ -82,6 +82,7 @@ CALL :collect dwmapi.dll
 CALL :collect dxcore.dll
 CALL :collect dxgi.dll
 CALL :collect dxva2.dll
+CALL :collect explorerframe.dll
 CALL :collect fwpuclnt.dll
 CALL :collect gdi32.dll
 CALL :collect gdi32full.dll
