@@ -41,6 +41,10 @@ namespace sogen
                 srv.defaultFontHeightScale = -11;
                 srv.defaultFontWidthScale = 0;
                 srv.systemDpi = 96;
+                // user32 answers GetKeyState for keys below 0x20 (Shift/Ctrl/Alt/CapsLock) from a per-thread cache in the
+                // TEB while TEB.Win32ClientInfo[14] equals this serial. The cache is never filled here, so keep the serial
+                // different from it to make those queries reach NtUserGetKeyState.
+                srv.keyStateSerial = 1;
                 srv.systemMetrics[0] = 1920;  // SM_CXSCREEN
                 srv.systemMetrics[1] = 1080;  // SM_CYSCREEN
                 srv.systemMetrics[2] = 17;    // SM_CXVSCROLL

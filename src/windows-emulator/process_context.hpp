@@ -604,6 +604,72 @@ namespace sogen
         // mouse button was pressed since the last GetAsyncKeyState query for that virtual key.
         std::array<uint8_t, 256> async_key_state{};
 
+        // Key state as of the input messages the thread has retrieved so far. GetKeyState reports this while input
+        // messages are still queued, so a key handler sees the modifiers that were held when its message was
+        // generated rather than those of events that were posted after it.
+        std::array<uint8_t, 256> synced_key_state{};
+
+        // Single point that maintains key_state/async_key_state for every input path. Bit 0x80 is the pressed
+        // state; bit 0x01 is the toggle state GetKeyState reports for CapsLock/NumLock/ScrollLock. The generic
+        // Shift/Control/Menu keys mirror their left/right variants.
+        void set_key_state(const uint8_t virtual_key, const bool down)
+        {
+            apply_key_transition(this->key_state, virtual_key, down, &this->async_key_state);
+        }
+
+        void apply_retrieved_key_message(const uint32_t message, const uint64_t w_param)
+        {
+            const auto virtual_key = static_cast<uint8_t>(w_param & 0xFF);
+            if (message == 0x0100 || message == 0x0104)
+            {
+                apply_key_transition(this->synced_key_state, virtual_key, true, nullptr);
+            }
+            else if (message == 0x0101 || message == 0x0105)
+            {
+                apply_key_transition(this->synced_key_state, virtual_key, false, nullptr);
+            }
+        }
+
+        static void apply_key_transition(std::array<uint8_t, 256>& states, const uint8_t virtual_key, const bool down,
+                                         std::array<uint8_t, 256>* async_states)
+        {
+            constexpr uint8_t vk_shift = 0x10;
+            constexpr uint8_t vk_capital = 0x14;
+            constexpr uint8_t vk_lshift = 0xA0;
+            constexpr uint8_t vk_rmenu = 0xA5;
+            constexpr uint8_t vk_numlock = 0x90;
+            constexpr uint8_t vk_scroll = 0x91;
+
+            auto& state = states[virtual_key];
+            if (down)
+            {
+                if ((state & 0x80) == 0)
+                {
+                    if (async_states)
+                    {
+                        (*async_states)[virtual_key] = 1;
+                    }
+                    if (virtual_key == vk_capital || virtual_key == vk_numlock || virtual_key == vk_scroll)
+                    {
+                        state ^= 0x01;
+                    }
+                }
+                state |= 0x80;
+            }
+            else
+            {
+                state &= static_cast<uint8_t>(~0x80);
+            }
+
+            if (virtual_key >= vk_lshift && virtual_key <= vk_rmenu)
+            {
+                const auto left = static_cast<uint8_t>(virtual_key & ~1);
+                const auto generic = static_cast<uint8_t>(vk_shift + (left - vk_lshift) / 2);
+                const bool any_down = ((states[left] | states[left + 1]) & 0x80) != 0;
+                states[generic] = any_down ? 0x80 : 0;
+            }
+        }
+
         // Raw mouse input registration (NtUserRegisterRawInputDevices). When registered, mouse motion
         // synthesizes relative-mouse RAWINPUT delivered as WM_INPUT, so in-game mouse-look works.
         // raw_mouse_target is the explicit hwndTarget; 0 means "follow focus" (deliver to the foreground

@@ -962,6 +962,7 @@ namespace sogen
                 });
 
                 message_queue.erase(it);
+                win_emu.process.apply_retrieved_key_message(msg.message, msg.wParam);
             }
             return msg;
         }
@@ -999,6 +1000,12 @@ namespace sogen
         }
 
         return std::nullopt;
+    }
+
+    bool emulator_thread::has_pending_keyboard_message() const
+    {
+        return std::ranges::any_of(this->message_queue,
+                                   [](const msg& pending) { return pending.message >= WM_KEYDOWN && pending.message <= WM_SYSKEYUP; });
     }
 
     bool emulator_thread::can_coalesce_message(const msg& msg) const

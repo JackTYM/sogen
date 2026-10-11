@@ -719,7 +719,8 @@ namespace sogen
         uint64_t handle_NtUserCreateAcceleratorTable(const syscall_context& c, emulator_pointer entries, int32_t entry_count);
         BOOL handle_NtUserDestroyAcceleratorTable(const syscall_context& c, handle accelerator_table);
         int32_t handle_NtUserCopyAcceleratorTable();
-        int32_t handle_NtUserTranslateAccelerator();
+        int32_t handle_NtUserTranslateAccelerator(const syscall_context& c, hwnd window, handle accelerator_table,
+                                                  emulator_object<msg> message);
         hmenu handle_NtUserCreateMenu(const syscall_context& c);
         BOOL handle_NtUserThunkedMenuItemInfo(const syscall_context& c, hmenu menu, UINT position, BOOL by_position, BOOL insert,
                                               emulator_object<EMU_MENUITEMINFO> item_info,

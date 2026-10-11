@@ -2376,8 +2376,10 @@ namespace sogen
     }
 
     void windows_emulator::deliver_key_down(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool was_down,
-                                            const bool alt_context)
+                                            const bool alt_context_hint)
     {
+        this->process.set_key_state(static_cast<uint8_t>(vk), true);
+
         const auto target = this->process.resolve_focus_window();
         auto* win = this->process.windows.get(target);
         if (!win)
@@ -2391,6 +2393,7 @@ namespace sogen
             return;
         }
 
+        const bool alt_context = alt_context_hint || (this->process.key_state[VK_MENU] & 0x80) != 0;
         const bool is_syskey = vk == VK_MENU || vk == VK_F10 || alt_context;
 
         msg m{};
@@ -2401,8 +2404,11 @@ namespace sogen
         thread->post_message(*this, m);
     }
 
-    void windows_emulator::deliver_key_up(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool alt_context)
+    void windows_emulator::deliver_key_up(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool alt_context_hint)
     {
+        const bool alt_context = alt_context_hint || (this->process.key_state[VK_MENU] & 0x80) != 0;
+        this->process.set_key_state(static_cast<uint8_t>(vk), false);
+
         const auto target = this->process.resolve_focus_window();
         auto* win = this->process.windows.get(target);
         if (!win)
@@ -2423,29 +2429,6 @@ namespace sogen
         m.message = is_syskey ? WM_SYSKEYUP : WM_KEYUP;
         m.wParam = vk;
         m.lParam = static_cast<lparam>(pack_key_lparam(scan_code, extended, alt_context, true, true));
-        thread->post_message(*this, m);
-    }
-
-    void windows_emulator::deliver_char(const uint16_t utf16_char)
-    {
-        const auto target = this->process.resolve_focus_window();
-        auto* win = this->process.windows.get(target);
-        if (!win)
-        {
-            return;
-        }
-
-        auto* thread = get_thread_by_id(this->process, win->thread_id);
-        if (!thread)
-        {
-            return;
-        }
-
-        msg m{};
-        m.window = target;
-        m.message = WM_CHAR;
-        m.wParam = utf16_char;
-        m.lParam = 0;
         thread->post_message(*this, m);
     }
 
@@ -2574,33 +2557,23 @@ namespace sogen
         switch (event.message)
         {
         case WM_KEYDOWN:
-        case WM_SYSKEYDOWN: {
-            const auto virtual_key = static_cast<uint8_t>(event.wParam & 0xFF);
-            if ((this->process.key_state[virtual_key] & 0x80) == 0)
-            {
-                this->process.async_key_state[virtual_key] = 1;
-            }
-            this->process.key_state[virtual_key] = 0x80;
+        case WM_SYSKEYDOWN:
+            this->process.set_key_state(static_cast<uint8_t>(event.wParam & 0xFF), true);
             break;
-        }
         case WM_KEYUP:
         case WM_SYSKEYUP:
-            this->process.key_state[static_cast<uint8_t>(event.wParam & 0xFF)] = 0;
+            this->process.set_key_state(static_cast<uint8_t>(event.wParam & 0xFF), false);
             break;
         default:
             if (const auto virtual_key = mouse_button_virtual_key(event.message, event.wParam); virtual_key != 0)
             {
                 if (is_mouse_button_down_message(event.message))
                 {
-                    if ((this->process.key_state[virtual_key] & 0x80) == 0)
-                    {
-                        this->process.async_key_state[virtual_key] = 1;
-                    }
-                    this->process.key_state[virtual_key] = 0x80;
+                    this->process.set_key_state(virtual_key, true);
                 }
                 else if (is_mouse_button_up_message(event.message))
                 {
-                    this->process.key_state[virtual_key] = 0;
+                    this->process.set_key_state(virtual_key, false);
                 }
             }
             break;

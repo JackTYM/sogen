@@ -55,7 +55,9 @@ namespace sogen
         uint8_t pad_1358[0x34];
         int32_t defaultFontHeightScale;
         int32_t defaultFontWidthScale;
-        uint8_t pad_1394[0x7C2];
+        uint8_t pad_1394[0x7B4];
+        uint32_t keyStateSerial;
+        uint8_t pad_1b4c[0xA];
         uint16_t systemDpi;
         uint8_t pad_1b58[0x286];
         uint64_t foregroundWindow;
@@ -67,6 +69,7 @@ namespace sogen
     static_assert(offsetof(USER_SERVERINFO, ahbrSystem) == 0x1258);
     static_assert(offsetof(USER_SERVERINFO, defaultFontHeightScale) == 0x138C);
     static_assert(offsetof(USER_SERVERINFO, defaultFontWidthScale) == 0x1390);
+    static_assert(offsetof(USER_SERVERINFO, keyStateSerial) == 0x1B48);
     static_assert(offsetof(USER_SERVERINFO, systemDpi) == 0x1B56);
     static_assert(offsetof(USER_SERVERINFO, foregroundWindow) == 0x1DE0);
     static_assert(sizeof(USER_SERVERINFO) == 0x1de8);

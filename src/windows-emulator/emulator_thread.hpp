@@ -596,6 +596,8 @@ namespace sogen
             return ref_counted_object::deleter(t) && t.is_terminated();
         }
 
+        bool has_pending_keyboard_message() const;
+
       private:
         bool can_coalesce_message(const msg& msg) const;
 

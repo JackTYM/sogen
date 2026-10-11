@@ -266,11 +266,6 @@ namespace sogen
         void deliver_key_down(uint16_t vk, uint8_t scan_code, bool extended, bool was_down, bool alt_context);
         void deliver_key_up(uint16_t vk, uint8_t scan_code, bool extended, bool alt_context);
 
-        // WM_CHAR (real UTF-16 code unit in wParam). On real Windows this is normally derived
-        // from WM_KEYDOWN by the guest's own TranslateMessage call; this exists only for the iOS
-        // software keyboard, which has no corresponding WM_KEYDOWN to translate from.
-        void deliver_char(uint16_t utf16_char);
-
         // Observer convenience for external consumers (gdb stub, analyzer, python
         // bindings) and legacy paths that don't thread a vcpu_context through. Resolves
         // to the vCPU whose handler is currently running: all handler/observer code runs

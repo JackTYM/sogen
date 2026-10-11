@@ -1105,6 +1105,11 @@ namespace sogen
                 });
             }
 
+            bool delivers_text_input() const override
+            {
+                return true;
+            }
+
             void set_cursor_visibility(const bool visible) override
             {
                 this->queue_or_run([visible] {

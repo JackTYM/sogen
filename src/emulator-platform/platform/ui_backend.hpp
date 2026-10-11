@@ -118,6 +118,13 @@ namespace sogen
         virtual void set_cursor_visibility(const bool /*visible*/)
         {
         }
+
+        // True when the backend posts WM_CHAR itself from the host's text input (honouring the host keyboard layout
+        // and IME), in which case NtUserTranslateMessage must not synthesize characters from WM_KEYDOWN again.
+        virtual bool delivers_text_input() const
+        {
+            return false;
+        }
     };
 
     class null_ui_backend final : public ui_backend

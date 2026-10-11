@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../menu_bar.hpp"
 #include "../menu_resource.hpp"
+#include "../keyboard_layout.hpp"
 #include "../module/manifest_parser.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
@@ -2784,7 +2785,9 @@ namespace sogen
         // high down bit; GetAsyncKeyState additionally returns the low pressed-since-last-query bit.
         uint32_t handle_NtUserGetKeyState(const syscall_context& c, const int32_t virtual_key)
         {
-            return (c.proc.key_state[static_cast<uint32_t>(virtual_key) & 0xFF] & 0x80) ? 0x8000u : 0u;
+            const auto key = static_cast<uint32_t>(virtual_key) & 0xFF;
+            const auto state = c.thread().has_pending_keyboard_message() ? c.proc.synced_key_state[key] : c.proc.key_state[key];
+            return ((state & 0x80) ? 0x8000u : 0u) | (state & 0x01u);
         }
 
         uint32_t handle_NtUserGetAsyncKeyState(const syscall_context& c, const int32_t virtual_key)
@@ -4392,9 +4395,41 @@ namespace sogen
             return {};
         }
 
-        BOOL handle_NtUserTranslateMessage(const syscall_context& /*c*/, const emulator_object<msg> /*message*/, const UINT /*flags*/)
+        BOOL handle_NtUserTranslateMessage(const syscall_context& c, const emulator_object<msg> message, const UINT /*flags*/)
         {
-            return FALSE;
+            if (c.win_emu.ui().delivers_text_input())
+            {
+                return FALSE;
+            }
+
+            const auto key_message = message.read();
+            if (key_message.message != WM_KEYDOWN && key_message.message != WM_SYSKEYDOWN)
+            {
+                return FALSE;
+            }
+
+            const auto& keys = c.proc.synced_key_state;
+            const key_modifiers modifiers{
+                .shift = (keys[VK_SHIFT] & 0x80) != 0,
+                .caps_lock = (keys[VK_CAPITAL] & 0x01) != 0,
+                .control = (keys[VK_CONTROL] & 0x80) != 0,
+            };
+
+            const auto character = translate_virtual_key(static_cast<uint8_t>(key_message.wParam & 0xFF), modifiers);
+            auto* target = c.proc.windows.get(key_message.window);
+            auto* thread = target ? c.proc.find_thread_by_id(target->thread_id) : nullptr;
+            if (!character || !thread)
+            {
+                return FALSE;
+            }
+
+            msg char_message{};
+            char_message.window = key_message.window;
+            char_message.message = key_message.message == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR;
+            char_message.wParam = *character;
+            char_message.lParam = key_message.lParam;
+            thread->post_message(c.win_emu, char_message);
+            return TRUE;
         }
 
         BOOL handle_NtUserGetMessage(const syscall_context& c, const emulator_object<msg> message, const hwnd hwnd,
@@ -6279,9 +6314,57 @@ namespace sogen
             return 0;
         }
 
-        int32_t handle_NtUserTranslateAccelerator()
+        int32_t handle_NtUserTranslateAccelerator(const syscall_context& c, const hwnd window, const handle accelerator_table,
+                                                  const emulator_object<msg> message)
         {
-            return 0;
+            constexpr uint8_t fvirtkey = 0x01;
+            constexpr uint8_t fshift = 0x04;
+            constexpr uint8_t fcontrol = 0x08;
+            constexpr uint8_t falt = 0x10;
+
+            const auto* table = c.proc.accelerator_tables.get(accelerator_table);
+            const auto* target = c.proc.windows.get(window);
+            if (!table || !target || !message)
+            {
+                return FALSE;
+            }
+
+            const auto key_message = message.read();
+            const bool is_key_down = key_message.message == WM_KEYDOWN || key_message.message == WM_SYSKEYDOWN;
+            const bool is_char = key_message.message == WM_CHAR || key_message.message == WM_SYSCHAR;
+            if (!is_key_down && !is_char)
+            {
+                return FALSE;
+            }
+
+            const auto& keys = c.proc.synced_key_state;
+            const uint8_t held_modifiers =
+                ((keys[VK_SHIFT] & 0x80) ? fshift : 0) | ((keys[VK_CONTROL] & 0x80) ? fcontrol : 0) | ((keys[VK_MENU] & 0x80) ? falt : 0);
+            constexpr uint8_t modifier_mask = fshift | fcontrol | falt;
+
+            const auto match = std::ranges::find_if(table->entries, [&](const accelerator_table_entry& entry) {
+                if ((entry.flags & fvirtkey) != 0)
+                {
+                    return is_key_down && entry.key == (key_message.wParam & 0xFFFF) && (entry.flags & modifier_mask) == held_modifiers;
+                }
+
+                return is_char && entry.key == (key_message.wParam & 0xFFFF);
+            });
+
+            auto* thread = c.proc.find_thread_by_id(target->thread_id);
+            if (match == table->entries.end() || !thread)
+            {
+                return FALSE;
+            }
+
+            // Real user32 sends WM_COMMAND synchronously; posting it lands in the same queue the guest drains next
+            // and avoids re-entering the guest from inside this syscall.
+            msg command{};
+            command.window = window;
+            command.message = WM_COMMAND;
+            command.wParam = (1ull << 16) | match->command;
+            thread->post_message(c.win_emu, command);
+            return TRUE;
         }
 
         hmenu handle_NtUserCreateMenu(const syscall_context& c)
