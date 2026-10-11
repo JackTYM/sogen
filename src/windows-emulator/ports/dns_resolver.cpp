@@ -13,6 +13,7 @@
 #ifndef OS_WINDOWS
 #define ERROR_SUCCESS              0x0
 #define DNS_ERROR_RCODE_NAME_ERROR 0x232B
+#define DNS_INFO_NO_RECORDS        0x251D
 #endif
 
 namespace sogen
@@ -40,37 +41,60 @@ namespace sogen
             std::u16string hostname;
             WORD type{};
             DWORD flags{};
-            std::array<uint8_t, 8> cookie{};
+            uint64_t options{};
         };
+
+        constexpr uint64_t k_dns_query_addrconfig = 0x2000;
+        constexpr uint64_t k_dns_query_dual_addr = 0x4000;
+
+        size_t union_arm_alignment(const utils::aligned_binary_writer& writer, const WORD type)
+        {
+            // NDR (32-bit) aligns each DNS_RECORD union arm to its own alignment, and the IP6_ADDRESS arm is
+            // 8-aligned; NDR64 aligns every arm to the union's 8-byte alignment.
+            if (writer.pointer_size() == utils::aligned_binary_writer::pointer_size_64 || type == DNS_TYPE_AAAA)
+            {
+                return 8;
+            }
+
+            return 4;
+        }
+
+        void write_record_list(utils::aligned_binary_writer& writer, const std::vector<resolved_dns_record>& records, const size_t index)
+        {
+            const auto& record = records[index];
+            const auto has_next = index + 1 < records.size();
+
+            writer.align_to(8);
+            writer.write_ndr_pointer(has_next);
+            writer.write_ndr_pointer(true);
+            writer.write(record.type);
+            writer.write(record.data_length);
+            writer.write(record.flags);
+            writer.write(record.ttl);
+            writer.write(record.reserved);
+
+            writer.write(record.type);
+            writer.write(record.data.data(), record.data_length, union_arm_alignment(writer, record.type));
+
+            if (has_next)
+            {
+                write_record_list(writer, records, index + 1);
+            }
+
+            writer.write_ndr_u16string(record.name);
+        }
 
         struct dns_query_response
         {
-            std::optional<resolved_dns_record> record;
+            std::vector<resolved_dns_record> records;
             uint64_t error_code{};
 
             void write(utils::aligned_binary_writer& writer) const
             {
-                writer.write_ndr_pointer(record.has_value());
-                if (record)
+                writer.write_ndr_pointer(!records.empty());
+                if (!records.empty())
                 {
-                    writer.write_ndr_pointer(false);
-                    // A real 32-bit dnscache reply carries one extra null pointer here that the 64-bit layout
-                    // lacks; without it the record is shifted and the 32-bit dnsapi stub rejects the reply.
-                    if (writer.pointer_size() == utils::aligned_binary_writer::pointer_size_32)
-                    {
-                        writer.write_ndr_pointer(false);
-                    }
-                    writer.write_ndr_pointer(true);
-                    writer.write(record->type);
-                    writer.write(record->data_length);
-                    writer.write(record->flags);
-                    writer.write(record->ttl);
-                    writer.write(record->reserved);
-
-                    writer.write(record->type);
-                    writer.write(record->data.data(), record->data_length, writer.pointer_size());
-
-                    writer.write_ndr_u16string(record->name);
+                    write_record_list(writer, records, 0);
                 }
 
                 writer.align_to(writer.pointer_size());
@@ -124,7 +148,7 @@ namespace sogen
             const auto query_type_offset = c.send_buffer + hostname_offset + hostname_bytes;
             request.type = emu.read_memory<uint16_t>(query_type_offset);
             request.flags = emu.read_memory<uint32_t>(query_type_offset + sizeof(uint32_t));
-            emu.read_memory(c.send_buffer + c.send_buffer_length - request.cookie.size(), request.cookie.data(), request.cookie.size());
+            request.options = emu.read_memory<uint64_t>(c.send_buffer + c.send_buffer_length - sizeof(request.options));
             return true;
         }
 
@@ -167,52 +191,53 @@ namespace sogen
                 }
             }
 
-            std::ranges::sort(records, [](const resolved_dns_record& a, const resolved_dns_record& b) {
-                return std::memcmp(b.data.data(), a.data.data(), k_dns_record_data_size) < 0;
-            });
-
             return records;
         }
 
-        std::optional<resolved_dns_record> resolve_single_host_record(windows_emulator& win_emu, const std::u16string& host,
-                                                                      const WORD dns_type)
+        // The emulated host is configured with IPv4 only, so address-config queries (getaddrinfo's AF_UNSPEC
+        // path) get no AAAA records; dual-address AAAA queries carry the A records as IPv4-mapped AAAA records,
+        // which ws2_32 turns back into AF_INET results.
+        dns_query_response resolve_query(windows_emulator& win_emu, const std::u16string& host, const WORD dns_type, const uint64_t options)
         {
+            dns_query_response response{};
+            if (dns_type == DNS_TYPE_AAAA && !(options & k_dns_query_addrconfig))
+            {
+                response.records = resolve_host_addresses(win_emu, host, DNS_TYPE_AAAA);
+            }
+
             if (dns_type == DNS_TYPE_A)
             {
-                auto records = resolve_host_addresses(win_emu, host, DNS_TYPE_A);
-                if (records.empty())
-                {
-                    return std::nullopt;
-                }
-
-                return records.front();
+                response.records = resolve_host_addresses(win_emu, host, DNS_TYPE_A);
             }
-
-            if (dns_type == DNS_TYPE_AAAA)
+            else if (dns_type == DNS_TYPE_AAAA && (options & k_dns_query_dual_addr))
             {
-                auto ipv6_records = resolve_host_addresses(win_emu, host, DNS_TYPE_AAAA);
-                if (!ipv6_records.empty())
+                for (auto record : resolve_host_addresses(win_emu, host, DNS_TYPE_A))
                 {
-                    return ipv6_records.front();
+                    std::array<std::byte, k_dns_record_data_size> mapped{};
+                    mapped[10] = std::byte{0xFF};
+                    mapped[11] = std::byte{0xFF};
+                    memcpy(mapped.data() + 12, record.data.data(), 4);
+                    record.type = DNS_TYPE_AAAA;
+                    record.data_length = k_dns_record_data_size;
+                    record.data = mapped;
+                    response.records.push_back(std::move(record));
                 }
-
-                auto ipv4_records = resolve_host_addresses(win_emu, host, DNS_TYPE_A);
-                if (ipv4_records.empty())
-                {
-                    return std::nullopt;
-                }
-
-                auto mapped_record = ipv4_records.front();
-                mapped_record.type = DNS_TYPE_AAAA;
-                mapped_record.data_length = 16;
-                mapped_record.data.fill(std::byte{0});
-                mapped_record.data[10] = std::byte{0xFF};
-                mapped_record.data[11] = std::byte{0xFF};
-                memcpy(mapped_record.data.data() + 12, ipv4_records.front().data.data(), 4);
-                return mapped_record;
             }
 
-            return std::nullopt;
+            if (!response.records.empty())
+            {
+                response.error_code = ERROR_SUCCESS;
+            }
+            else if (win_emu.dns_lookup().resolve_host(u16_to_u8(host)).empty())
+            {
+                response.error_code = DNS_ERROR_RCODE_NAME_ERROR;
+            }
+            else
+            {
+                response.error_code = DNS_INFO_NO_RECORDS;
+            }
+
+            return response;
         }
 
         struct dns_resolver : rpc_port
@@ -243,12 +268,8 @@ namespace sogen
                 }
 
                 win_emu.callbacks.on_generic_activity("DNS query: " + u16_to_u8(request.hostname));
-                writer.write(request.cookie);
-
-                dns_query_response response{};
-                response.record = resolve_single_host_record(win_emu, request.hostname, request.type);
-                response.error_code = response.record ? ERROR_SUCCESS : DNS_ERROR_RCODE_NAME_ERROR;
-                writer.write(response);
+                writer.write(request.options);
+                writer.write(resolve_query(win_emu, request.hostname, request.type, request.options));
 
                 return STATUS_SUCCESS;
             }
