@@ -2785,18 +2785,19 @@ namespace sogen
 
             if (!target)
             {
-                continue;
+                return;
             }
 
             const auto now = std::chrono::steady_clock::now();
-            if (!click.window_seen)
+            if (!click.window_seen || click.seen_window != target->handle)
             {
                 click.window_seen = now;
+                click.seen_window = target->handle;
             }
 
             if (now - *click.window_seen < click.delay)
             {
-                continue;
+                return;
             }
 
             click.delivered = true;
@@ -2808,6 +2809,7 @@ namespace sogen
             this->deliver_ui_event(ui_event{.window = window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
             this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
             this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
+            return;
         }
     }
 

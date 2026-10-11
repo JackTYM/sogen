@@ -414,8 +414,9 @@ namespace sogen
         // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
         std::set<uint32_t> known_sibling_pids_{};
 
-        // Test tooling (SOGEN_INJECT_INPUT): left clicks delivered through the same path as host UI input,
-        // a given time after a window of the given class first becomes visible.
+        // Test tooling (SOGEN_INJECT_INPUT): left clicks delivered in order through the same path as host UI
+        // input, each a given time after the newest visible window of its class appeared (or the previous
+        // click, whichever is later).
         struct scheduled_click
         {
             std::u16string window_class{};
@@ -423,6 +424,7 @@ namespace sogen
             int32_t x{};
             int32_t y{};
             std::optional<std::chrono::steady_clock::time_point> window_seen{};
+            hwnd seen_window{};
             bool delivered{};
         };
 
