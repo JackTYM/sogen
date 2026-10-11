@@ -515,6 +515,9 @@ namespace sogen
 #define MF_REMOVE                   0x1000
 
 #define MF_BYCOMMAND                0x0000
+#define MF_CHECKED                  0x0008
+#define MF_GRAYED                   0x0001
+#define MF_DISABLED                 0x0002
 #define MF_BYPOSITION               0x0400
 #endif
 

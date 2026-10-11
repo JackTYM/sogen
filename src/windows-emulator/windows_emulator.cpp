@@ -1,4 +1,5 @@
 #include "std_include.hpp"
+#include "menu_bar.hpp"
 #include "windows_emulator.hpp"
 
 #include <pthread.h>
@@ -153,6 +154,10 @@ namespace sogen
                 origin.x += current->x;
                 origin.y += current->y;
                 current_handle = current->parent_handle;
+                if (const auto* parent = process.windows.get(current_handle))
+                {
+                    origin.y += parent->client_top();
+                }
             }
 
             if (current_handle != ancestor)
@@ -386,12 +391,14 @@ namespace sogen
             }
 
             // Otherwise deliver to the deepest visible/enabled child under the cursor.
-            if (const auto child = find_child_window_at(process, top_level, x, y))
+            const auto* top_window = process.windows.get(top_level);
+            const auto client_y = y - (top_window ? top_window->client_top() : 0);
+            if (const auto child = find_child_window_at(process, top_level, x, client_y))
             {
                 return {.window = child->win->handle, .x = child->x, .y = child->y};
             }
 
-            return {.window = top_level, .x = x, .y = y};
+            return {.window = top_level, .x = x, .y = client_y};
         }
 
         bool has_pending_host_wait(const process_context& process)
@@ -2519,6 +2526,11 @@ namespace sogen
                 }
             }
 
+            if (handle_menu_pointer(*this, *win, event.message, point_x(event.lParam), point_y(event.lParam)))
+            {
+                return;
+            }
+
             this->process.cursor_x = new_cursor_x;
             this->process.cursor_y = new_cursor_y;
             this->process.foreground_window = event.window;
@@ -2938,13 +2950,7 @@ namespace sogen
             }
 
             const auto& restored = surface->second;
-            this->ui().present_surface(win.handle, ui_surface_desc{
-                                                       .width = static_cast<int>(restored.width),
-                                                       .height = static_cast<int>(restored.height),
-                                                       .stride = static_cast<int>(restored.width * sizeof(uint32_t)),
-                                                       .format = ui_surface_format::bgra8,
-                                                       .pixels = restored.pixels.data(),
-                                                   });
+            present_window_surface(*this, win.handle, restored);
         }
     }
 

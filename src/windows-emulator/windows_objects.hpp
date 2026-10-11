@@ -178,6 +178,7 @@ namespace sogen
         std::map<std::u16string, uint64_t> props{};
         emulator_pointer wnd_proc{};
         hmenu system_menu_handle{};
+        hmenu menu_handle{};
         bool host_surface_window{};
         bool message_only{};
         bool unicode_proc{};
@@ -203,6 +204,20 @@ namespace sogen
             return (this->style & (WS_BORDER | WS_DLGFRAME | WS_THICKFRAME)) != 0 ? 1 : 0;
         }
 
+        // A top-level window with a menu reserves a strip above its client area for the menu bar. The strip lives in
+        // the window surface (the guest never draws there) so client coordinates stay relative to the client origin.
+        static constexpr int32_t menu_bar_height = 20;
+
+        bool has_menu_bar() const
+        {
+            return this->menu_handle != 0 && (this->style & WS_CHILD) == 0;
+        }
+
+        int32_t client_top() const
+        {
+            return this->has_menu_bar() ? menu_bar_height : 0;
+        }
+
         int32_t client_width() const
         {
             return std::max(0, this->width - 2 * this->nonclient_border());
@@ -210,7 +225,7 @@ namespace sogen
 
         int32_t client_height() const
         {
-            return std::max(0, this->height - 2 * this->nonclient_border());
+            return std::max(0, this->height - 2 * this->nonclient_border() - this->client_top());
         }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -235,6 +250,7 @@ namespace sogen
             buffer.write_map(this->props);
             buffer.write(this->wnd_proc);
             buffer.write(this->system_menu_handle);
+            buffer.write(this->menu_handle);
             buffer.write(this->host_surface_window);
             buffer.write(this->message_only);
             buffer.write(this->unicode_proc);
@@ -262,6 +278,7 @@ namespace sogen
             buffer.read_map(this->props);
             buffer.read(this->wnd_proc);
             buffer.read(this->system_menu_handle);
+            buffer.read(this->menu_handle);
             buffer.read(this->host_surface_window);
             buffer.read(this->message_only);
             buffer.read(this->unicode_proc);

@@ -85,6 +85,48 @@ namespace sogen
             return std::nullopt;
         }
 
+        std::optional<std::uint32_t> find_entry_offset_by_name(memory_interface& memory, const std::uint64_t directory_address,
+                                                               const std::u16string& name)
+        {
+            IMAGE_RESOURCE_DIRECTORY directory{};
+            if (!memory.try_read_memory(directory_address, &directory, sizeof(directory)))
+            {
+                return std::nullopt;
+            }
+
+            const auto entries_address = directory_address + sizeof(IMAGE_RESOURCE_DIRECTORY);
+
+            for (std::uint32_t i = 0; i < directory.NumberOfNamedEntries; ++i)
+            {
+                IMAGE_RESOURCE_DIRECTORY_ENTRY entry{};
+                if (!memory.try_read_memory(entries_address + i * sizeof(entry), &entry, sizeof(entry)))
+                {
+                    return std::nullopt;
+                }
+
+                std::uint16_t length{};
+                const auto string_address = directory_address + (entry.Name & ~RESOURCE_DATA_IS_DIRECTORY);
+                if (!memory.try_read_memory(string_address, &length, sizeof(length)) || length != name.size())
+                {
+                    continue;
+                }
+
+                std::u16string candidate(length, u'\0');
+                if (!memory.try_read_memory(string_address + sizeof(length), candidate.data(), length * sizeof(char16_t)))
+                {
+                    continue;
+                }
+
+                const auto fold = [](const char16_t ch) { return (ch >= u'a' && ch <= u'z') ? static_cast<char16_t>(ch - 0x20) : ch; };
+                if (std::equal(candidate.begin(), candidate.end(), name.begin(), [&](auto a, auto b) { return fold(a) == fold(b); }))
+                {
+                    return entry.OffsetToData;
+                }
+            }
+
+            return std::nullopt;
+        }
+
         std::optional<std::uint32_t> find_first_entry_offset(memory_interface& memory, const std::uint64_t directory_address)
         {
             IMAGE_RESOURCE_DIRECTORY directory{};
@@ -367,5 +409,52 @@ namespace sogen
         }
 
         return manifest;
+    }
+
+    std::optional<std::vector<std::uint8_t>> find_pe_resource(memory_interface& memory, const std::uint64_t image_base,
+                                                              const std::uint32_t type, const pe_resource_name& name)
+    {
+        const auto resource_directory_entry = find_resource_directory(memory, image_base);
+        if (!resource_directory_entry || resource_directory_entry->VirtualAddress == 0 || resource_directory_entry->Size == 0)
+        {
+            return std::nullopt;
+        }
+
+        const auto resource_directory_address = image_base + resource_directory_entry->VirtualAddress;
+
+        const auto type_offset = find_entry_offset_by_id(memory, resource_directory_address, type);
+        if (!type_offset || (*type_offset & RESOURCE_DATA_IS_DIRECTORY) == 0)
+        {
+            return std::nullopt;
+        }
+
+        const auto name_directory_address = resource_directory_address + (*type_offset & ~RESOURCE_DATA_IS_DIRECTORY);
+        const auto name_offset = name.text.empty() ? find_entry_offset_by_id(memory, name_directory_address, name.id)
+                                                   : find_entry_offset_by_name(memory, name_directory_address, name.text);
+        if (!name_offset || (*name_offset & RESOURCE_DATA_IS_DIRECTORY) == 0)
+        {
+            return std::nullopt;
+        }
+
+        const auto language_offset =
+            find_first_entry_offset(memory, resource_directory_address + (*name_offset & ~RESOURCE_DATA_IS_DIRECTORY));
+        if (!language_offset)
+        {
+            return std::nullopt;
+        }
+
+        IMAGE_RESOURCE_DATA_ENTRY data_entry{};
+        if (!memory.try_read_memory(resource_directory_address + *language_offset, &data_entry, sizeof(data_entry)))
+        {
+            return std::nullopt;
+        }
+
+        std::vector<std::uint8_t> data(data_entry.Size);
+        if (!memory.try_read_memory(image_base + data_entry.OffsetToData, data.data(), data.size()))
+        {
+            return std::nullopt;
+        }
+
+        return data;
     }
 }

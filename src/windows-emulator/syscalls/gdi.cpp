@@ -1,5 +1,6 @@
 #include "../std_include.hpp"
 #include "../debug_font.hpp"
+#include "../menu_bar.hpp"
 #include "../font_renderer.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
@@ -602,6 +603,8 @@ namespace sogen
                     return nullptr;
                 }
 
+                off_y += win->client_top();
+
                 const auto top_handle = static_cast<uint32_t>(win->handle);
                 const auto width = static_cast<uint32_t>(win->width);
                 const auto height = static_cast<uint32_t>(win->height);
@@ -641,10 +644,13 @@ namespace sogen
                     return;
                 }
 
+                const auto extent_width = [](const window& w) { return (w.style & WS_CHILD) != 0 ? w.width : w.client_width(); };
+                const auto extent_height = [](const window& w) { return (w.style & WS_CHILD) != 0 ? w.height : w.client_height(); };
+
                 auto left = origin_x;
                 auto top = origin_y;
-                auto right = origin_x + win->width;
-                auto bottom = origin_y + win->height;
+                auto right = origin_x + extent_width(*win);
+                auto bottom = origin_y + extent_height(*win);
 
                 auto parent_origin_x = origin_x;
                 auto parent_origin_y = origin_y;
@@ -660,8 +666,8 @@ namespace sogen
                     parent_origin_y -= win->y;
                     left = std::max(left, parent_origin_x);
                     top = std::max(top, parent_origin_y);
-                    right = std::min(right, parent_origin_x + parent->width);
-                    bottom = std::min(bottom, parent_origin_y + parent->height);
+                    right = std::min(right, parent_origin_x + extent_width(*parent));
+                    bottom = std::min(bottom, parent_origin_y + extent_height(*parent));
                     win = parent;
                 }
 
@@ -825,12 +831,7 @@ namespace sogen
                     return;
                 }
 
-                c.win_emu.ui().present_surface(present_handle,
-                                               ui_surface_desc{.width = static_cast<int>(surface->width),
-                                                               .height = static_cast<int>(surface->height),
-                                                               .stride = static_cast<int>(surface->width * sizeof(uint32_t)),
-                                                               .format = ui_surface_format::bgra8,
-                                                               .pixels = surface->pixels.data()});
+                present_window_surface(c.win_emu, present_handle, *surface);
             }
 
             void set_surface_pixel(gdi_bitmap_surface& surface, const int x, const int y, const uint32_t color)

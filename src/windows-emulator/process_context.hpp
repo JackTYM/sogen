@@ -216,6 +216,34 @@ namespace sogen
         }
     };
 
+    struct menu_popup
+    {
+        hmenu menu{};
+        int32_t left{};
+        int32_t top{};
+        int32_t highlighted{-1};
+    };
+
+    struct menu_interaction
+    {
+        hwnd window{};
+        int32_t bar_index{-1};
+        std::vector<menu_popup> popups{};
+        bool swallow_button_up{};
+
+        bool is_open() const
+        {
+            return !this->popups.empty();
+        }
+
+        void close()
+        {
+            this->window = 0;
+            this->bar_index = -1;
+            this->popups.clear();
+        }
+    };
+
     struct process_context
     {
         struct callbacks
@@ -532,6 +560,7 @@ namespace sogen
         uint64_t zw_callback_return{};
         uint64_t dispatch_client_message{};
         uint32_t gdi_default_dc_handle{};
+        menu_interaction open_menu{};
         uint32_t gdi_default_bitmap_handle{};
         std::map<uint32_t, gdi_dc_state> gdi_dc_states{};
         // Per-DC stack of states pushed by NtGdiSaveDC and popped by NtGdiRestoreDC.

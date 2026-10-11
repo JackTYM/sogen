@@ -23,4 +23,13 @@ namespace sogen
 
     class memory_interface;
     std::optional<std::string> find_manifest_resource(memory_interface& memory, std::uint64_t image_base);
+
+    struct pe_resource_name
+    {
+        std::uint32_t id{};
+        std::u16string text{};
+    };
+
+    std::optional<std::vector<std::uint8_t>> find_pe_resource(memory_interface& memory, std::uint64_t image_base, std::uint32_t type,
+                                                              const pe_resource_name& name);
 }

@@ -728,6 +728,8 @@ namespace sogen
         BOOL handle_NtUserSetMenu(const syscall_context& c, hwnd wnd, hmenu menu, BOOL repaint);
         BOOL handle_NtUserSetMenuDefaultItem(const syscall_context& c, hmenu menu, UINT item, UINT by_position);
         BOOL handle_NtUserEndMenu();
+        DWORD handle_NtUserEnableMenuItem(const syscall_context& c, hmenu menu, UINT id, UINT enable);
+        DWORD handle_NtUserCheckMenuItem(const syscall_context& c, hmenu menu, UINT id, UINT check);
         BOOL handle_NtUserRemoveMenu(const syscall_context& c, hmenu menu, UINT position, UINT flags);
         BOOL handle_NtUserDestroyMenu(const syscall_context& c, hmenu menu);
         BOOL handle_NtUserDrawMenuBar(const syscall_context& c, hwnd hwnd);
@@ -4204,6 +4206,8 @@ namespace sogen
         add_handler(NtUserSetMenu);
         add_handler(NtUserSetMenuDefaultItem);
         add_handler(NtUserEndMenu);
+        add_handler(NtUserEnableMenuItem);
+        add_handler(NtUserCheckMenuItem);
         add_handler(NtUserRemoveMenu);
         add_handler(NtUserDestroyMenu);
         add_handler(NtUserDrawMenuBar);

@@ -1,4 +1,7 @@
 #include "../std_include.hpp"
+#include "../menu_bar.hpp"
+#include "../menu_resource.hpp"
+#include "../module/manifest_parser.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "../win32k_userconnect.hpp"
@@ -640,7 +643,10 @@ namespace sogen
         {
             const auto window_rect = get_window_rect(win);
             // Frameless: the client sits at the window origin, so it shares the top-left and shrinks by the frame.
-            const RECT client_rect{.left = win.x, .top = win.y, .right = win.x + win.client_width(), .bottom = win.y + win.client_height()};
+            const RECT client_rect{.left = win.x,
+                                   .top = win.y + win.client_top(),
+                                   .right = win.x + win.client_width(),
+                                   .bottom = win.y + win.client_top() + win.client_height()};
 
             win.guest.access([&](USER_WINDOW& guest_win) {
                 guest_win.rcWindow = window_rect;
@@ -1169,11 +1175,7 @@ namespace sogen
                 return;
             }
 
-            c.win_emu.ui().present_surface(top_level->handle, ui_surface_desc{.width = static_cast<int>(surface.width),
-                                                                              .height = static_cast<int>(surface.height),
-                                                                              .stride = static_cast<int>(surface.width * sizeof(uint32_t)),
-                                                                              .format = ui_surface_format::bgra8,
-                                                                              .pixels = surface.pixels.data()});
+            present_window_surface(c.win_emu, top_level->handle, surface);
         }
 
         template <typename T>
@@ -2560,12 +2562,7 @@ namespace sogen
                 if (auto* surface = get_dc_present_surface(c, ps.paint_hdc, present_handle);
                     surface && present_handle != 0 && surface->width > 0 && surface->height > 0 && !surface->pixels.empty())
                 {
-                    c.win_emu.ui().present_surface(present_handle,
-                                                   ui_surface_desc{.width = static_cast<int>(surface->width),
-                                                                   .height = static_cast<int>(surface->height),
-                                                                   .stride = static_cast<int>(surface->width * sizeof(uint32_t)),
-                                                                   .format = ui_surface_format::bgra8,
-                                                                   .pixels = surface->pixels.data()});
+                    present_window_surface(c.win_emu, present_handle, *surface);
                 }
 
                 // BeginPaint allocated a fresh GDI DC (handle table entry + DC_ATTR block) via
@@ -3271,6 +3268,49 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        hmenu load_class_menu(const syscall_context& c, const process_context::class_entry& class_entry, const hinstance instance)
+        {
+            constexpr uint32_t rt_menu = 4;
+            const auto& names = class_entry.menu_name;
+
+            pe_resource_name name{};
+            if (const uint64_t unicode_name = names.pwszClientUnicodeMenuName; unicode_name != 0)
+            {
+                if (unicode_name <= 0xFFFF)
+                {
+                    name.id = static_cast<uint32_t>(unicode_name);
+                }
+                else
+                {
+                    name.text = read_string<char16_t>(c.win_emu.memory, unicode_name);
+                }
+            }
+            else if (const uint64_t ansi_name = names.pszClientAnsiMenuName; ansi_name != 0)
+            {
+                if (ansi_name <= 0xFFFF)
+                {
+                    name.id = static_cast<uint32_t>(ansi_name);
+                }
+                else
+                {
+                    const auto text = read_string<char>(c.win_emu.memory, ansi_name);
+                    name.text.assign(text.begin(), text.end());
+                }
+            }
+            else
+            {
+                return 0;
+            }
+
+            const auto menu_template = find_pe_resource(c.win_emu.memory, instance, rt_menu, name);
+            if (!menu_template)
+            {
+                return 0;
+            }
+
+            return create_menu_from_template(c.proc, c.win_emu.memory, *menu_template);
+        }
+
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, const DWORD ex_style, const emulator_object<LARGE_STRING> class_name,
                                          const emulator_object<LARGE_STRING> /*cls_version*/,
                                          const emulator_object<LARGE_STRING> window_name, const DWORD style, int x, int y, int width,
@@ -3420,6 +3460,12 @@ namespace sogen
                 }
             }
             win.wnd_proc = wnd_class->lpfnWndProc;
+            hmenu window_menu = 0;
+            if (!has_child_parent)
+            {
+                window_menu = c.proc.menus.get(menu) != nullptr ? menu : load_class_menu(c, cls_it->second, instance);
+            }
+            win.menu_handle = window_menu;
 
             win.guest.access([&](USER_WINDOW& guest_win) {
                 guest_win.hWnd = handle.bits;
@@ -3430,7 +3476,10 @@ namespace sogen
                 // The client rect is the window minus its non-client frame (see window::nonclient_border). The
                 // guest reads rcClient client-side to size its render target/backbuffer, so seeding it with the
                 // outer rect here makes a framed window render 2px too large and rescale (softening the frame).
-                guest_win.rcClient = {.left = x, .top = y, .right = x + win.client_width(), .bottom = y + win.client_height()};
+                guest_win.rcClient = {.left = x,
+                                      .top = y + win.client_top(),
+                                      .right = x + win.client_width(),
+                                      .bottom = y + win.client_top() + win.client_height()};
                 if (parent_win && has_child_parent)
                 {
                     guest_win.spwndParent = parent_win->guest.value();
@@ -3455,7 +3504,7 @@ namespace sogen
                 {
                     guest_win.spmenu = menu;
                 }
-                else if (const auto* menu_obj = c.proc.menus.get(menu))
+                else if (const auto* menu_obj = c.proc.menus.get(window_menu))
                 {
                     guest_win.spmenu = menu_obj->guest.value();
                 }
@@ -6329,7 +6378,22 @@ namespace sogen
                 menu_ptr = menu_obj->guest.value();
             }
 
+            const auto previous_client_height = win->client_height();
             win->guest.access([&](USER_WINDOW& guest_win) { guest_win.spmenu = menu_ptr; });
+            win->menu_handle = menu;
+            update_window_geometry(c, *win, win->x, win->y, win->width, win->height, true);
+
+            if (win->client_height() != previous_client_height)
+            {
+                if (auto* thread = c.proc.find_thread_by_id(win->thread_id))
+                {
+                    sogen::msg resize{};
+                    resize.window = win->handle;
+                    resize.message = WM_SIZE;
+                    resize.lParam = static_cast<uint64_t>(((win->client_height() & 0xFFFF) << 16) | (win->client_width() & 0xFFFF));
+                    thread->post_message(c.win_emu, resize);
+                }
+            }
             return TRUE;
         }
 
@@ -6342,6 +6406,80 @@ namespace sogen
         BOOL handle_NtUserEndMenu()
         {
             return TRUE;
+        }
+
+        menu_item* find_menu_item_by_command(process_context& proc, menu& root, const UINT command, menu*& owner, size_t& index)
+        {
+            for (size_t i = 0; i < root.items.size(); ++i)
+            {
+                auto& item = root.items[i];
+                if (item.submenu == 0 && item.id == command)
+                {
+                    owner = &root;
+                    index = i;
+                    return &item;
+                }
+
+                if (auto* submenu = proc.menus.get(item.submenu))
+                {
+                    if (auto* found = find_menu_item_by_command(proc, *submenu, command, owner, index))
+                    {
+                        return found;
+                    }
+                }
+            }
+
+            return nullptr;
+        }
+
+        menu_item* find_menu_item(const syscall_context& c, const hmenu menu_handle, const UINT id, const UINT flags, menu*& owner,
+                                  size_t& index)
+        {
+            auto* root = c.proc.menus.get(menu_handle);
+            if (!root)
+            {
+                return nullptr;
+            }
+
+            if ((flags & MF_BYPOSITION) == 0)
+            {
+                return find_menu_item_by_command(c.proc, *root, id, owner, index);
+            }
+
+            owner = root;
+            index = id;
+            return id < root->items.size() ? &root->items[id] : nullptr;
+        }
+
+        DWORD update_menu_item_state(const syscall_context& c, const hmenu menu_handle, const UINT id, const UINT flags,
+                                     const uint32_t state_mask, const uint32_t new_state)
+        {
+            constexpr DWORD item_not_found = 0xFFFFFFFF;
+            menu* owner = nullptr;
+            size_t index = 0;
+            auto* item = find_menu_item(c, menu_handle, id, flags, owner, index);
+            if (!item)
+            {
+                return item_not_found;
+            }
+
+            const auto previous = item->state & state_mask;
+            item->state = (item->state & ~state_mask) | new_state;
+            owner->sync_guest_item(c.win_emu.memory, index);
+            return previous;
+        }
+
+        DWORD handle_NtUserEnableMenuItem(const syscall_context& c, const hmenu menu_handle, const UINT id, const UINT enable)
+        {
+            constexpr uint32_t mfs_grayed = 0x3;
+            return update_menu_item_state(c, menu_handle, id, enable, mfs_grayed,
+                                          (enable & (MF_GRAYED | MF_DISABLED)) != 0 ? mfs_grayed : 0);
+        }
+
+        DWORD handle_NtUserCheckMenuItem(const syscall_context& c, const hmenu menu_handle, const UINT id, const UINT check)
+        {
+            constexpr uint32_t mfs_checked = 0x8;
+            return update_menu_item_state(c, menu_handle, id, check, mfs_checked, (check & MF_CHECKED) != 0 ? mfs_checked : 0);
         }
 
         BOOL handle_NtUserRemoveMenu(const syscall_context& c, const hmenu menu, const UINT position, const UINT flags)
