@@ -76,6 +76,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cerrno>
@@ -4528,6 +4529,9 @@ namespace sogen::fex
             this->arm_plain_step();
         }
 
+        static std::atomic<uint32_t> logged_quantum_entries{0};
+        constexpr uint32_t max_logged_quantum_entries = 16;
+        if (logged_quantum_entries.fetch_add(1, std::memory_order_relaxed) < max_logged_quantum_entries)
         {
             uint64_t tid = 0;
             pthread_threadid_np(nullptr, &tid);
@@ -5197,11 +5201,28 @@ namespace sogen::fex
         if (this->emulator_.vcpus_.size() == 1)
         {
             static std::once_flag detach_once;
-            std::call_once(detach_once, [] {
+            const size_t engine_count = this->emulator_.is_wow64_process_ ? 2 : 1;
+            std::call_once(detach_once, [engine_count] {
                 if (std::getenv("EMULATOR_FEX_KEEP_JIT_DEBUGGER") == nullptr)
                 {
+                    // FEXCore doubles an engine's code buffer each time it fills (16 -> 32 -> 64 MiB ...); a
+                    // desktop MW2 session was measured to reach the 32 MiB step, so each engine gets one spare
+                    // for that step and one for the next.
+                    constexpr std::array<size_t, 2> spare_region_mib{32, 64};
+                    for (size_t engine = 0; engine < engine_count; ++engine)
+                    {
+                        for (const auto mib : spare_region_mib)
+                        {
+                            if (!FEXCore::Allocator::JIT26ReserveSpareRegion(mib << 20))
+                            {
+                                sogen::utils::log_ios_device_milestone("[jit] could not bless a spare JIT region");
+                            }
+                        }
+                    }
+
                     sogen::utils::log_ios_device_milestone("[jit] FEX JIT regions are blessed; detaching the JIT debugger");
                     jit26_detach();
+                    FEXCore::Allocator::JIT26OnDebuggerDetached();
                     sogen::utils::log_ios_device_milestone("[jit] JIT debugger detached");
                 }
             });
