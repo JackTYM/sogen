@@ -82,6 +82,7 @@ namespace sogen
             std::optional<backend_type> backend{};
             bool disable_instruction_precision{false};
             bool offline{false};
+            uint32_t locale_id{fake_environment_config{}.locale_id};
             uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
             std::filesystem::path emulation_root{};
@@ -500,6 +501,39 @@ namespace sogen
             return wide_args;
         }
 
+        uint32_t parse_locale(const std::string& value)
+        {
+            static const std::map<std::string, uint32_t, utils::insensitive_string_less> known_locales{
+                {"cs-CZ", 0x0405}, {"de-DE", 0x0407}, {"en-GB", 0x0809}, {"en-US", 0x0409}, {"es-ES", 0x0C0A}, {"fr-FR", 0x040C},
+                {"it-IT", 0x0410}, {"ja-JP", 0x0411}, {"ko-KR", 0x0412}, {"nl-NL", 0x0413}, {"pl-PL", 0x0415}, {"pt-BR", 0x0416},
+                {"ru-RU", 0x0419}, {"tr-TR", 0x041F}, {"zh-CN", 0x0804}, {"zh-TW", 0x0404},
+            };
+
+            if (const auto entry = known_locales.find(value); entry != known_locales.end())
+            {
+                return entry->second;
+            }
+
+            size_t parsed_length{};
+            uint32_t locale_id{};
+            try
+            {
+                locale_id = static_cast<uint32_t>(std::stoul(value, &parsed_length, 0));
+            }
+            catch (const std::exception&)
+            {
+                parsed_length = 0;
+            }
+
+            if (parsed_length != value.size() || locale_id == 0 || locale_id > 0xFFFFF)
+            {
+                throw CLI::ValidationError("--locale",
+                                           "expected a locale name like en-US or a numeric LCID like 0x409, got '" + value + "'");
+            }
+
+            return locale_id;
+        }
+
         emulator_settings create_emulator_settings(const analysis_options& options)
         {
             return {
@@ -508,6 +542,7 @@ namespace sogen
                 .emulation_root = options.emulation_root,
                 .registry_directory = options.registry_path,
                 .path_mappings = options.path_mappings,
+                .fake_env = {.locale_id = options.locale_id},
             };
         }
 
@@ -653,6 +688,7 @@ namespace sogen
             config.reproducible = options.reproducible;
             config.disable_instruction_precision = options.disable_instruction_precision;
             config.offline = options.offline;
+            config.locale_id = options.locale_id;
             config.whp_execution_hook_mode = options.whp_execution_hook_mode;
             config.trace_hooks_path = options.trace_hooks_path;
             config.debug_child_pattern = options.debug_child_pattern;
@@ -1126,6 +1162,10 @@ namespace sogen
             app.add_flag("--reproducible", options.reproducible, "Stub clocks and other mechanisms to make executions reproducible");
             app.add_flag("--offline", options.offline,
                          "Emulate a host whose network is disconnected: only loopback names and addresses are reachable");
+            app.add_option_function<std::string>(
+                "--locale", [&](const std::string& value) { options.locale_id = parse_locale(value); },
+                "Default user/system locale, UI language and keyboard layout of the emulated host, as a name (en-US) or a "
+                "numeric LCID (0x409); defaults to de-DE");
             app.add_flag("--no-inst-precision", options.disable_instruction_precision,
                          "Disable per-instruction precision (faster, less precise)");
             app.add_flag("--call-count", options.prepend_call_count, "Prefix function and syscall lines with a traced-call count");

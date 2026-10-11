@@ -9,6 +9,25 @@ namespace sogen
 
     namespace syscalls
     {
+        namespace
+        {
+            LCID default_locale(const syscall_context& c)
+            {
+                return c.win_emu.fake_env.locale_id;
+            }
+
+            LANGID default_language(const syscall_context& c)
+            {
+                return static_cast<LANGID>(default_locale(c) & 0xFFFF);
+            }
+
+            uint64_t default_keyboard_layout(const syscall_context& c)
+            {
+                const uint64_t language = default_language(c);
+                return (language << 16) | language;
+            }
+        }
+
         NTSTATUS handle_NtInitializeNlsFiles(const syscall_context& c, const emulator_object<uint64_t> base_address,
                                              const emulator_object<LCID> default_locale_id,
                                              const emulator_object<LARGE_INTEGER> /*default_casing_table_size*/)
@@ -24,15 +43,15 @@ namespace sogen
             c.emu.write_memory(base, locale_file.data(), locale_file.size());
 
             base_address.write(base);
-            default_locale_id.write(0x407);
+            default_locale_id.write(default_locale(c));
 
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQueryDefaultLocale(const syscall_context&, BOOLEAN /*user_profile*/,
+        NTSTATUS handle_NtQueryDefaultLocale(const syscall_context& c, BOOLEAN /*user_profile*/,
                                              const emulator_object<LCID> default_locale_id)
         {
-            default_locale_id.write(0x407);
+            default_locale_id.write(default_locale(c));
             return STATUS_SUCCESS;
         }
 
@@ -99,20 +118,20 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context&, const uint64_t /*keyboard_layout*/, const uint32_t /*flags*/)
+        uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context& c, const uint64_t /*keyboard_layout*/, const uint32_t /*flags*/)
         {
-            return 0x04070407;
+            return default_keyboard_layout(c);
         }
 
-        uint64_t handle_NtUserGetKeyboardLayout(const syscall_context&, const uint32_t /*thread_id*/)
+        uint64_t handle_NtUserGetKeyboardLayout(const syscall_context& c, const uint32_t /*thread_id*/)
         {
-            return 0x04070407;
+            return default_keyboard_layout(c);
         }
 
         uint32_t handle_NtUserGetKeyboardLayoutList(const syscall_context& c, const uint32_t buffer_count,
                                                     const emulator_pointer keyboard_layouts)
         {
-            constexpr uint64_t keyboard_layout = 0x04070407;
+            const auto keyboard_layout = default_keyboard_layout(c);
 
             if (buffer_count == 0)
             {
@@ -144,7 +163,7 @@ namespace sogen
             }
 
             std::array<char, 9> layout_name{};
-            std::snprintf(layout_name.data(), layout_name.size(), "%08X", 0x0407u);
+            std::snprintf(layout_name.data(), layout_name.size(), "%08X", static_cast<uint32_t>(default_language(c)));
             const auto layout_name_u16 = u8_to_u16(layout_name.data());
             const auto name_bytes = layout_name_u16.size() * sizeof(char16_t);
 
@@ -163,15 +182,15 @@ namespace sogen
             return written ? TRUE : FALSE;
         }
 
-        NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context&, const emulator_object<LANGID> language_id)
+        NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context& c, const emulator_object<LANGID> language_id)
         {
-            language_id.write(0x407);
+            language_id.write(default_language(c));
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQueryInstallUILanguage(const syscall_context&, const emulator_object<LANGID> language_id)
+        NTSTATUS handle_NtQueryInstallUILanguage(const syscall_context& c, const emulator_object<LANGID> language_id)
         {
-            language_id.write(0x407);
+            language_id.write(default_language(c));
             return STATUS_SUCCESS;
         }
     }

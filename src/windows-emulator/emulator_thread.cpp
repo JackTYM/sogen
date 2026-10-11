@@ -512,7 +512,7 @@ namespace sogen
                 teb_obj.NtTib.StackLimit = this->stack_base;
                 teb_obj.NtTib.StackBase = this->stack_base + this->stack_size;
                 teb_obj.NtTib.Self = this->teb64->value();
-                teb_obj.CurrentLocale = 0x409;
+                teb_obj.CurrentLocale = context.default_locale_id;
                 teb_obj.ProcessEnvironmentBlock = context.peb64.value();
                 teb_obj.SameTebFlags.InitialThread = initial_thread;
                 teb_obj.SameTebFlags.SkipThreadAttach = (create_flags & THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH) ? 1 : 0;
@@ -609,7 +609,7 @@ namespace sogen
             teb_obj.NtTib.StackLimit = this->stack_base;
             teb_obj.NtTib.StackBase = wow64_cpureserved_base;
             teb_obj.NtTib.Self = this->teb64->value();
-            teb_obj.CurrentLocale = 0x409;
+            teb_obj.CurrentLocale = context.default_locale_id;
 
             teb_obj.ProcessEnvironmentBlock = context.peb64.value();
             teb_obj.SameTebFlags.InitialThread = initial_thread;

@@ -413,6 +413,7 @@ namespace sogen
         auto& emu = win_emu.emu();
         const auto& version = win_emu.version;
         const auto& fake_env = win_emu.fake_env;
+        this->default_locale_id = fake_env.locale_id;
 
         if (app_settings.process_id)
         {
@@ -883,6 +884,7 @@ namespace sogen
         buffer.write(this->kusd);
 
         buffer.write(this->is_wow64_process);
+        buffer.write(this->default_locale_id);
         buffer.write(this->ntdll_image_base);
         buffer.write(this->ldr_initialize_thunk);
         buffer.write(this->rtl_user_thread_start);
@@ -989,6 +991,7 @@ namespace sogen
         buffer.read(this->kusd);
 
         buffer.read(this->is_wow64_process);
+        buffer.read(this->default_locale_id);
         buffer.read(this->ntdll_image_base);
         buffer.read(this->ldr_initialize_thunk);
         buffer.read(this->rtl_user_thread_start);

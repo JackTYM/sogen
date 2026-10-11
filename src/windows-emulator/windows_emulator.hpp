@@ -315,6 +315,7 @@ namespace sogen
     {
         uint32_t number_of_processors{4};
         uint8_t nt_product_type{1}; // NtProductWinNt
+        uint32_t locale_id{0x0407};
     };
 
     struct emulator_settings
