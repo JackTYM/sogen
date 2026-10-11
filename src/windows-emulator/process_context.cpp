@@ -1167,6 +1167,36 @@ namespace sogen
         return handle == CURRENT_PROCESS || handle == GUEST_PROCESS_HANDLE;
     }
 
+    // Processes other than this one and its direct children have no control channel, so their handles
+    // resolve to channel-less records: the handle is valid and names the right pid, but cross-process
+    // operations against it report STATUS_NOT_SUPPORTED (see resolve_child_target).
+    handle process_context::get_process_handle_by_pid(const uint32_t pid, const ACCESS_MASK granted_access)
+    {
+        if (pid == this->process_id)
+        {
+            return GUEST_PROCESS_HANDLE;
+        }
+
+        for (auto& [record_id, record] : this->child_processes)
+        {
+            if (record.pid == pid)
+            {
+                record.granted_access |= granted_access;
+                return make_pseudo_handle(record_id, handle_types::process);
+            }
+        }
+
+        const auto record_id = this->next_child_record_id++;
+
+        child_process_record record{};
+        record.pid = pid;
+        record.exit_status = STATUS_PENDING;
+        record.granted_access = granted_access;
+        this->child_processes[record_id] = record;
+
+        return make_pseudo_handle(record_id, handle_types::process);
+    }
+
     bool process_context::is_current_thread_handle(const handle handle, const emulator_thread* active_thread) const
     {
         return handle == CURRENT_THREAD ||

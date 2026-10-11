@@ -1026,13 +1026,6 @@ namespace sogen
                                    static_cast<unsigned long long>(id.UniqueProcess));
             }
 
-            // The guest opening its own pid resolves to the real guest process handle.
-            if (id.UniqueProcess == c.proc.process_id)
-            {
-                process_handle.write(GUEST_PROCESS_HANDLE);
-                return STATUS_SUCCESS;
-            }
-
             // The one synthetic external process we vouch for: the Steam client. A guest steam_api reads
             // this pid from HKCU\...\Valve\Steam\ActiveProcess and opens it to confirm Steam is running.
             if (id.UniqueProcess == STEAM_FAKE_PROCESS_ID)
@@ -1041,40 +1034,15 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // A previously-spawned child (NtCreateUserProcess) reopened by its real pid, e.g. a broker
-            // that only learns a child's pid later (GetNamedPipeClientProcessId) rather than retaining
-            // NtCreateUserProcess's own pseudo handle. Mints the same pseudo handle NtCreateUserProcess
-            // itself hands out, so resolve_child_target's cross-process machinery (NtDuplicateObject and
-            // friends) treats it identically regardless of which syscall produced it.
-            for (auto& [record_id, record] : c.proc.child_processes)
+            // Besides itself and its own children, a process can open live processes elsewhere in the spawn
+            // tree it heard about (e.g. a crash-reporting broker registering every Chromium child by pid, see
+            // windows_emulator::broadcast_process_alive).
+            const auto pid = static_cast<uint32_t>(id.UniqueProcess);
+            const bool is_child =
+                std::ranges::any_of(c.proc.child_processes | std::views::values, [&](const auto& record) { return record.pid == pid; });
+            if (id.UniqueProcess == c.proc.process_id || is_child || c.win_emu.is_known_sibling_pid(pid))
             {
-                if (record.pid == id.UniqueProcess)
-                {
-                    record.granted_access |= resolve_granted_process_access(desired_access);
-                    process_handle.write(make_pseudo_handle(record_id, handle_types::process));
-                    return STATUS_SUCCESS;
-                }
-            }
-
-            // A live sibling process somewhere else in the spawn tree (e.g. two Chromium child
-            // processes registering with the same crash-reporting broker, none of which spawned any of
-            // the others - see windows_emulator::broadcast_process_alive). There is no control channel
-            // to it (only a direct parent/child link carries one), so this mints a channel-less
-            // child_process_record purely so the handle resolves as a known, real process: any later
-            // cross-process operation against it (NtDuplicateObject and friends, via resolve_child_target)
-            // correctly reports STATUS_NOT_SUPPORTED for lack of a channel, exactly like a
-            // snapshot-restored child whose channel was never serialized.
-            if (c.win_emu.is_known_sibling_pid(id.UniqueProcess))
-            {
-                const auto record_id = c.proc.next_child_record_id++;
-
-                process_context::child_process_record record{};
-                record.pid = id.UniqueProcess;
-                record.exit_status = STATUS_PENDING;
-                record.granted_access = resolve_granted_process_access(desired_access);
-                c.proc.child_processes[record_id] = record;
-
-                process_handle.write(make_pseudo_handle(record_id, handle_types::process));
+                process_handle.write(c.proc.get_process_handle_by_pid(pid, resolve_granted_process_access(desired_access)));
                 return STATUS_SUCCESS;
             }
 

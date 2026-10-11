@@ -1,6 +1,7 @@
 #include "std_include.hpp"
 #include "shareable_object.hpp"
 #include "windows_emulator.hpp"
+#include "cross_process.hpp"
 #include "devices/named_pipe.hpp"
 
 namespace sogen
@@ -60,7 +61,8 @@ namespace sogen
     bool is_shareable_object_type(const handle_types::type type)
     {
         return type == handle_types::section || type == handle_types::event || type == handle_types::mutant ||
-               type == handle_types::semaphore || type == handle_types::device || type == handle_types::file;
+               type == handle_types::semaphore || type == handle_types::device || type == handle_types::file ||
+               type == handle_types::process;
     }
 
     NTSTATUS describe_shareable_object(process_context& process, const handle resolved_handle, shared_object_description& description)
@@ -111,6 +113,31 @@ namespace sogen
             source->serialize_object(buffer);
             description.object_bytes = buffer.get_buffer();
             description.granted_access = source->access_mask;
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::process: {
+            uint32_t pid{};
+            if (process.is_current_process_handle(resolved_handle))
+            {
+                pid = process.process_id;
+                description.granted_access = resolve_granted_process_access(GENERIC_ALL);
+            }
+            else
+            {
+                const auto record = process.child_processes.find(static_cast<uint32_t>(resolved_handle.value.id));
+                if (!resolved_handle.value.is_pseudo || record == process.child_processes.end())
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                pid = record->second.pid;
+                description.granted_access = record->second.granted_access;
+            }
+
+            utils::buffer_serializer buffer{};
+            buffer.write(pid);
+            description.object_bytes = buffer.get_buffer();
             return STATUS_SUCCESS;
         }
 
@@ -202,6 +229,13 @@ namespace sogen
             }
 
             adopted_handle = process.files.store(std::move(f));
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::process: {
+            uint32_t pid{};
+            buffer.read(pid);
+            adopted_handle = process.get_process_handle_by_pid(pid, description.granted_access);
             return STATUS_SUCCESS;
         }
 
