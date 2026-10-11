@@ -1,5 +1,6 @@
 #include "d3d9_host.hpp"
 
+#include "d3d9_bc_decode.hpp"
 #include "d3d9_format.hpp"
 #include "d3d9_shader_translator.hpp"
 
@@ -521,10 +522,23 @@ namespace sogen
             }
         }
 
+        uint32_t bc1_linear_features = 0;
+        uint32_t bc1_optimal_features = 0;
+        uint32_t bc1_buffer_features = 0;
+        const bool bc1_queried = this->vulkan_.get_physical_device_format_properties(phys_ids[0], VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+                                                                                     bc1_linear_features, bc1_optimal_features,
+                                                                                     bc1_buffer_features) == 0;
+        this->bc_decode_fallback_ = bc1_queried && (bc1_optimal_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0;
+
         this->vk_instance_ = instance;
         this->vk_physical_device_ = phys_ids[0];
         this->vk_device_ = device;
         return device;
+    }
+
+    uint32_t d3d9_host::texture_gpu_format(const uint32_t vk_format) const
+    {
+        return this->bc_decode_fallback_ && vk_format_is_bc1_to_bc3(vk_format) ? static_cast<uint32_t>(VK_FORMAT_R8G8B8A8_UNORM) : vk_format;
     }
 
     bool d3d9_host::ensure_draw_infra()
@@ -3269,6 +3283,7 @@ namespace sogen
                 uint64_t& sampled_view = sample_srgb ? tex.vk_image_view_sampled_srgb_id : tex.vk_image_view_sampled_id;
                 if (sampled_view == 0 && (sample_srgb || d3d9_format_to_vulkan(tex.format, view_format)))
                 {
+                    view_format = this->texture_gpu_format(view_format);
                     // Sampling view spans the texture's full mip chain (levelCount = mip_levels) so the
                     // sampler can select any level; single-mip textures still get levelCount 1. View
                     // type/layer-count follow the resource kind (cube/volume/2D) via the shared helper.
@@ -3327,6 +3342,7 @@ namespace sogen
                     uint32_t tex_vk_format = 0;
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
                     {
+                        tex_vk_format = this->texture_gpu_format(tex_vk_format);
                         const uint32_t view_levels = std::max(1u, tex.mip_levels);
                         const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
                         const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
@@ -4153,7 +4169,7 @@ namespace sogen
                     image_type = VK_IMAGE_TYPE_3D;
                     image_depth = std::max(1u, depth);
                 }
-                if (this->vulkan_.create_image(device, texture_vk_format, width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
+                if (this->vulkan_.create_image(device, this->texture_gpu_format(texture_vk_format), width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
                                                /*samples=*/1, image_type, image_depth, texture_mip_levels, array_layers, image_flags,
                                                vk_image) == 0 &&
                     vk_image != 0)
@@ -4282,6 +4298,10 @@ namespace sogen
             const std::byte* src;
         };
 
+        const bool decode_to_rgba8 = this->texture_gpu_format(vk_format) != vk_format;
+        std::vector<std::vector<std::byte>> decoded_levels;
+        decoded_levels.reserve(subresources.size());
+
         std::vector<subresource_upload> uploads;
         uint64_t total_size = 0;
         for (uint32_t index = 0; index < subresources.size(); ++index)
@@ -4292,8 +4312,18 @@ namespace sogen
             {
                 return false; // degenerate format/size only -- see the comment above this loop
             }
-            uploads.push_back({sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, sub.size, total_size, src.data()});
-            total_size += sub.size;
+
+            const std::byte* upload_src = src.data();
+            size_t upload_size = sub.size;
+            if (decode_to_rgba8)
+            {
+                upload_size = static_cast<size_t>(sub.width) * sub.height * sub.depth * 4;
+                auto& decoded = decoded_levels.emplace_back(upload_size);
+                decode_bc1_to_bc3_rgba8(vk_format, std::span{src.data(), sub.size}, sub.width, sub.height, sub.depth, decoded);
+                upload_src = decoded.data();
+            }
+            uploads.push_back({sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, upload_size, total_size, upload_src});
+            total_size += upload_size;
         }
 
         const uint64_t device = this->ensure_vk_device();
