@@ -2565,6 +2565,8 @@ namespace sogen
                 c.win_emu.memory.release_memory(entry.Object, 0);
             }
 
+            c.proc.gdi_regions.erase(handle_value);
+
             if (const auto bmp_it = c.proc.gdi_bitmap_surfaces.find(handle_value);
                 bmp_it != c.proc.gdi_bitmap_surfaces.end() && bmp_it->second.guest_owns_memory && bmp_it->second.guest_bits != 0)
             {
@@ -3476,7 +3478,9 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        // RGNATTR, the user-mode region attribute gdi32 reads for its rectangle fast paths.
+        // RGNATTR, the user-mode region attribute gdi32 reads for its rectangle fast paths. gdi32's
+        // SetRectRgn edits it in place and sets the dirty flag, so a dirty attribute overrides any
+        // rectangles stored on the kernel side.
         struct gdi_region_attr
         {
             ULONG attr_flags;
@@ -3485,58 +3489,218 @@ namespace sogen
         };
 
         constexpr ULONG k_gdi_region_attr_valid = 0x1;
+        constexpr ULONG k_gdi_region_attr_dirty = 0x2;
+        constexpr int32_t k_gdi_region_error = 0;
         constexpr ULONG k_gdi_null_region = 1;
         constexpr ULONG k_gdi_simple_region = 2;
+        constexpr ULONG k_gdi_complex_region = 3;
+
+        bool rect_is_empty(const RECT& rect)
+        {
+            return rect.left >= rect.right || rect.top >= rect.bottom;
+        }
+
+        std::optional<std::vector<RECT>> read_region_rects(const syscall_context& c, const uint32_t region)
+        {
+            uint64_t attr_address = 0;
+            if (!get_gdi_object_address(c, region, k_gdi_region_type, attr_address))
+            {
+                return std::nullopt;
+            }
+
+            const auto attr = c.emu.read_memory<gdi_region_attr>(attr_address);
+            if (attr.complexity == k_gdi_complex_region && (attr.attr_flags & k_gdi_region_attr_dirty) == 0)
+            {
+                if (const auto it = c.proc.gdi_regions.find(region); it != c.proc.gdi_regions.end())
+                {
+                    return it->second;
+                }
+            }
+
+            if (attr.complexity == k_gdi_null_region || rect_is_empty(attr.bounds))
+            {
+                return std::vector<RECT>{};
+            }
+
+            return std::vector<RECT>{attr.bounds};
+        }
+
+        // Rebuilds the YX-banded rectangle list Windows uses for a region whose membership is given by
+        // `inside` over the grid spanned by every input rectangle edge.
+        template <typename Inside>
+        std::vector<RECT> build_banded_region(const std::vector<RECT>& first, const std::vector<RECT>& second, const Inside& inside)
+        {
+            std::vector<LONG> xs{};
+            std::vector<LONG> ys{};
+            for (const auto* rects : {&first, &second})
+            {
+                for (const auto& rect : *rects)
+                {
+                    xs.insert(xs.end(), {rect.left, rect.right});
+                    ys.insert(ys.end(), {rect.top, rect.bottom});
+                }
+            }
+
+            std::ranges::sort(xs);
+            xs.erase(std::ranges::unique(xs).begin(), xs.end());
+            std::ranges::sort(ys);
+            ys.erase(std::ranges::unique(ys).begin(), ys.end());
+
+            const auto contains = [](const std::vector<RECT>& rects, const LONG x, const LONG y) {
+                return std::ranges::any_of(rects, [&](const RECT& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; });
+            };
+
+            std::vector<RECT> result{};
+            std::vector<std::pair<LONG, LONG>> previous_runs{};
+            size_t previous_band_start = 0;
+
+            for (size_t y = 0; y + 1 < ys.size(); ++y)
+            {
+                std::vector<std::pair<LONG, LONG>> runs{};
+                for (size_t x = 0; x + 1 < xs.size(); ++x)
+                {
+                    if (!inside(contains(first, xs[x], ys[y]), contains(second, xs[x], ys[y])))
+                    {
+                        continue;
+                    }
+
+                    if (!runs.empty() && runs.back().second == xs[x])
+                    {
+                        runs.back().second = xs[x + 1];
+                    }
+                    else
+                    {
+                        runs.emplace_back(xs[x], xs[x + 1]);
+                    }
+                }
+
+                const bool extends_previous_band =
+                    !runs.empty() && runs == previous_runs && previous_band_start < result.size() && result.back().bottom == ys[y];
+                if (extends_previous_band)
+                {
+                    for (size_t i = previous_band_start; i < result.size(); ++i)
+                    {
+                        result[i].bottom = ys[y + 1];
+                    }
+                    continue;
+                }
+
+                previous_band_start = result.size();
+                for (const auto& [left, right] : runs)
+                {
+                    result.push_back(RECT{left, ys[y], right, ys[y + 1]});
+                }
+                previous_runs = std::move(runs);
+            }
+
+            return result;
+        }
+
+        ULONG store_region_rects(const syscall_context& c, const uint32_t region, std::vector<RECT> rects)
+        {
+            uint64_t attr_address = 0;
+            if (!get_gdi_object_address(c, region, k_gdi_region_type, attr_address))
+            {
+                return k_gdi_region_error;
+            }
+
+            gdi_region_attr attr{.attr_flags = k_gdi_region_attr_valid};
+            if (rects.empty())
+            {
+                attr.complexity = k_gdi_null_region;
+            }
+            else
+            {
+                attr.complexity = rects.size() == 1 ? k_gdi_simple_region : k_gdi_complex_region;
+                attr.bounds = rects.front();
+                for (const auto& rect : rects)
+                {
+                    attr.bounds.left = std::min(attr.bounds.left, rect.left);
+                    attr.bounds.top = std::min(attr.bounds.top, rect.top);
+                    attr.bounds.right = std::max(attr.bounds.right, rect.right);
+                    attr.bounds.bottom = std::max(attr.bounds.bottom, rect.bottom);
+                }
+            }
+
+            c.emu.write_memory(attr_address, attr);
+
+            if (attr.complexity == k_gdi_complex_region)
+            {
+                c.proc.gdi_regions[region] = std::move(rects);
+            }
+            else
+            {
+                c.proc.gdi_regions.erase(region);
+            }
+
+            return attr.complexity;
+        }
 
         uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG x_left, const LONG y_top, const LONG x_right,
                                            const LONG y_bottom)
         {
             const auto region = allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
 
-            uint64_t region_attr = 0;
-            if (!get_gdi_object_address(c, region, k_gdi_region_type, region_attr))
-            {
-                return region;
-            }
-
-            gdi_region_attr attr{.attr_flags = k_gdi_region_attr_valid};
-            attr.bounds = {std::min(x_left, x_right), std::min(y_top, y_bottom), std::max(x_left, x_right), std::max(y_top, y_bottom)};
-
-            if (attr.bounds.left == attr.bounds.right || attr.bounds.top == attr.bounds.bottom)
-            {
-                attr.complexity = k_gdi_null_region;
-                attr.bounds = {};
-            }
-            else
-            {
-                attr.complexity = k_gdi_simple_region;
-            }
-
-            c.emu.write_memory(region_attr, attr);
+            const RECT bounds{std::min(x_left, x_right), std::min(y_top, y_bottom), std::max(x_left, x_right), std::max(y_top, y_bottom)};
+            (void)store_region_rects(c, region, rect_is_empty(bounds) ? std::vector<RECT>{} : std::vector<RECT>{bounds});
             return region;
+        }
+
+        int32_t handle_NtGdiCombineRgn(const syscall_context& c, const handle destination, const handle first, const handle second,
+                                       const int32_t mode)
+        {
+            constexpr int32_t rgn_and = 1;
+            constexpr int32_t rgn_or = 2;
+            constexpr int32_t rgn_xor = 3;
+            constexpr int32_t rgn_diff = 4;
+            constexpr int32_t rgn_copy = 5;
+
+            const auto first_rects = read_region_rects(c, static_cast<uint32_t>(first.bits));
+            const auto second_rects = mode == rgn_copy ? std::optional<std::vector<RECT>>{std::vector<RECT>{}}
+                                                       : read_region_rects(c, static_cast<uint32_t>(second.bits));
+            if (!first_rects || !second_rects)
+            {
+                return k_gdi_region_error;
+            }
+
+            const auto combine = [&](const auto& inside) { return build_banded_region(*first_rects, *second_rects, inside); };
+
+            std::vector<RECT> result{};
+            switch (mode)
+            {
+            case rgn_and:
+                result = combine([](const bool a, const bool b) { return a && b; });
+                break;
+            case rgn_or:
+                result = combine([](const bool a, const bool b) { return a || b; });
+                break;
+            case rgn_xor:
+                result = combine([](const bool a, const bool b) { return a != b; });
+                break;
+            case rgn_diff:
+                result = combine([](const bool a, const bool b) { return a && !b; });
+                break;
+            case rgn_copy:
+                result = combine([](const bool a, const bool /*b*/) { return a; });
+                break;
+            default:
+                return k_gdi_region_error;
+            }
+
+            return static_cast<int32_t>(store_region_rects(c, static_cast<uint32_t>(destination.bits), std::move(result)));
         }
 
         BOOL handle_NtGdiEqualRgn(const syscall_context& c, const handle first_region, const handle second_region)
         {
-            uint64_t first_attr_address = 0;
-            uint64_t second_attr_address = 0;
-            if (!get_gdi_object_address(c, static_cast<uint32_t>(first_region.bits), k_gdi_region_type, first_attr_address) ||
-                !get_gdi_object_address(c, static_cast<uint32_t>(second_region.bits), k_gdi_region_type, second_attr_address))
+            const auto first = read_region_rects(c, static_cast<uint32_t>(first_region.bits));
+            const auto second = read_region_rects(c, static_cast<uint32_t>(second_region.bits));
+            if (!first || !second)
             {
                 return FALSE;
             }
 
-            const auto first = c.emu.read_memory<gdi_region_attr>(first_attr_address);
-            const auto second = c.emu.read_memory<gdi_region_attr>(second_attr_address);
-
-            if (first.complexity != second.complexity)
-            {
-                return FALSE;
-            }
-
-            return first.complexity == k_gdi_null_region ||
-                   (first.bounds.left == second.bounds.left && first.bounds.top == second.bounds.top &&
-                    first.bounds.right == second.bounds.right && first.bounds.bottom == second.bounds.bottom);
+            const auto difference = build_banded_region(*first, *second, [](const bool a, const bool b) { return a != b; });
+            return difference.empty() ? TRUE : FALSE;
         }
 
         int32_t handle_NtGdiGetRandomRgn(const syscall_context&, const hdc dc, const uint64_t region, const LONG /*index*/)
@@ -3547,15 +3711,14 @@ namespace sogen
         uint32_t handle_NtGdiGetRegionData(const syscall_context& c, const handle hrgn, const ULONG buffer_size,
                                            const emulator_pointer region_data)
         {
-            uint64_t region_attr = 0;
-            if (!get_gdi_object_address(c, static_cast<uint32_t>(hrgn.bits), k_gdi_region_type, region_attr))
+            const auto rects = read_region_rects(c, static_cast<uint32_t>(hrgn.bits));
+            if (!rects)
             {
                 return 0;
             }
 
-            (void)region_attr;
-
-            constexpr DWORD required_size = sizeof(RGNDATAHEADER);
+            const auto rects_size = static_cast<DWORD>(rects->size() * sizeof(RECT));
+            const DWORD required_size = sizeof(RGNDATAHEADER) + rects_size;
             if (region_data == 0)
             {
                 return required_size;
@@ -3569,10 +3732,23 @@ namespace sogen
             RGNDATAHEADER header{};
             header.dwSize = sizeof(header);
             header.iType = RDH_RECTANGLES;
-            header.nCount = 0;
-            header.nRgnSize = 0;
-            header.rcBound = RECT{};
+            header.nCount = static_cast<DWORD>(rects->size());
+            header.nRgnSize = rects_size;
+            header.rcBound = rects->empty() ? RECT{} : rects->front();
+            for (const auto& rect : *rects)
+            {
+                header.rcBound.left = std::min(header.rcBound.left, rect.left);
+                header.rcBound.top = std::min(header.rcBound.top, rect.top);
+                header.rcBound.right = std::max(header.rcBound.right, rect.right);
+                header.rcBound.bottom = std::max(header.rcBound.bottom, rect.bottom);
+            }
+
             c.emu.write_memory(region_data, &header, sizeof(header));
+            if (!rects->empty())
+            {
+                c.emu.write_memory(region_data + sizeof(header), rects->data(), rects_size);
+            }
+
             return required_size;
         }
 
