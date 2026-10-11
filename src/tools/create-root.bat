@@ -119,6 +119,7 @@ CALL :collect msacm32.dll
 CALL :collect msasn1.dll
 CALL :collect mscms.dll
 CALL :collect mscoree.dll
+CALL :collect msctf.dll
 CALL :collect msdmo.dll
 CALL :collect msi.dll
 CALL :collect msvcp140.dll
