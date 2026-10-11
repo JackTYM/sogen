@@ -52,7 +52,7 @@ namespace sogen
                     return {mapping.second, true};
                 }
 
-                if (is_subpath(mapping.first.get(), path.get()))
+                if (is_subpath(mapping.first, path))
                 {
                     return {mapping.second.get() / path.get().lexically_relative(mapping.first.get()), true};
                 }
@@ -453,7 +453,10 @@ namespace sogen
     {
         const auto normal_key = this->normalize_path(key);
 
-        if (is_subpath(normal_key, utils::path_key{"\\registry\\machine"}) || is_subpath(normal_key, utils::path_key{"\\registry\\user"}))
+        static const utils::path_key machine_root{"\\registry\\machine"};
+        static const utils::path_key user_root{"\\registry\\user"};
+
+        if (is_subpath(normal_key, machine_root) || is_subpath(normal_key, user_root))
         {
             registry_key reg_key{};
             reg_key.hive = normal_key;
