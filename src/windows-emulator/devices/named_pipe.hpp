@@ -146,7 +146,7 @@ namespace sogen
             if (this->pending_read && !this->write_queue.empty())
             {
                 const auto ctx = *this->pending_read;
-                this->complete_read(win_emu, ctx);
+                this->complete_read(win_emu, ctx, false);
                 this->pending_read.reset();
 
                 if (auto* e = win_emu.process.events.get(this->read_ready_event))
@@ -214,7 +214,7 @@ namespace sogen
         {
             if (!this->write_queue.empty())
             {
-                return this->complete_read(win_emu, ctx);
+                return this->complete_read(win_emu, ctx, true);
             }
 
             this->pending_read = ctx;
@@ -307,18 +307,7 @@ namespace sogen
                 });
             }
 
-            if (const auto association = this->get_completion_port())
-            {
-                if (auto* completion = win_emu.process.io_completions.get(association->port))
-                {
-                    io_completion_message message{};
-                    message.key_context = association->key;
-                    message.apc_context = ctx.apc_context;
-                    message.io_status_block.Status = STATUS_SUCCESS;
-                    message.io_status_block.Information = static_cast<uint32_t>(bytes_written);
-                    completion->enqueue(message);
-                }
-            }
+            this->post_completion(win_emu, ctx, STATUS_SUCCESS, static_cast<uint32_t>(bytes_written), true);
 
             return STATUS_SUCCESS;
         }
@@ -578,7 +567,7 @@ namespace sogen
         // WoW64-aware APC, and (independent of both) an I/O completion port packet if one is associated
         // with this handle. Used for both an immediate read (data already queued) and a pended one
         // completed later from work().
-        NTSTATUS complete_read(windows_emulator& win_emu, const io_device_context& ctx)
+        NTSTATUS complete_read(windows_emulator& win_emu, const io_device_context& ctx, const bool completed_synchronously)
         {
             const std::string_view data = this->write_queue.front();
             const size_t to_copy = std::min<size_t>(data.size(), ctx.output_buffer_length);
@@ -648,18 +637,7 @@ namespace sogen
                 });
             }
 
-            if (const auto association = this->get_completion_port())
-            {
-                if (auto* completion = win_emu.process.io_completions.get(association->port))
-                {
-                    io_completion_message message{};
-                    message.key_context = association->key;
-                    message.apc_context = ctx.apc_context;
-                    message.io_status_block.Status = STATUS_SUCCESS;
-                    message.io_status_block.Information = static_cast<uint32_t>(to_copy);
-                    completion->enqueue(message);
-                }
-            }
+            this->post_completion(win_emu, ctx, STATUS_SUCCESS, static_cast<uint32_t>(to_copy), completed_synchronously);
 
             return STATUS_SUCCESS;
         }
@@ -733,18 +711,7 @@ namespace sogen
                 });
             }
 
-            if (const auto association = this->get_completion_port())
-            {
-                if (auto* completion = win_emu.process.io_completions.get(association->port))
-                {
-                    io_completion_message message{};
-                    message.key_context = association->key;
-                    message.apc_context = ctx.apc_context;
-                    message.io_status_block.Status = STATUS_SUCCESS;
-                    message.io_status_block.Information = 0;
-                    completion->enqueue(message);
-                }
-            }
+            this->post_completion(win_emu, ctx, STATUS_SUCCESS, 0, false);
 
             return STATUS_SUCCESS;
         }

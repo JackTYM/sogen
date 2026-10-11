@@ -198,7 +198,33 @@ namespace sogen
         return this->vcpu->thread();
     }
 
-    NTSTATUS io_device::execute_ioctl(windows_emulator& win_emu, const io_device_context& c)
+    void io_device::post_completion(windows_emulator& win_emu, const io_device_context& c, const NTSTATUS status,
+                                    const uint64_t information, const bool completed_synchronously) const
+    {
+        if (completed_synchronously && NT_SUCCESS(status) &&
+            (this->get_completion_notification_modes() & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS))
+        {
+            return;
+        }
+
+        const auto association = this->get_completion_port();
+        if (!association)
+        {
+            return;
+        }
+
+        if (auto* completion = win_emu.process.io_completions.get(association->port))
+        {
+            io_completion_message message{};
+            message.key_context = association->key;
+            message.apc_context = c.apc_context;
+            message.io_status_block.Status = status;
+            message.io_status_block.Information = information;
+            completion->enqueue(message);
+        }
+    }
+
+    NTSTATUS io_device::execute_ioctl(windows_emulator& win_emu, const io_device_context& c, const bool completes_pending_request)
     {
         if (c.io_status_block)
         {
@@ -219,26 +245,28 @@ namespace sogen
             }
         }
 
+        const auto information = c.io_status_block ? c.io_status_block.read().Information : 0;
+
+        // WoW64 hands a pending request a transient 64-bit IO_STATUS_BLOCK, so the caller's own 32-bit block
+        // (its OVERLAPPED, passed as ApcContext when no APC routine is used) is never updated by the write
+        // above; the real kernel writes the 32-bit block directly when the request completes asynchronously.
+        if (completes_pending_request && result != STATUS_PENDING && win_emu.process.is_wow64_process && c.apc_context && !c.apc_routine)
+        {
+            const auto status32 = static_cast<uint32_t>(result);
+            const auto information32 = static_cast<uint32_t>(information);
+            win_emu.emu().write_memory(c.apc_context, &status32, sizeof(status32));
+            win_emu.emu().write_memory(c.apc_context + sizeof(status32), &information32, sizeof(information32));
+        }
+
         // A handle associated with an I/O completion port (NtSetInformationFile's FileCompletionInformation,
         // i.e. CreateIoCompletionPort on an already-open handle) posts a completion packet for every finished
         // request on real Windows, even one that completed synchronously - callers built around
         // GetQueuedCompletionStatus never poll the event or the synchronous return value. Requests without an
         // APC context (no OVERLAPPED, e.g. mswsock's internal synchronous AFD calls) and requests that fail
-        // immediately post nothing; a thread pool TP_IO would otherwise receive completions it never started.
-        if (result != STATUS_PENDING && c.apc_context != 0 && !NT_ERROR(result))
+        // synchronously post nothing; a thread pool TP_IO would otherwise receive completions it never started.
+        if (result != STATUS_PENDING && c.apc_context != 0 && (completes_pending_request || !NT_ERROR(result)))
         {
-            if (const auto association = this->get_completion_port())
-            {
-                if (auto* completion = win_emu.process.io_completions.get(association->port))
-                {
-                    io_completion_message message{};
-                    message.key_context = association->key;
-                    message.apc_context = c.apc_context;
-                    message.io_status_block.Status = result;
-                    message.io_status_block.Information = c.io_status_block ? c.io_status_block.read().Information : 0;
-                    completion->enqueue(message);
-                }
-            }
+            this->post_completion(win_emu, c, result, information, !completes_pending_request);
         }
 
         return result;

@@ -139,10 +139,25 @@ namespace sogen
             return this->completion_port_;
         }
 
-        NTSTATUS execute_ioctl(windows_emulator& win_emu, const io_device_context& c);
+        // Modes accumulate: SetFileCompletionNotificationModes cannot clear a mode once set.
+        virtual void add_completion_notification_modes(const ULONG modes)
+        {
+            this->completion_notification_modes_ |= modes;
+        }
+
+        virtual ULONG get_completion_notification_modes() const
+        {
+            return this->completion_notification_modes_;
+        }
+
+        void post_completion(windows_emulator& win_emu, const io_device_context& c, NTSTATUS status, uint64_t information,
+                             bool completed_synchronously) const;
+
+        NTSTATUS execute_ioctl(windows_emulator& win_emu, const io_device_context& c, bool completes_pending_request = false);
 
       private:
         std::optional<completion_port_association> completion_port_{};
+        ULONG completion_notification_modes_{};
     };
 
     struct stateless_device : io_device
@@ -206,6 +221,18 @@ namespace sogen
         {
             this->assert_validity();
             return this->device_->get_completion_port();
+        }
+
+        void add_completion_notification_modes(const ULONG modes) override
+        {
+            this->assert_validity();
+            this->device_->add_completion_notification_modes(modes);
+        }
+
+        ULONG get_completion_notification_modes() const override
+        {
+            this->assert_validity();
+            return this->device_->get_completion_notification_modes();
         }
 
         void serialize_object(utils::buffer_serializer& buffer) const override;
