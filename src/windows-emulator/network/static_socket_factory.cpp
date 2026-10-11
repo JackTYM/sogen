@@ -152,6 +152,16 @@ namespace sogen
                         return this->a;
                     }
 
+                    std::optional<address> get_remote_address() override
+                    {
+                        if (!this->pipe)
+                        {
+                            return {};
+                        }
+
+                        return this->peer_addr;
+                    }
+
                     bool bind(const address& addr) override
                     {
                         this->a = addr;

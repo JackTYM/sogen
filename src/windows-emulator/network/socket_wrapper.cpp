@@ -57,6 +57,22 @@ namespace sogen
             return address;
         }
 
+        std::optional<address> socket_wrapper::get_remote_address()
+        {
+            sockaddr_storage addr{};
+            socklen_t addrlen = sizeof(sockaddr_storage);
+            const auto res = ::getpeername(this->socket_.get_socket(), reinterpret_cast<sockaddr*>(&addr), &addrlen);
+
+            if (res != 0)
+            {
+                return {};
+            }
+
+            address address{};
+            address.set_address(reinterpret_cast<sockaddr*>(&addr), addrlen);
+            return address;
+        }
+
         bool socket_wrapper::bind(const address& addr)
         {
             return this->socket_.bind(addr);
