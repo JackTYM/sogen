@@ -649,6 +649,9 @@ namespace sogen
                                            emulator_object<uint32_t> dpi_y);
         BOOL completion_NtUserEnumDisplayMonitors(const syscall_context& c, hdc hdc_in, uint64_t clip_rect_ptr, uint64_t callback,
                                                   uint64_t param);
+        BOOL handle_NtUserFillWindow(const syscall_context& c, hwnd brush_window, hwnd paint_window, hdc dc, uint64_t brush);
+        BOOL handle_NtUserGetComboBoxInfo(const syscall_context& c, hwnd window, emulator_pointer combo_box_info);
+        BOOL completion_NtUserGetComboBoxInfo(const syscall_context& c, hwnd window, emulator_pointer combo_box_info);
         BOOL handle_NtUserInheritWindowMonitor(const syscall_context& c, hwnd hwnd_tgt, hwnd hwnd_inherit);
         BOOL handle_NtUserGetHDevName(const syscall_context& c, handle hdev, emulator_pointer device_name);
         // Minimal stub: DWM/compositor redirection-info query, undocumented signature. Always reports
@@ -4048,6 +4051,8 @@ namespace sogen
         add_handler(NtUserChangeDisplaySettings);
         add_handler(NtUserBuildHwndList);
         add_handler(NtUserEnumDisplayMonitors);
+        add_handler(NtUserGetComboBoxInfo);
+        add_handler(NtUserFillWindow);
         add_handler(NtUserGetDpiForMonitor);
         add_handler(NtUserInheritWindowMonitor);
         add_handler(NtUserSetProp);
@@ -4288,6 +4293,7 @@ namespace sogen
         add_callback(NtUserMessageCall, message_call_state);
         add_callback(NtUserUpdateWindow, window_update_state);
         add_stateless_callback(NtUserEnumDisplayMonitors);
+        add_stateless_callback(NtUserGetComboBoxInfo);
         add_callback(NtUserSetWindowPos, window_set_pos_state);
 
 #undef add_callback

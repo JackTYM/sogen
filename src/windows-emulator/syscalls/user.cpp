@@ -4878,6 +4878,34 @@ namespace sogen
             return c.get_callback_result<BOOL>();
         }
 
+        BOOL handle_NtUserGetComboBoxInfo(const syscall_context& c, const hwnd window, const emulator_pointer combo_box_info)
+        {
+            constexpr UINT cb_getcomboboxinfo = 0x0164;
+
+            const auto* win = c.proc.windows.get(window);
+            if (!win || combo_box_info == 0)
+            {
+                return FALSE;
+            }
+
+            set_thread_window_context(c, win->handle, win->guest.value());
+
+            fn_dword_message args{};
+            args.pwnd = win->guest.value();
+            args.msg = cb_getcomboboxinfo;
+            args.lParam = combo_box_info;
+            args.xParam = win->wnd_proc;
+            args.xpfnProc = c.proc.dispatch_client_message;
+
+            dispatch_user_callback(c, callback_id::NtUserGetComboBoxInfo, k_fn_dword_callback_id, args);
+            return FALSE;
+        }
+
+        BOOL completion_NtUserGetComboBoxInfo(const syscall_context& c, const hwnd /*window*/, const emulator_pointer /*combo_box_info*/)
+        {
+            return c.get_callback_result<uint64_t>() != 0 ? TRUE : FALSE;
+        }
+
         BOOL handle_NtUserInheritWindowMonitor(const syscall_context& c, const hwnd hwnd_tgt, const hwnd hwnd_inherit)
         {
             return c.proc.windows.get(hwnd_tgt) != nullptr && (hwnd_inherit == 0 || c.proc.windows.get(hwnd_inherit) != nullptr);

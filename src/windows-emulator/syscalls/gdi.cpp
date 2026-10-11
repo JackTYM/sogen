@@ -1921,6 +1921,31 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserFillWindow(const syscall_context& c, const hwnd /*brush_window*/, const hwnd paint_window, const hdc dc,
+                                     const uint64_t brush)
+        {
+            const auto* win = c.proc.windows.get(paint_window);
+            if (win == nullptr)
+            {
+                return FALSE;
+            }
+
+            int32_t origin_x = 0;
+            int32_t origin_y = 0;
+            uint32_t present_handle = 0;
+            auto* surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, present_handle);
+            if (surface == nullptr)
+            {
+                return FALSE;
+            }
+
+            const auto color = brush >= 1 && brush <= USER_NUM_SYSCOLORS ? colorref_to_bgra(k_default_system_colors[brush - 1])
+                                                                         : get_brush_color(c, static_cast<uint32_t>(brush));
+            fill_rect(*surface, origin_x, origin_y, origin_x + win->client_width(), origin_y + win->client_height(), color);
+            present_win_surface(c, present_handle, surface);
+            return TRUE;
+        }
+
         NTSTATUS handle_NtDxgkIsFeatureEnabled(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
