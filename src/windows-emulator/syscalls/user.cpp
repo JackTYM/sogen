@@ -2774,19 +2774,6 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        BOOL handle_NtUserMoveWindow(const syscall_context& c, const hwnd hwnd, const int x, const int y, const int width, const int height,
-                                     const BOOL repaint)
-        {
-            auto* win = c.proc.windows.get(hwnd);
-            if (!win)
-            {
-                return FALSE;
-            }
-
-            update_window_geometry(c, *win, x, y, width, height, repaint != FALSE);
-            return TRUE;
-        }
-
         uint64_t handle_NtUserGetProcessWindowStation()
         {
             return 1;
@@ -5099,6 +5086,81 @@ namespace sogen
                 }
             }
 
+            // Like real SetWindowPos, the window procedure sees WM_WINDOWPOSCHANGING (and may adjust the position)
+            // before the change and WM_WINDOWPOSCHANGED plus WM_MOVE/WM_SIZE after it. Windows that size their
+            // content from these (e.g. Chromium's HWNDMessageHandler, MFC views) never learn their size otherwise.
+            // Returns true when the notifications are being delivered through user callbacks.
+            bool begin_window_pos_change(const syscall_context& c, window& win, const EMU_WINDOWPOS& position, const callback_id id,
+                                         window_show_state& state)
+            {
+                const auto flags = position.flags;
+                const bool moves = (flags & SWP_NOMOVE) == 0 && (position.x != win.x || position.y != win.y);
+                const bool resizes = (flags & SWP_NOSIZE) == 0 && (position.cx != win.width || position.cy != win.height);
+
+                if ((!moves && !resizes) || win.thread_id != c.vcpu.active_thread->id)
+                {
+                    apply_window_pos(c, win, position.x, position.y, position.cx, position.cy, flags);
+                    apply_window_pos_visibility(c, win, flags);
+                    if (moves || resizes)
+                    {
+                        post_window_pos_changed(c.win_emu, win, flags);
+                    }
+                    return false;
+                }
+
+                apply_window_pos_visibility(c, win, flags);
+
+                state.window_pos_alloc = c.emu.push_stack(position);
+                state.changed_window_pos_alloc = c.emu.push_stack(position);
+
+                if (resizes)
+                {
+                    state.message_queue.push_back({.message = WM_SIZE, .wParam = 0, .lParam = 0});
+                }
+                if (moves)
+                {
+                    state.message_queue.push_back({.message = WM_MOVE, .wParam = 0, .lParam = 0});
+                }
+                state.message_queue.push_back({.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0});
+                state.message_queue.push_back({.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()});
+                state.pending_window_pos_address = state.window_pos_alloc.address();
+
+                dispatch_next_message(c, id, std::move(state), win, state.message_queue);
+                return true;
+            }
+
+            void end_window_pos_change(const syscall_context& c, window_show_state& state)
+            {
+                c.emu.pop_stack(state.changed_window_pos_alloc);
+                c.emu.pop_stack(state.window_pos_alloc);
+            }
+
+            // Returns true while further notifications are being delivered through user callbacks.
+            bool continue_window_pos_change(const syscall_context& c, window& win, const UINT flags, const callback_id id,
+                                            window_show_state& state)
+            {
+                if (state.pending_window_pos_address != 0)
+                {
+                    complete_window_position_change(c, win, state.pending_window_pos_address, state.changed_window_pos_alloc,
+                                                    state.message_queue, true);
+                    state.pending_window_pos_address = 0;
+                }
+
+                if (!state.message_queue.empty())
+                {
+                    dispatch_next_message(c, id, std::move(state), win, state.message_queue);
+                    return true;
+                }
+
+                end_window_pos_change(c, state);
+
+                if ((flags & SWP_NOREDRAW) == 0)
+                {
+                    invalidate_window(c, win, std::nullopt, false);
+                }
+
+                return false;
+            }
         }
 
         BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd hwnd_insert_after, const int x, const int y,
@@ -5124,32 +5186,13 @@ namespace sogen
 
             if (window_trace_enabled())
             {
-                c.win_emu.log.error("[window-trace] SetWindowPos hwnd=0x%llx class='%s' flags=0x%x host_surface=%d tid=%u\n",
-                                    static_cast<unsigned long long>(hWnd), u16_to_u8(win->class_name).c_str(), flags,
-                                    win->host_surface_window, c.thread().id);
+                c.win_emu.log.error("[window-trace] SetWindowPos hwnd=0x%llx class='%s' pos=%d,%d size=%dx%d old=%d,%d %dx%d flags=0x%x "
+                                    "host_surface=%d tid=%u\n",
+                                    static_cast<unsigned long long>(hWnd), u16_to_u8(win->class_name).c_str(), x, y, cx, cy, win->x, win->y,
+                                    win->width, win->height, flags, win->host_surface_window, c.thread().id);
             }
 
-            const bool moves = (flags & SWP_NOMOVE) == 0 && (x != win->x || y != win->y);
-            const bool resizes = (flags & SWP_NOSIZE) == 0 && (cx != win->width || cy != win->height);
-
-            if ((!moves && !resizes) || win->thread_id != c.vcpu.active_thread->id)
-            {
-                apply_window_pos(c, *win, x, y, cx, cy, flags);
-                apply_window_pos_visibility(c, *win, flags);
-                if (moves || resizes)
-                {
-                    post_window_pos_changed(c.win_emu, *win, flags);
-                }
-                return TRUE;
-            }
-
-            apply_window_pos_visibility(c, *win, flags);
-
-            // Like real SetWindowPos, the window procedure sees WM_WINDOWPOSCHANGING (and may adjust the position)
-            // before the change and WM_WINDOWPOSCHANGED plus WM_MOVE/WM_SIZE after it. Windows that size their
-            // content from these (e.g. Chromium's HWNDMessageHandler) never learn their size otherwise.
-            window_show_state state{};
-            const EMU_WINDOWPOS changing_position{
+            const EMU_WINDOWPOS position{
                 .hwnd = hWnd,
                 .hwndInsertAfter = hwnd_insert_after,
                 .x = x,
@@ -5158,23 +5201,14 @@ namespace sogen
                 .cy = cy,
                 .flags = flags,
             };
-            state.window_pos_alloc = c.emu.push_stack(changing_position);
-            state.changed_window_pos_alloc = c.emu.push_stack(changing_position);
 
-            if (resizes)
+            window_show_state state{};
+            if (begin_window_pos_change(c, *win, position, callback_id::NtUserSetWindowPos, state))
             {
-                state.message_queue.push_back({.message = WM_SIZE, .wParam = 0, .lParam = 0});
+                return {};
             }
-            if (moves)
-            {
-                state.message_queue.push_back({.message = WM_MOVE, .wParam = 0, .lParam = 0});
-            }
-            state.message_queue.push_back({.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0});
-            state.message_queue.push_back({.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()});
-            state.pending_window_pos_address = state.window_pos_alloc.address();
 
-            dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(state), *win, state.message_queue);
-            return {};
+            return TRUE;
         }
 
         BOOL completion_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd /*hwnd_insert_after*/, const int /*x*/,
@@ -5184,29 +5218,65 @@ namespace sogen
             auto* win = c.proc.windows.get(hWnd);
             if (!win)
             {
-                c.emu.pop_stack(s.changed_window_pos_alloc);
-                c.emu.pop_stack(s.window_pos_alloc);
+                end_window_pos_change(c, s);
                 return FALSE;
             }
 
-            if (s.pending_window_pos_address != 0)
+            if (continue_window_pos_change(c, *win, flags, callback_id::NtUserSetWindowPos, s))
             {
-                complete_window_position_change(c, *win, s.pending_window_pos_address, s.changed_window_pos_alloc, s.message_queue, true);
-                s.pending_window_pos_address = 0;
-            }
-
-            if (!s.message_queue.empty())
-            {
-                dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(s), *win, s.message_queue);
                 return {};
             }
 
-            c.emu.pop_stack(s.changed_window_pos_alloc);
-            c.emu.pop_stack(s.window_pos_alloc);
+            return TRUE;
+        }
 
-            if ((flags & SWP_NOREDRAW) == 0)
+        UINT move_window_flags(const BOOL repaint)
+        {
+            return SWP_NOZORDER | SWP_NOACTIVATE | (repaint ? 0 : SWP_NOREDRAW);
+        }
+
+        BOOL handle_NtUserMoveWindow(const syscall_context& c, const hwnd hwnd, const int x, const int y, const int width, const int height,
+                                     const BOOL repaint)
+        {
+            auto* win = c.proc.windows.get(hwnd);
+            if (!win)
             {
-                invalidate_window(c, *win, std::nullopt, false);
+                return FALSE;
+            }
+
+            const EMU_WINDOWPOS position{
+                .hwnd = hwnd,
+                .hwndInsertAfter = 0,
+                .x = x,
+                .y = y,
+                .cx = width,
+                .cy = height,
+                .flags = move_window_flags(repaint),
+            };
+
+            window_show_state state{};
+            if (begin_window_pos_change(c, *win, position, callback_id::NtUserMoveWindow, state))
+            {
+                return {};
+            }
+
+            return TRUE;
+        }
+
+        BOOL completion_NtUserMoveWindow(const syscall_context& c, const hwnd hwnd, const int /*x*/, const int /*y*/, const int /*width*/,
+                                         const int /*height*/, const BOOL repaint)
+        {
+            auto& s = c.get_completion_state<window_show_state>();
+            auto* win = c.proc.windows.get(hwnd);
+            if (!win)
+            {
+                end_window_pos_change(c, s);
+                return FALSE;
+            }
+
+            if (continue_window_pos_change(c, *win, move_window_flags(repaint), callback_id::NtUserMoveWindow, s))
+            {
+                return {};
             }
 
             return TRUE;

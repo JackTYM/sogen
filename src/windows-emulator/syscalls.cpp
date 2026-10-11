@@ -573,6 +573,7 @@ namespace sogen
                                            emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
                                            emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> window_name);
         BOOL handle_NtUserMoveWindow(const syscall_context& c, hwnd hwnd, int x, int y, int width, int height, BOOL repaint);
+        BOOL completion_NtUserMoveWindow(const syscall_context& c, hwnd hwnd, int x, int y, int width, int height, BOOL repaint);
         uint64_t handle_NtUserGetProcessWindowStation();
         hwinsta handle_NtUserCreateWindowStation(const syscall_context& c,
                                                  emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
@@ -2128,6 +2129,7 @@ namespace sogen
         add_callback(NtUserUpdateWindow, window_update_state);
         add_stateless_callback(NtUserEnumDisplayMonitors);
         add_callback(NtUserSetWindowPos, window_show_state);
+        add_callback(NtUserMoveWindow, window_show_state);
 
 #undef add_callback
 #undef add_stateless_callback
