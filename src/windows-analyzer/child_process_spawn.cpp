@@ -395,6 +395,10 @@ namespace sogen
             {
                 argv.emplace_back("--no-inst-precision");
             }
+            if (config.offline)
+            {
+                argv.emplace_back("--offline");
+            }
 
             argv.emplace_back("--whp-exec-hook");
             argv.push_back(config.whp_execution_hook_mode);

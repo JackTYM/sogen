@@ -9,19 +9,21 @@
 #ifdef _WIN32
 using send_size = int;
 using sent_size = int;
-#define GET_SOCKET_ERROR() (WSAGetLastError())
-#define poll               WSAPoll
-#define SERR(x)            (WSA##x)
-#define SHUT_RDWR          SD_BOTH
+#define GET_SOCKET_ERROR()  (WSAGetLastError())
+#define SET_SOCKET_ERROR(x) (WSASetLastError(x))
+#define poll                WSAPoll
+#define SERR(x)             (WSA##x)
+#define SHUT_RDWR           SD_BOTH
 #else
 using SOCKET = int;
 using send_size = size_t;
 using sent_size = ssize_t;
-#define INVALID_SOCKET     (SOCKET)(~0)
-#define SOCKET_ERROR       (-1)
-#define GET_SOCKET_ERROR() (errno)
-#define closesocket        close
-#define SERR(x)            (x)
+#define INVALID_SOCKET      (SOCKET)(~0)
+#define SOCKET_ERROR        (-1)
+#define GET_SOCKET_ERROR()  (errno)
+#define SET_SOCKET_ERROR(x) (errno = (x))
+#define closesocket         close
+#define SERR(x)             (x)
 #endif
 
 namespace sogen::network

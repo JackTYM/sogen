@@ -84,6 +84,7 @@ namespace sogen::network
         bool is_supported() const;
 
         [[nodiscard]] bool is_local() const;
+        [[nodiscard]] bool is_loopback() const;
         [[nodiscard]] std::string to_string() const;
 
         bool operator==(const address& obj) const;

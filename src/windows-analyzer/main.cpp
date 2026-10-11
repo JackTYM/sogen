@@ -19,6 +19,7 @@
 #include "child_process_spawn.hpp"
 
 #include <devices/named_pipe.hpp>
+#include <network/offline_network.hpp>
 
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
@@ -80,6 +81,7 @@ namespace sogen
             std::string whp_execution_hook_mode{"auto"};
             std::optional<backend_type> backend{};
             bool disable_instruction_precision{false};
+            bool offline{false};
             uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
             std::filesystem::path emulation_root{};
@@ -532,16 +534,30 @@ namespace sogen
             return emu;
         }
 
+        emulator_interfaces create_emulator_interfaces(const analysis_options& options)
+        {
+            emulator_interfaces interfaces{};
+            if (options.offline)
+            {
+                interfaces.dns_lookup = network::create_offline_dns_lookup();
+                interfaces.socket_factory = network::create_offline_socket_factory();
+            }
+
+            return interfaces;
+        }
+
         std::unique_ptr<windows_emulator> create_empty_emulator(const analysis_options& options)
         {
             const auto settings = create_emulator_settings(options);
-            return std::make_unique<windows_emulator>(create_configured_backend(options), settings);
+            return std::make_unique<windows_emulator>(create_configured_backend(options), settings, emulator_callbacks{},
+                                                      create_emulator_interfaces(options));
         }
 
         std::unique_ptr<windows_emulator> create_application_emulator(const analysis_options& options, application_settings app_settings)
         {
             const auto settings = create_emulator_settings(options);
-            return std::make_unique<windows_emulator>(create_configured_backend(options), std::move(app_settings), settings);
+            return std::make_unique<windows_emulator>(create_configured_backend(options), std::move(app_settings), settings,
+                                                      emulator_callbacks{}, create_emulator_interfaces(options));
         }
 
         std::unique_ptr<windows_emulator> create_application_emulator(const analysis_options& options,
@@ -636,6 +652,7 @@ namespace sogen
             config.skip_syscalls = options.skip_syscalls;
             config.reproducible = options.reproducible;
             config.disable_instruction_precision = options.disable_instruction_precision;
+            config.offline = options.offline;
             config.whp_execution_hook_mode = options.whp_execution_hook_mode;
             config.trace_hooks_path = options.trace_hooks_path;
             config.debug_child_pattern = options.debug_child_pattern;
@@ -1107,6 +1124,8 @@ namespace sogen
             app.add_flag("--inst-summary", options.instruction_summary, "Print a summary of executed instructions of the analyzed modules");
             app.add_flag("--skip-syscalls", options.skip_syscalls, "Skip the logging of regular syscalls");
             app.add_flag("--reproducible", options.reproducible, "Stub clocks and other mechanisms to make executions reproducible");
+            app.add_flag("--offline", options.offline,
+                         "Emulate a host whose network is disconnected: only loopback names and addresses are reachable");
             app.add_flag("--no-inst-precision", options.disable_instruction_precision,
                          "Disable per-instruction precision (faster, less precise)");
             app.add_flag("--call-count", options.prepend_call_count, "Prefix function and syscall lines with a traced-call count");

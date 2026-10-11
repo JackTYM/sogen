@@ -27,6 +27,7 @@ namespace sogen
         bool skip_syscalls{};
         bool reproducible{};
         bool disable_instruction_precision{};
+        bool offline{};
         std::string whp_execution_hook_mode{"auto"};
         std::filesystem::path trace_hooks_path{};
         // Empty (default): no GDB-debug-flag forwarding to spawned children at all, matching the

@@ -243,6 +243,33 @@ namespace sogen::network
         return false;
     }
 
+    bool address::is_loopback() const
+    {
+        if (this->is_ipv4())
+        {
+            std::array<uint8_t, 4> bytes{};
+            memcpy(bytes.data(), &this->address4_.sin_addr.s_addr, bytes.size());
+            return bytes.at(0) == 127;
+        }
+
+        if (!this->is_ipv6())
+        {
+            return false;
+        }
+
+        std::array<uint8_t, 16> bytes{};
+        memcpy(bytes.data(), &this->address6_.sin6_addr, bytes.size());
+
+        constexpr std::array<uint8_t, 15> zero_prefix{};
+        if (std::equal(zero_prefix.begin(), zero_prefix.end(), bytes.begin()) && bytes.at(15) == 1)
+        {
+            return true;
+        }
+
+        constexpr std::array<uint8_t, 12> v4_mapped_prefix{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+        return std::equal(v4_mapped_prefix.begin(), v4_mapped_prefix.end(), bytes.begin()) && bytes.at(12) == 127;
+    }
+
     sockaddr& address::get_addr()
     {
         return this->address_;
