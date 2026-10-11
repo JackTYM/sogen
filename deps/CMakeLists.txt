@@ -209,6 +209,8 @@ if(SOGEN_ENABLE_FEX)
       # Do not let FEX replace the process allocator; sogen owns it when FEXCore is embedded.
       -DENABLE_FEX_ALLOCATOR=OFF
       -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF
+      # Homebrew's fmt >= 12 rejects the fmt::join over std::byte spans in FEXCore's CodeCache.cpp.
+      -DCMAKE_DISABLE_FIND_PACKAGE_fmt=ON
     # Build only the self-contained core library, not FEX's loader/server tools: the static
     # FEXCore target on iOS (no dynamic loading outside the app bundle), FEXCore_shared elsewhere.
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target ${_FEXCORE_BUILD_TARGET}
