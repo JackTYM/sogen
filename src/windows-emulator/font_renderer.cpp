@@ -152,7 +152,7 @@ namespace sogen
                         }
 
                         const int px = gx + col;
-                        if (px < 0 || px >= static_cast<int>(surface.width))
+                        if (!surface.is_writable(px, py))
                         {
                             continue;
                         }

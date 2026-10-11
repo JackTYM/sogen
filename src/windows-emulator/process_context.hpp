@@ -150,6 +150,17 @@ namespace sogen
         bool guest_top_down{};
         bool guest_owns_memory{};
 
+        int32_t clip_left{INT32_MIN};
+        int32_t clip_top{INT32_MIN};
+        int32_t clip_right{INT32_MAX};
+        int32_t clip_bottom{INT32_MAX};
+
+        bool is_writable(const int x, const int y) const
+        {
+            return x >= 0 && y >= 0 && x < static_cast<int>(this->width) && y < static_cast<int>(this->height) && x >= this->clip_left &&
+                   x < this->clip_right && y >= this->clip_top && y < this->clip_bottom;
+        }
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->width);

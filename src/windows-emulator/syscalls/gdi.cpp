@@ -617,6 +617,67 @@ namespace sogen
                 return &surface;
             }
 
+            void clip_surface_to_window(const syscall_context& c, const hdc dc, gdi_bitmap_surface& surface, const int32_t origin_x,
+                                        const int32_t origin_y)
+            {
+                surface.clip_left = INT32_MIN;
+                surface.clip_top = INT32_MIN;
+                surface.clip_right = INT32_MAX;
+                surface.clip_bottom = INT32_MAX;
+
+                const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+                if (dc_it == c.proc.gdi_dc_states.end() || dc_it->second.selected_bitmap != 0 || dc_it->second.target_window == 0)
+                {
+                    return;
+                }
+
+                const auto* win = c.proc.windows.get(dc_it->second.target_window);
+                if (!win)
+                {
+                    return;
+                }
+
+                auto left = origin_x;
+                auto top = origin_y;
+                auto right = origin_x + win->width;
+                auto bottom = origin_y + win->height;
+
+                auto parent_origin_x = origin_x;
+                auto parent_origin_y = origin_y;
+                while ((win->style & WS_CHILD) != 0 && win->parent_handle != 0)
+                {
+                    const auto* parent = c.proc.windows.get(win->parent_handle);
+                    if (!parent)
+                    {
+                        break;
+                    }
+
+                    parent_origin_x -= win->x;
+                    parent_origin_y -= win->y;
+                    left = std::max(left, parent_origin_x);
+                    top = std::max(top, parent_origin_y);
+                    right = std::min(right, parent_origin_x + parent->width);
+                    bottom = std::min(bottom, parent_origin_y + parent->height);
+                    win = parent;
+                }
+
+                surface.clip_left = left;
+                surface.clip_top = top;
+                surface.clip_right = right;
+                surface.clip_bottom = bottom;
+            }
+
+            gdi_bitmap_surface* resolve_dc_draw_surface(const syscall_context& c, const hdc dc, int32_t& origin_x, int32_t& origin_y,
+                                                        uint32_t& present_handle)
+            {
+                auto* surface = resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
+                if (surface != nullptr)
+                {
+                    clip_surface_to_window(c, dc, *surface, origin_x, origin_y);
+                }
+                return surface;
+            }
+
             // WS_CLIPSIBLINGS means this DC's owning window must never draw over a sibling window that
             // overlaps it (real win32 enforces this via the DC's clip region, independent of z-order). Returns
             // the overlapping visible siblings' rects in the same surface-absolute coordinate space as
@@ -693,7 +754,7 @@ namespace sogen
 
                 dc_state = &dc_it->second;
                 uint32_t resolved_present_handle = 0;
-                surface = resolve_dc_surface(c, dc, origin_x, origin_y, resolved_present_handle);
+                surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, resolved_present_handle);
                 if (present_handle != nullptr)
                 {
                     *present_handle = resolved_present_handle;
@@ -770,7 +831,7 @@ namespace sogen
 
             void set_surface_pixel(gdi_bitmap_surface& surface, const int x, const int y, const uint32_t color)
             {
-                if (x < 0 || y < 0 || x >= static_cast<int>(surface.width) || y >= static_cast<int>(surface.height))
+                if (!surface.is_writable(x, y))
                 {
                     return;
                 }
@@ -1291,6 +1352,8 @@ namespace sogen
                 }
 
                 c.proc.user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+                    std::ranges::copy(k_default_system_colors, std::begin(server_info.argbSystem));
+
                     for (size_t i = 0; i < system_brushes.size(); ++i)
                     {
                         if (server_info.ahbrSystem[i] == 0)
@@ -1807,7 +1870,7 @@ namespace sogen
             int32_t origin_x = 0;
             int32_t origin_y = 0;
             uint32_t present_handle = 0;
-            auto* surface = resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
+            auto* surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, present_handle);
             if (surface == nullptr)
             {
                 return FALSE;
@@ -2558,7 +2621,7 @@ namespace sogen
             int32_t origin_x = 0;
             int32_t origin_y = 0;
             uint32_t present_handle = 0;
-            gdi_bitmap_surface* surface = resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
+            gdi_bitmap_surface* surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, present_handle);
             if (!surface)
             {
                 return 0;
@@ -3669,9 +3732,9 @@ namespace sogen
             return handle_NtGdiLineTo(c, dc, left, top);
         }
 
-        BOOL handle_NtGdiBitBlt(const syscall_context& c, const hdc dst_dc, const int x_dst, const int y_dst, const int width,
-                                const int height, const hdc src_dc, const int x_src, const int y_src, const DWORD rop,
-                                const DWORD /*cr_back_color*/, const FLONG /*fl*/)
+        BOOL blit_with_rop4(const syscall_context& c, const hdc dst_dc, const int x_dst, const int y_dst, const int width, const int height,
+                            const hdc src_dc, const int x_src, const int y_src, const uint8_t rop3_fore, const uint8_t rop3_back,
+                            const gdi_bitmap_surface* mask_surface, const int x_mask, const int y_mask)
         {
             if (dst_dc == 0 || width <= 0 || height <= 0)
             {
@@ -3684,14 +3747,13 @@ namespace sogen
             int32_t dst_origin_x = 0;
             int32_t dst_origin_y = 0;
             uint32_t present_handle = 0;
-            gdi_bitmap_surface* dst_surface = resolve_dc_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
+            gdi_bitmap_surface* dst_surface = resolve_dc_draw_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
             if (!dst_surface || dst_surface->width == 0 || dst_surface->height == 0 || dst_surface->pixels.empty())
             {
                 return FALSE;
             }
 
-            const auto rop3 = static_cast<uint8_t>((rop >> 16) & 0xFFu);
-            const bool needs_source = rop3_uses_source(rop3);
+            const bool needs_source = rop3_uses_source(rop3_fore) || (mask_surface != nullptr && rop3_uses_source(rop3_back));
 
             int32_t src_origin_x = 0;
             int32_t src_origin_y = 0;
@@ -3714,6 +3776,8 @@ namespace sogen
 
             auto dx = static_cast<int64_t>(x_dst) + dst_origin_x;
             auto dy = static_cast<int64_t>(y_dst) + dst_origin_y;
+            const auto dx_unclipped = dx;
+            const auto dy_unclipped = dy;
             auto sx = static_cast<int64_t>(x_src) + src_origin_x;
             auto sy = static_cast<int64_t>(y_src) + src_origin_y;
             int64_t w = width;
@@ -3815,6 +3879,11 @@ namespace sogen
 
                 for (size_t col = 0; col < blt_width; ++col)
                 {
+                    if (!dst_surface->is_writable(static_cast<int32_t>(dx + static_cast<int64_t>(col)), abs_y))
+                    {
+                        continue;
+                    }
+
                     if (!clip_exclusions.empty() &&
                         point_in_rects(static_cast<int32_t>(dx + static_cast<int64_t>(col)), abs_y, clip_exclusions))
                     {
@@ -3827,6 +3896,18 @@ namespace sogen
 
                     // Your renderer presents BGRA8 surfaces. Keeping alpha opaque matches the rest of this file's
                     // DIB-to-surface paths. Remove the OR if you later model real alpha-carrying 32-bpp DIB sections.
+                    uint8_t rop3 = rop3_fore;
+                    if (mask_surface != nullptr)
+                    {
+                        const auto mask_pixel =
+                            get_surface_pixel(*mask_surface, static_cast<int>(x_mask + (dx - dx_unclipped) + static_cast<int64_t>(col)),
+                                              static_cast<int>(y_mask + (dy - dy_unclipped) + static_cast<int64_t>(row)));
+                        if (!mask_pixel || (*mask_pixel & 0x00FFFFFFu) == 0)
+                        {
+                            rop3 = rop3_back;
+                        }
+                    }
+
                     dst_row[col] = apply_rop3(rop3, src, dst, pattern) | 0xFF000000u;
                 }
             }
@@ -3834,6 +3915,37 @@ namespace sogen
             present_win_surface(c, present_handle, dst_surface);
 
             return TRUE;
+        }
+
+        BOOL handle_NtGdiBitBlt(const syscall_context& c, const hdc dst_dc, const int x_dst, const int y_dst, const int width,
+                                const int height, const hdc src_dc, const int x_src, const int y_src, const DWORD rop,
+                                const DWORD /*cr_back_color*/, const FLONG /*fl*/)
+        {
+            const auto rop3 = static_cast<uint8_t>((rop >> 16) & 0xFFu);
+            return blit_with_rop4(c, dst_dc, x_dst, y_dst, width, height, src_dc, x_src, y_src, rop3, rop3, nullptr, 0, 0);
+        }
+
+        BOOL handle_NtGdiMaskBlt(const syscall_context& c, const hdc dst_dc, const int x_dst, const int y_dst, const int width,
+                                 const int height, const hdc src_dc, const int x_src, const int y_src, const hbitmap mask, const int x_mask,
+                                 const int y_mask, const DWORD rop4, const DWORD /*cr_back_color*/)
+        {
+            const auto rop3_fore = static_cast<uint8_t>((rop4 >> 16) & 0xFFu);
+            const auto rop3_back = static_cast<uint8_t>((rop4 >> 24) & 0xFFu);
+
+            const gdi_bitmap_surface* mask_surface = nullptr;
+            if (mask != 0)
+            {
+                const auto mask_it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(mask));
+                if (mask_it == c.proc.gdi_bitmap_surfaces.end())
+                {
+                    return FALSE;
+                }
+
+                mask_surface = &mask_it->second;
+            }
+
+            return blit_with_rop4(c, dst_dc, x_dst, y_dst, width, height, src_dc, x_src, y_src, rop3_fore, rop3_back, mask_surface, x_mask,
+                                  y_mask);
         }
 
         // Like BitBlt, but nearest-neighbour scales the source rectangle onto the destination rectangle.
@@ -3852,7 +3964,7 @@ namespace sogen
             int32_t dst_origin_x = 0;
             int32_t dst_origin_y = 0;
             uint32_t present_handle = 0;
-            gdi_bitmap_surface* dst_surface = resolve_dc_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
+            gdi_bitmap_surface* dst_surface = resolve_dc_draw_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
             if (!dst_surface || dst_surface->width == 0 || dst_surface->height == 0 || dst_surface->pixels.empty())
             {
                 return FALSE;
@@ -3895,7 +4007,8 @@ namespace sogen
             for (int dy = 0; dy < dst_h; ++dy)
             {
                 const int out_y = y_dst + dst_origin_y + (flip_y ? (dst_h - 1 - dy) : dy);
-                if (out_y < 0 || out_y >= static_cast<int>(dst_surface->height))
+                if (out_y < 0 || out_y >= static_cast<int>(dst_surface->height) || out_y < dst_surface->clip_top ||
+                    out_y >= dst_surface->clip_bottom)
                 {
                     continue;
                 }
@@ -3916,7 +4029,8 @@ namespace sogen
                 for (int dx = 0; dx < dst_w; ++dx)
                 {
                     const int out_x = x_dst + dst_origin_x + (flip_x ? (dst_w - 1 - dx) : dx);
-                    if (out_x < 0 || out_x >= static_cast<int>(dst_surface->width))
+                    if (out_x < dst_surface->clip_left || out_x >= dst_surface->clip_right || out_x < 0 ||
+                        out_x >= static_cast<int>(dst_surface->width))
                     {
                         continue;
                     }
@@ -3973,7 +4087,7 @@ namespace sogen
             int32_t dst_origin_x = 0;
             int32_t dst_origin_y = 0;
             uint32_t present_handle = 0;
-            gdi_bitmap_surface* dst_surface = resolve_dc_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
+            gdi_bitmap_surface* dst_surface = resolve_dc_draw_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
             if (!dst_surface || dst_surface->width == 0 || dst_surface->height == 0 || dst_surface->pixels.empty())
             {
                 return FALSE;
@@ -3994,7 +4108,8 @@ namespace sogen
             {
                 const int out_y = y_dst + dst_origin_y + dy;
                 const int sy = y_src + src_origin_y + static_cast<int>(static_cast<int64_t>(dy) * src_height / dst_height);
-                if (out_y < 0 || out_y >= static_cast<int>(dst_surface->height) || sy < 0 || sy >= static_cast<int>(src_surface->height))
+                if (out_y < 0 || out_y >= static_cast<int>(dst_surface->height) || out_y < dst_surface->clip_top ||
+                    out_y >= dst_surface->clip_bottom || sy < 0 || sy >= static_cast<int>(src_surface->height))
                 {
                     continue;
                 }
@@ -4003,7 +4118,7 @@ namespace sogen
                 {
                     const int out_x = x_dst + dst_origin_x + dx;
                     const int sx = x_src + src_origin_x + static_cast<int>(static_cast<int64_t>(dx) * src_width / dst_width);
-                    if (out_x < 0 || out_x >= static_cast<int>(dst_surface->width) || sx < 0 || sx >= static_cast<int>(src_surface->width))
+                    if (!dst_surface->is_writable(out_x, out_y) || sx < 0 || sx >= static_cast<int>(src_surface->width))
                     {
                         continue;
                     }
