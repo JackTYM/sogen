@@ -29,7 +29,6 @@ import time
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARTIFACTS = os.path.join(REPO_ROOT, "build", "release", "artifacts")
 EMULATION_ROOT = os.path.join(ARTIFACTS, "root")
-REGISTRY_PATH = os.path.join(EMULATION_ROOT, "registry")
 
 SEND_INPUT_SCRIPT = "wait:70000; key:enter; wait:10000; key:enter; wait:8000; key:enter"
 
@@ -39,17 +38,18 @@ FPS_LINE_RE = re.compile(
 )
 
 
-def launch(vcpus: int, env_overrides: dict[str, str]) -> subprocess.Popen:
+def launch(vcpus: int, env_overrides: dict[str, str], emulation_root: str, hvf: bool) -> subprocess.Popen:
     env = os.environ.copy()
     env["EMULATOR_FEX"] = "1"
-    env["EMULATOR_FEX_HVF"] = "1"
+    if hvf:
+        env["EMULATOR_FEX_HVF"] = "1"
     env["EMULATOR_FPS_COUNTER"] = "1"
     env.update(env_overrides)
 
     cmd = [
         "./analyzer",
-        "-e", EMULATION_ROOT,
-        "-r", REGISTRY_PATH,
+        "-e", emulation_root,
+        "-r", os.path.join(emulation_root, "registry"),
         "--vcpus", str(vcpus),
         "--click-dialog-button", "Safe Mode", "6",
         "--click-dialog-button", "Optimal Settings", "6",
@@ -61,9 +61,9 @@ def launch(vcpus: int, env_overrides: dict[str, str]) -> subprocess.Popen:
 
 
 def run_once(vcpus: int, deadline_s: float, window_s: float, buffer_s: float,
-             log_path: str) -> dict:
+             log_path: str, env_overrides: dict[str, str], emulation_root: str, hvf: bool) -> dict:
     total_runtime = deadline_s + window_s + buffer_s
-    proc = launch(vcpus, {})
+    proc = launch(vcpus, env_overrides, emulation_root, hvf)
     start = time.monotonic()
 
     sel = selectors.DefaultSelector()
@@ -154,11 +154,15 @@ def main():
     parser.add_argument("--deadline-s", type=float, default=180.0)
     parser.add_argument("--window-s", type=float, default=60.0)
     parser.add_argument("--buffer-s", type=float, default=15.0)
+    parser.add_argument("--root", default=EMULATION_ROOT)
+    parser.add_argument("--no-hvf", action="store_true")
+    parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--log-dir", default="/private/tmp/claude-501/-Users-jack-Documents-Coding-C---sogen/9696d14d-d600-4b90-a4b1-3ebb901f36cc/scratchpad/mw2_fps_logs")
     parser.add_argument("--results-json", default="/private/tmp/claude-501/-Users-jack-Documents-Coding-C---sogen/9696d14d-d600-4b90-a4b1-3ebb901f36cc/scratchpad/mw2_fps_results.json")
     args = parser.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
+    env_overrides = dict(item.split("=", 1) for item in args.env)
 
     results = []
     if os.path.exists(args.results_json):
@@ -176,7 +180,8 @@ def main():
                 log_path = os.path.join(args.log_dir, f"vcpus{vcpus}_attempt{attempt_idx}.log")
                 print(f"=== vcpus={vcpus} attempt={attempt_idx} (successes so far: {successes}/{args.repeats}) ===",
                       file=sys.stderr, flush=True)
-                run = run_once(vcpus, args.deadline_s, args.window_s, args.buffer_s, log_path)
+                run = run_once(vcpus, args.deadline_s, args.window_s, args.buffer_s, log_path,
+                               env_overrides, args.root, not args.no_hvf)
 
                 record = {
                     "vcpus": vcpus,
