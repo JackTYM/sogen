@@ -59,8 +59,34 @@ namespace sogen::syscalls
 
     namespace
     {
-        // Size in bytes of each channel command, indexed by its opcode (the first dword of the command).
-        constexpr std::array<uint32_t, 21> command_sizes{24, 16, 24, 8, 24, 24, 16, 12, 24, 16, 24, 8, 24, 16, 8, 16, 16, 20, 72, 16, 12};
+        // Layout of the commands written by dcomp.dll's CDevice::BeginKernelCommand callers, indexed by opcode (the
+        // first dword). Opcodes 11 (handle array), 12 (buffer) and 14 (reference array) carry a 16-byte header followed
+        // by a payload whose element count or byte length is the fourth dword. Opcode 0 references a single command
+        // stored out of line that is too large for the channel buffer; dcomp counts both.
+        constexpr std::array<uint32_t, 21> command_sizes{24, 16, 24, 8, 24, 24, 16, 12, 24, 16, 24, 0, 0, 16, 0, 16, 16, 20, 72, 16, 12};
+
+        constexpr uint32_t out_of_line_command = 0;
+        constexpr uint32_t handle_array_command = 11;
+        constexpr uint32_t buffer_command = 12;
+        constexpr uint32_t reference_array_command = 14;
+        constexpr uint32_t variable_command_header_size = 16;
+
+        uint32_t get_command_size(const syscall_context& c, const uint64_t command, const uint32_t opcode)
+        {
+            const auto payload_length = [&] { return c.emu.read_memory<uint32_t>(command + 12); };
+
+            switch (opcode)
+            {
+            case handle_array_command:
+                return variable_command_header_size + (payload_length() * 8);
+            case buffer_command:
+                return variable_command_header_size + ((payload_length() + 3) & ~3u);
+            case reference_array_command:
+                return variable_command_header_size + (payload_length() * 4);
+            default:
+                return command_sizes[opcode];
+            }
+        }
 
         uint32_t count_commands(const syscall_context& c, const uint64_t buffer, const uint32_t batch_size)
         {
@@ -68,14 +94,15 @@ namespace sogen::syscalls
             uint32_t offset = 0;
             while (offset < batch_size)
             {
-                const auto opcode = c.emu.read_memory<uint32_t>(buffer + offset);
+                const auto command = buffer + offset;
+                const auto opcode = c.emu.read_memory<uint32_t>(command);
                 if (opcode >= command_sizes.size())
                 {
                     return count + 1;
                 }
 
-                offset += command_sizes[opcode];
-                ++count;
+                offset += get_command_size(c, command, opcode);
+                count += opcode == out_of_line_command ? 2 : 1;
             }
 
             return count;
