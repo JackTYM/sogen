@@ -421,12 +421,17 @@ namespace sogen
         NTSTATUS handle_NtCreateKey(const syscall_context& c, const emulator_object<handle> key_handle, const ACCESS_MASK desired_access,
                                     const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                     const ULONG /*title_index*/, const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*class*/,
-                                    const ULONG /*create_options*/, const emulator_object<ULONG> /*disposition*/)
+                                    const ULONG /*create_options*/, const emulator_object<ULONG> disposition)
         {
             const auto result = handle_NtOpenKey(c, key_handle, desired_access, object_attributes);
 
             if (result != STATUS_OBJECT_NAME_NOT_FOUND)
             {
+                if (result == STATUS_SUCCESS && disposition)
+                {
+                    disposition.write(REG_OPENED_EXISTING_KEY);
+                }
+
                 return result;
             }
 
@@ -442,6 +447,11 @@ namespace sogen
             auto entry = c.win_emu.registry.create_key({*key});
             const auto handle = c.proc.registry_keys.store(std::move(entry));
             key_handle.write(handle);
+
+            if (disposition)
+            {
+                disposition.write(REG_CREATED_NEW_KEY);
+            }
 
             return STATUS_SUCCESS;
         }
@@ -478,8 +488,23 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtDeleteValueKey(const syscall_context& c, const handle key_handle,
-                                         const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*value_name*/)
+        NTSTATUS map_registry_delete_result(const registry_manager::delete_result result)
+        {
+            switch (result)
+            {
+            case registry_manager::delete_result::deleted:
+                return STATUS_SUCCESS;
+            case registry_manager::delete_result::not_found:
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            case registry_manager::delete_result::has_sub_keys:
+                return STATUS_CANNOT_DELETE;
+            case registry_manager::delete_result::read_only:
+            default:
+                return STATUS_ACCESS_DENIED;
+            }
+        }
+
+        NTSTATUS handle_NtDeleteKey(const syscall_context& c, const handle key_handle)
         {
             const auto* key = c.proc.registry_keys.get(key_handle);
             if (!key)
@@ -487,9 +512,25 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            // Deleting registry values is not supported; the backing hives are read-only and the
-            // overlay has no tombstone concept. Reject the deletion instead of silently succeeding.
-            return STATUS_ACCESS_DENIED;
+            return map_registry_delete_result(c.win_emu.registry.delete_key(*key));
+        }
+
+        NTSTATUS handle_NtDeleteValueKey(const syscall_context& c, const handle key_handle,
+                                         const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> value_name)
+        {
+            const auto* key = c.proc.registry_keys.get(key_handle);
+            if (!key)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            std::string name{};
+            if (value_name.value())
+            {
+                name = u16_to_u8(read_unicode_string(c.emu, value_name));
+            }
+
+            return map_registry_delete_result(c.win_emu.registry.delete_value(*key, name));
         }
 
         NTSTATUS handle_NtNotifyChangeKey()

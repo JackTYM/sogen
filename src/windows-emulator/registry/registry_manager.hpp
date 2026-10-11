@@ -104,6 +104,15 @@ namespace sogen
     class registry_manager
     {
       public:
+        // The hives are read-only; only keys and values created at runtime (the overlay) can be deleted.
+        enum class delete_result
+        {
+            deleted,
+            not_found,
+            read_only,
+            has_sub_keys,
+        };
+
         using hive_ptr = std::unique_ptr<hive_parser>;
         using hive_map = std::unordered_map<utils::path_key, hive_ptr>;
 
@@ -122,6 +131,8 @@ namespace sogen
         std::optional<registry_value> get_value(const registry_key& key, std::string_view name);
         std::optional<registry_value> get_value(const registry_key& key, size_t index);
         void set_value(const registry_key& key, std::string name, uint32_t type, std::span<const std::byte> data);
+        delete_result delete_key(const registry_key& key);
+        delete_result delete_value(const registry_key& key, std::string_view name);
 
         std::optional<std::string_view> get_sub_key_name(const registry_key& key, size_t index);
 

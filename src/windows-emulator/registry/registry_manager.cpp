@@ -446,6 +446,11 @@ namespace sogen
 
     utils::path_key registry_manager::get_full_key_path(const registry_key& key)
     {
+        if (key.path.get().empty())
+        {
+            return key.hive;
+        }
+
         return utils::path_key{key.hive.get() / key.path.get()};
     }
 
@@ -471,7 +476,11 @@ namespace sogen
 
         registry_key reg_key{};
         reg_key.hive = iterator->first.get();
-        reg_key.path = normal_key.get().lexically_relative(reg_key.hive.get());
+        const auto relative_path = normal_key.get().lexically_relative(reg_key.hive.get());
+        if (relative_path != ".")
+        {
+            reg_key.path = relative_path;
+        }
 
         if (reg_key.path.get().empty())
         {
@@ -559,6 +568,42 @@ namespace sogen
         auto& value = bucket.values[std::move(name)];
         value.type = type;
         value.data.assign(data.begin(), data.end());
+    }
+
+    registry_manager::delete_result registry_manager::delete_key(const registry_key& key)
+    {
+        const auto full_path = registry_manager::get_full_key_path(key);
+        if (!this->overlay_keys_.contains(full_path))
+        {
+            return delete_result::read_only;
+        }
+
+        const auto has_sub_keys = std::ranges::any_of(
+            this->overlay_keys_, [&](const utils::path_key& other) { return other != full_path && is_subpath(full_path, other); });
+        if (has_sub_keys)
+        {
+            return delete_result::has_sub_keys;
+        }
+
+        this->overlay_keys_.erase(full_path);
+        this->overlay_values_.erase(full_path);
+        return delete_result::deleted;
+    }
+
+    registry_manager::delete_result registry_manager::delete_value(const registry_key& key, const std::string_view name)
+    {
+        if (const auto hive = this->hives_.find(key.hive); hive != this->hives_.end() && hive->second->get_value(key.path.get(), name))
+        {
+            return delete_result::read_only;
+        }
+
+        const auto bucket = this->overlay_values_.find(registry_manager::get_full_key_path(key));
+        if (bucket == this->overlay_values_.end() || bucket->second.values.erase(std::string{name}) == 0)
+        {
+            return delete_result::not_found;
+        }
+
+        return delete_result::deleted;
     }
 
     registry_key registry_manager::create_key(const utils::path_key& key)

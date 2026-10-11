@@ -2,6 +2,11 @@
 
 // NOLINTBEGIN(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)
 
+#ifndef OS_WINDOWS
+#define REG_CREATED_NEW_KEY     0x00000001L
+#define REG_OPENED_EXISTING_KEY 0x00000002L
+#endif
+
 namespace sogen
 {
 
