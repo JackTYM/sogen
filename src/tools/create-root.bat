@@ -28,6 +28,8 @@ MKDIR %EMU_REGDIR%
 MKDIR %EMU_STEAMDIR%
 MKDIR %EMU_GLOBALIZATION_SORTING%
 MKDIR "%EMU_WEBVIEW2DIR%"
+MKDIR "%EMU_FILESYS%\c\program files\common files"
+MKDIR "%EMU_FILESYS%\c\program files (x86)\common files"
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
 
