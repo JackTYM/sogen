@@ -869,7 +869,7 @@ land in the WRONG place. **All 768 cell centers** (not a sample) are read back a
 own analytically-derived colors -- upgraded from an earlier 8-cell sample specifically because an
 arena/descriptor-overlap bug corrupts a CONTIGUOUS run of draws, which a sparse sample could miss
 entirely; all 768 read back byte-exact on both x64 and x86/WoW64. The host also logs
-`[d3d9-host] frame: draws=768 submits=10` (twice, once per host lock DDI call the one guest `LockRect`
+`[d3d9-host] frame: draws=768 submits=10` (with `EMULATOR_D3D9_FRAME_STATS` set; twice, once per host lock DDI call the one guest `LockRect`
 drives -- see `gpu_bridge.cpp`'s `handle_d3d9_lock` comment) -- the direct proof that batching is real,
 not just correct: 768 draws collapsed into 10 actual Vulkan submissions. The draw loop is bracketed by
 `QueryPerformanceCounter` and prints its wall-clock time; pre-batching (fully synchronous, one

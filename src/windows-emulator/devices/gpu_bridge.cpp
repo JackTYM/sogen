@@ -3273,8 +3273,13 @@ namespace sogen
             // multi-frame app's per-frame counts are the delta between consecutive lines.
             void log_d3d9_frame_stats(windows_emulator& win_emu)
             {
-                win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n", static_cast<unsigned long long>(this->d3d9_.draw_count()),
-                                 static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+                static const bool frame_stats_enabled = getenv("EMULATOR_D3D9_FRAME_STATS") != nullptr;
+                if (frame_stats_enabled)
+                {
+                    win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n",
+                                     static_cast<unsigned long long>(this->d3d9_.draw_count()),
+                                     static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+                }
 
                 // Same process-lifetime, delta-between-lines convention as the counts above. This breaks
                 // the single draws= number into what each draw actually did -- dropped before recording

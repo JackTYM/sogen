@@ -231,7 +231,7 @@ scene, each filling a distinct, index-derived-color cell) was upgraded from an 8
 **all 768 cell centers** — specifically because an arena/descriptor-overlap bug corrupts a CONTIGUOUS
 run of draws, which a sparse sample could miss entirely. All 768 read back byte-exact on both x64 and
 x86/WoW64 (zero source changes needed for the x86 port — this is a host-side-only change). The host
-additionally logs `[d3d9-host] frame: draws=768 submits=10` — direct, quantitative proof that batching is
+additionally logs (with `EMULATOR_D3D9_FRAME_STATS` set) `[d3d9-host] frame: draws=768 submits=10` — direct, quantitative proof that batching is
 real: 768 draws collapsed into 10 actual Vulkan submissions, not merely inferred from timing. Wall-clock
 for the 768-draw loop dropped from ~288 ms (pre-batching, one submit+wait per draw) to ~150 ms
 (post-batching) — a real, repeatable ~2x reduction, with identical pixel output before and after. Full
