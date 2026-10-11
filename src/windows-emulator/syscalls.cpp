@@ -660,6 +660,8 @@ namespace sogen
         hwnd handle_NtUserSetParent(const syscall_context& c, hwnd hwnd_child, hwnd hwnd_new_parent);
         BOOL handle_NtUserSetWindowPos(const syscall_context& c, hwnd hWnd, hwnd hwnd_insert_after, int x, int y, int cx, int cy,
                                        UINT flags);
+        BOOL completion_NtUserSetWindowPos(const syscall_context& c, hwnd hWnd, hwnd hwnd_insert_after, int x, int y, int cx, int cy,
+                                           UINT flags);
         emulator_pointer handle_NtUserBeginDeferWindowPos(const syscall_context& c, int num_windows);
         emulator_pointer handle_NtUserDeferWindowPos(const syscall_context& c, emulator_pointer hdwp, hwnd hWnd, hwnd hwnd_insert_after,
                                                      int x, int y, int cx, int cy, UINT flags);
@@ -2125,6 +2127,7 @@ namespace sogen
         add_callback(NtUserMessageCall, message_call_state);
         add_callback(NtUserUpdateWindow, window_update_state);
         add_stateless_callback(NtUserEnumDisplayMonitors);
+        add_callback(NtUserSetWindowPos, window_show_state);
 
 #undef add_callback
 #undef add_stateless_callback

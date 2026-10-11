@@ -292,6 +292,8 @@ namespace sogen
         bool host_surface_window{};
         bool message_only{};
         bool unicode_proc{};
+        // Guest WINDOWPOS buffer behind WM_WINDOWPOSCHANGED messages posted for repositioning by another process.
+        emulator_pointer foreign_window_pos{};
 
         window(memory_interface& memory)
             : user_object(memory)
@@ -349,6 +351,7 @@ namespace sogen
             buffer.write(this->host_surface_window);
             buffer.write(this->message_only);
             buffer.write(this->unicode_proc);
+            buffer.write(this->foreign_window_pos);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -376,6 +379,7 @@ namespace sogen
             buffer.read(this->host_surface_window);
             buffer.read(this->message_only);
             buffer.read(this->unicode_proc);
+            buffer.read(this->foreign_window_pos);
         }
     };
 

@@ -5024,8 +5024,85 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd /*hwnd_insert_after*/, const int x,
-                                       const int y, const int cx, const int cy, const UINT flags)
+        namespace
+        {
+            // SetWindowPos from another thread or process cannot run the window procedure synchronously the way a
+            // same-thread call does, so the owning thread learns about the change from a queued WM_WINDOWPOSCHANGED.
+            void post_window_pos_changed(windows_emulator& target, window& win, const uint32_t flags)
+            {
+                auto* thread = target.process.find_thread_by_id(win.thread_id);
+                if (!thread)
+                {
+                    return;
+                }
+
+                if (win.foreign_window_pos == 0)
+                {
+                    win.foreign_window_pos = target.memory.allocate_memory(static_cast<size_t>(page_align_up(sizeof(EMU_WINDOWPOS))),
+                                                                           memory_permission::read_write);
+                    if (win.foreign_window_pos == 0)
+                    {
+                        return;
+                    }
+                }
+
+                const EMU_WINDOWPOS position{
+                    .hwnd = win.handle,
+                    .hwndInsertAfter = 0,
+                    .x = win.x,
+                    .y = win.y,
+                    .cx = win.width,
+                    .cy = win.height,
+                    .flags = flags,
+                };
+                target.memory.write_memory(win.foreign_window_pos, &position, sizeof(position));
+
+                thread->post_message(target, msg{.window = win.handle,
+                                                 .message = WM_WINDOWPOSCHANGED,
+                                                 .wParam = 0,
+                                                 .lParam = static_cast<lparam>(win.foreign_window_pos)});
+            }
+
+            void apply_window_pos(const syscall_context& c, window& win, const int x, const int y, const int cx, const int cy,
+                                  const UINT flags)
+            {
+                const auto new_x = (flags & SWP_NOMOVE) ? win.x : x;
+                const auto new_y = (flags & SWP_NOMOVE) ? win.y : y;
+                const auto new_width = (flags & SWP_NOSIZE) ? win.width : cx;
+                const auto new_height = (flags & SWP_NOSIZE) ? win.height : cy;
+                const auto repaint = (flags & SWP_NOREDRAW) == 0;
+
+                update_window_geometry(c, win, new_x, new_y, new_width, new_height, repaint);
+            }
+
+            void apply_window_pos_visibility(const syscall_context& c, window& win, const UINT flags)
+            {
+                if ((flags & SWP_HIDEWINDOW) != 0)
+                {
+                    win.style &= ~WS_VISIBLE;
+                    win.guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win.style; });
+                    if (win.host_surface_window)
+                    {
+                        c.win_emu.ui().set_window_visible(win.handle, false);
+                    }
+                }
+                else if ((flags & SWP_SHOWWINDOW) != 0)
+                {
+                    win.style |= WS_VISIBLE;
+                    win.guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win.style; });
+                    if (win.host_surface_window)
+                    {
+                        c.win_emu.ui().set_window_visible(win.handle, true);
+                    }
+                    // Repaint the now-visible window and its child controls (see invalidate_window_tree).
+                    invalidate_window_tree(c, win);
+                }
+            }
+
+        }
+
+        BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd hwnd_insert_after, const int x, const int y,
+                                       const int cx, const int cy, const UINT flags)
         {
             auto* win = c.proc.windows.get(hWnd);
             if (!win)
@@ -5045,12 +5122,6 @@ namespace sogen
                 return FALSE;
             }
 
-            const auto new_x = (flags & SWP_NOMOVE) ? win->x : x;
-            const auto new_y = (flags & SWP_NOMOVE) ? win->y : y;
-            const auto new_width = (flags & SWP_NOSIZE) ? win->width : cx;
-            const auto new_height = (flags & SWP_NOSIZE) ? win->height : cy;
-            const auto repaint = (flags & SWP_NOREDRAW) == 0;
-
             if (window_trace_enabled())
             {
                 c.win_emu.log.error("[window-trace] SetWindowPos hwnd=0x%llx class='%s' flags=0x%x host_surface=%d tid=%u\n",
@@ -5058,27 +5129,84 @@ namespace sogen
                                     win->host_surface_window, c.thread().id);
             }
 
-            update_window_geometry(c, *win, new_x, new_y, new_width, new_height, repaint);
+            const bool moves = (flags & SWP_NOMOVE) == 0 && (x != win->x || y != win->y);
+            const bool resizes = (flags & SWP_NOSIZE) == 0 && (cx != win->width || cy != win->height);
 
-            if ((flags & SWP_HIDEWINDOW) != 0)
+            if ((!moves && !resizes) || win->thread_id != c.vcpu.active_thread->id)
             {
-                win->style &= ~WS_VISIBLE;
-                win->guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win->style; });
-                if (win->host_surface_window)
+                apply_window_pos(c, *win, x, y, cx, cy, flags);
+                apply_window_pos_visibility(c, *win, flags);
+                if (moves || resizes)
                 {
-                    c.win_emu.ui().set_window_visible(hWnd, false);
+                    post_window_pos_changed(c.win_emu, *win, flags);
                 }
+                return TRUE;
             }
-            else if ((flags & SWP_SHOWWINDOW) != 0)
+
+            apply_window_pos_visibility(c, *win, flags);
+
+            // Like real SetWindowPos, the window procedure sees WM_WINDOWPOSCHANGING (and may adjust the position)
+            // before the change and WM_WINDOWPOSCHANGED plus WM_MOVE/WM_SIZE after it. Windows that size their
+            // content from these (e.g. Chromium's HWNDMessageHandler) never learn their size otherwise.
+            window_show_state state{};
+            const EMU_WINDOWPOS changing_position{
+                .hwnd = hWnd,
+                .hwndInsertAfter = hwnd_insert_after,
+                .x = x,
+                .y = y,
+                .cx = cx,
+                .cy = cy,
+                .flags = flags,
+            };
+            state.window_pos_alloc = c.emu.push_stack(changing_position);
+            state.changed_window_pos_alloc = c.emu.push_stack(changing_position);
+
+            if (resizes)
             {
-                win->style |= WS_VISIBLE;
-                win->guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win->style; });
-                if (win->host_surface_window)
-                {
-                    c.win_emu.ui().set_window_visible(hWnd, true);
-                }
-                // Repaint the now-visible window and its child controls (see invalidate_window_tree).
-                invalidate_window_tree(c, *win);
+                state.message_queue.push_back({.message = WM_SIZE, .wParam = 0, .lParam = 0});
+            }
+            if (moves)
+            {
+                state.message_queue.push_back({.message = WM_MOVE, .wParam = 0, .lParam = 0});
+            }
+            state.message_queue.push_back({.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0});
+            state.message_queue.push_back({.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()});
+            state.pending_window_pos_address = state.window_pos_alloc.address();
+
+            dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(state), *win, state.message_queue);
+            return {};
+        }
+
+        BOOL completion_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd /*hwnd_insert_after*/, const int /*x*/,
+                                           const int /*y*/, const int /*cx*/, const int /*cy*/, const UINT flags)
+        {
+            auto& s = c.get_completion_state<window_show_state>();
+            auto* win = c.proc.windows.get(hWnd);
+            if (!win)
+            {
+                c.emu.pop_stack(s.changed_window_pos_alloc);
+                c.emu.pop_stack(s.window_pos_alloc);
+                return FALSE;
+            }
+
+            if (s.pending_window_pos_address != 0)
+            {
+                complete_window_position_change(c, *win, s.pending_window_pos_address, s.changed_window_pos_alloc, s.message_queue, true);
+                s.pending_window_pos_address = 0;
+            }
+
+            if (!s.message_queue.empty())
+            {
+                dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(s), *win, s.message_queue);
+                return {};
+            }
+
+            c.emu.pop_stack(s.changed_window_pos_alloc);
+            c.emu.pop_stack(s.window_pos_alloc);
+
+            if ((flags & SWP_NOREDRAW) == 0)
+            {
+                invalidate_window(c, *win, std::nullopt, false);
             }
 
             return TRUE;
@@ -5096,11 +5224,16 @@ namespace sogen
                                                      const hwnd hwnd_insert_after, const int x, const int y, const int cx, const int cy,
                                                      const UINT flags)
         {
-            if (!handle_NtUserSetWindowPos(c, hWnd, hwnd_insert_after, x, y, cx, cy, flags))
+            (void)hwnd_insert_after;
+            auto* win = c.proc.windows.get(hWnd);
+            if (!win)
             {
+                set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
                 return 0;
             }
 
+            apply_window_pos(c, *win, x, y, cx, cy, flags);
+            apply_window_pos_visibility(c, *win, flags);
             return hdwp;
         }
 
@@ -7145,6 +7278,11 @@ namespace sogen
                 {
                     target.ui().set_window_rect(win->handle, get_window_rect(*win));
                     target.ui().set_window_visible(win->handle, (win->style & WS_VISIBLE) != 0);
+                }
+
+                if ((position.flags & (SWP_NOMOVE | SWP_NOSIZE)) != (SWP_NOMOVE | SWP_NOSIZE))
+                {
+                    post_window_pos_changed(target, *win, position.flags);
                 }
 
                 response.status = STATUS_SUCCESS;
