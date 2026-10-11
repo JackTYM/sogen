@@ -115,6 +115,13 @@ namespace sogen
 
                 if (x >= child.x && x < child.x + child.width && y >= child.y && y < child.y + child.height)
                 {
+                    // comctl32's tab control answers WM_NCHITTEST with HTTRANSPARENT outside its tab items, and
+                    // Notepad++ sizes it over the whole editor area, so a sibling under the point always wins.
+                    if (result && child.class_name == u"SysTabControl32")
+                    {
+                        continue;
+                    }
+
                     const auto child_x = x - child.x;
                     const auto child_y = y - child.y;
                     if (auto descendant = find_child_window_at(process, child.handle, child_x, child_y))
@@ -2364,7 +2371,7 @@ namespace sogen
     void windows_emulator::deliver_key_down(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool was_down,
                                             const bool alt_context)
     {
-        const auto target = this->process.resolve_foreground_window();
+        const auto target = this->process.resolve_focus_window();
         auto* win = this->process.windows.get(target);
         if (!win)
         {
@@ -2389,7 +2396,7 @@ namespace sogen
 
     void windows_emulator::deliver_key_up(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool alt_context)
     {
-        const auto target = this->process.resolve_foreground_window();
+        const auto target = this->process.resolve_focus_window();
         auto* win = this->process.windows.get(target);
         if (!win)
         {
@@ -2414,7 +2421,7 @@ namespace sogen
 
     void windows_emulator::deliver_char(const uint16_t utf16_char)
     {
-        const auto target = this->process.resolve_foreground_window();
+        const auto target = this->process.resolve_focus_window();
         auto* win = this->process.windows.get(target);
         if (!win)
         {

@@ -5111,11 +5111,13 @@ namespace sogen
 
         hwnd handle_NtUserSetFocus(const syscall_context& c, const hwnd hwnd)
         {
+            const auto previous = c.proc.focus_window;
+            c.proc.focus_window = hwnd;
             if (hwnd != 0)
             {
                 set_thread_window_context(c, hwnd);
             }
-            return hwnd;
+            return previous;
         }
 
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
@@ -7000,7 +7002,10 @@ namespace sogen
             {
                 return FALSE;
             }
-            info = {.cbSize = sizeof(info), .hwndActive = active, .hwndFocus = active, .hwndCapture = capture};
+            info = {.cbSize = sizeof(info),
+                    .hwndActive = active,
+                    .hwndFocus = active != 0 ? c.proc.resolve_focus_window() : 0,
+                    .hwndCapture = capture};
             c.emu.write_memory(info_address, info);
 
             return TRUE;

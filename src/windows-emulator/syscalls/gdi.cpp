@@ -1078,6 +1078,51 @@ namespace sogen
                 }
             }
 
+            struct text_origin_offset
+            {
+                int x{};
+                int y{};
+            };
+
+            text_origin_offset text_alignment_origin(const FLONG text_align, const UINT count, const uint32_t* dx)
+            {
+                constexpr FLONG ta_right = 0x02;
+                constexpr FLONG ta_center = 0x06;
+                constexpr FLONG ta_bottom = 0x08;
+                constexpr FLONG ta_baseline = 0x18;
+
+                text_origin_offset offset{};
+                if ((text_align & ta_baseline) == ta_baseline)
+                {
+                    offset.y = static_cast<int>(k_default_font_ascent);
+                }
+                else if ((text_align & ta_baseline) == ta_bottom)
+                {
+                    offset.y = static_cast<int>(k_default_font_height);
+                }
+
+                int width = static_cast<int>(count * k_default_font_width);
+                if (dx != nullptr)
+                {
+                    width = 0;
+                    for (UINT i = 0; i < count; ++i)
+                    {
+                        width += static_cast<int>(dx[i]);
+                    }
+                }
+
+                if ((text_align & ta_center) == ta_center)
+                {
+                    offset.x = width / 2;
+                }
+                else if ((text_align & ta_center) == ta_right)
+                {
+                    offset.x = width;
+                }
+
+                return offset;
+            }
+
             template <typename Batch>
             bool flush_gdi_text_batch(const syscall_context& c, const Batch& batch)
             {
@@ -1135,11 +1180,12 @@ namespace sogen
                             const auto* dx = reinterpret_cast<const uint32_t*>(text_out->string.data());
                             const auto* text =
                                 reinterpret_cast<const char16_t*>(text_out->string.data() + text_out->dx_size / sizeof(char16_t));
-                            draw_text(*surface, text_out->x + text_out->viewport_org.x + origin_x,
-                                      text_out->y + text_out->viewport_org.y + origin_y, std::u16string_view(text, text_out->count),
-                                      colorref_to_bgra(text_out->foreground),
-                                      has_rect && (text_out->options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr,
-                                      text_out->dx_size >= text_out->count * sizeof(uint32_t) ? dx : nullptr);
+                            const auto* advances = text_out->dx_size >= text_out->count * sizeof(uint32_t) ? dx : nullptr;
+                            const auto alignment_origin = text_alignment_origin(text_out->text_align, text_out->count, advances);
+                            draw_text(*surface, text_out->x + text_out->viewport_org.x + origin_x - alignment_origin.x,
+                                      text_out->y + text_out->viewport_org.y + origin_y - alignment_origin.y,
+                                      std::u16string_view(text, text_out->count), colorref_to_bgra(text_out->foreground),
+                                      has_rect && (text_out->options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr, advances);
                         }
                     }
                     else if (header->cmd == k_gdi_batch_cmd_poly_pat_blt &&
@@ -3034,12 +3080,29 @@ namespace sogen
         }
 
         BOOL handle_NtGdiGetTextExtentExW(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const ULONG char_count,
-                                          const ULONG /*max_extent*/, const emulator_pointer /*fit_count*/,
-                                          const emulator_pointer /*partial_extents*/, const emulator_pointer size, const ULONG /*flags*/)
+                                          const ULONG max_extent, const emulator_pointer fit_count, const emulator_pointer partial_extents,
+                                          const emulator_pointer size, const ULONG /*flags*/)
         {
             if (dc == 0 || size == 0)
             {
                 return FALSE;
+            }
+
+            uint32_t fitting_chars = char_count;
+            if (fit_count != 0)
+            {
+                fitting_chars = std::min<uint32_t>(char_count, max_extent / k_default_font_width);
+                c.emu.write_memory(fit_count, &fitting_chars, sizeof(fitting_chars));
+            }
+
+            if (partial_extents != 0)
+            {
+                std::vector<int32_t> extents(fitting_chars);
+                for (uint32_t i = 0; i < fitting_chars; ++i)
+                {
+                    extents[i] = static_cast<int32_t>((i + 1) * k_default_font_width);
+                }
+                c.emu.write_memory(partial_extents, extents.data(), extents.size() * sizeof(int32_t));
             }
 
             const SIZE text_size{

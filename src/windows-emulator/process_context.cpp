@@ -955,6 +955,7 @@ namespace sogen
         buffer.write_vector(this->etw_notification_events);
         buffer.write(this->mouse_capture_window);
         buffer.write(this->foreground_window);
+        buffer.write(this->focus_window);
         buffer.write(this->cursor_x);
         buffer.write(this->cursor_y);
         buffer.write(this->current_cursor);
@@ -1054,6 +1055,7 @@ namespace sogen
         buffer.read_vector(this->etw_notification_events);
         buffer.read(this->mouse_capture_window);
         buffer.read(this->foreground_window);
+        buffer.read(this->focus_window);
         buffer.read(this->cursor_x);
         buffer.read(this->cursor_y);
         buffer.read(this->current_cursor);
@@ -1223,6 +1225,16 @@ namespace sogen
         }
 
         return current == nullptr;
+    }
+
+    hwnd process_context::resolve_focus_window() const
+    {
+        if (this->focus_window != 0 && this->windows.get(this->focus_window) != nullptr)
+        {
+            return this->focus_window;
+        }
+
+        return this->resolve_foreground_window();
     }
 
     hwnd process_context::resolve_foreground_window() const

@@ -464,6 +464,7 @@ namespace sogen
         const emulator_thread* find_thread_by_id(uint32_t thread_id) const;
         bool is_window_effectively_visible(hwnd window) const;
         hwnd resolve_foreground_window() const;
+        hwnd resolve_focus_window() const;
         bool is_current_process_handle(handle handle) const;
         bool is_current_thread_handle(handle handle, const emulator_thread* active_thread) const;
         bool is_object_pseudo_handle(handle handle) const;
@@ -536,6 +537,7 @@ namespace sogen
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
         // and GetCursorPos to drive menu cursors and gate their input loop on the window being active.
         hwnd foreground_window{};
+        hwnd focus_window{};
         // Windows centers the pointer on the primary display when the session starts; it never sits at a
         // fabricated (0, 0). Games that drive their menu pointer from mouse deltas obtained by polling
         // GetCursorPos measure against the position read on their very first frame, so a cursor left at the
