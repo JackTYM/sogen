@@ -742,6 +742,9 @@ namespace sogen
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
         // and GetCursorPos to drive menu cursors and gate their input loop on the window being active.
         hwnd foreground_window{};
+        // Keyboard focus of the input queue. A cross-process child window (e.g. an embedded browser) shares
+        // the queue of the window it is attached to, so this can be a window owned by another process.
+        hwnd focus_window{};
         int32_t cursor_x{};
         int32_t cursor_y{};
         hcursor current_cursor{};

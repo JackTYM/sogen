@@ -27,6 +27,7 @@ namespace sogen
 
     struct io_device;
     struct pointer_input_request;
+    struct keyboard_input_request;
     class windows_emulator;
     struct application_settings;
 
@@ -415,21 +416,34 @@ namespace sogen
         // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
         std::set<uint32_t> known_sibling_pids_{};
 
-        // Test tooling (SOGEN_INJECT_INPUT): left clicks delivered in order through the same path as host UI
-        // input, each a given time after the newest visible window of its class appeared (or the previous
-        // click, whichever is later).
-        struct scheduled_click
+        // Test tooling (SOGEN_INJECT_INPUT): left clicks, keys and typed text delivered in order through the same
+        // path as host UI input, each a given time after the newest visible window of its class appeared (or the
+        // previous step, whichever is later).
+        struct scheduled_input
         {
+            enum class kind : uint8_t
+            {
+                click,
+                key,
+                text,
+            };
+
+            kind type{};
             std::u16string window_class{};
             std::chrono::milliseconds delay{};
             int32_t x{};
             int32_t y{};
+            uint16_t virtual_key{};
+            std::u16string text{};
             std::optional<std::chrono::steady_clock::time_point> window_seen{};
             hwnd seen_window{};
             bool delivered{};
         };
 
-        std::vector<scheduled_click> scheduled_clicks_{};
+        std::vector<scheduled_input> scheduled_inputs_{};
+
+        void parse_scheduled_input(std::string_view specification);
+        void deliver_key_stroke(hwnd window, uint16_t virtual_key, bool shift);
 
         void deliver_ui_event(const ui_event& event);
         bool forward_pointer_input_to_foreign_children(hwnd parent, uint32_t message, uint64_t w_param, int32_t x, int32_t y);
@@ -532,6 +546,10 @@ namespace sogen
         void broadcast_process_alive(uint32_t pid);
         bool is_known_sibling_pid(uint32_t pid) const;
 
+        // Announces that `window`, whose hierarchy is attached to `parent_window` of another process, took
+        // keyboard focus, so that process's input queue routes keyboard input to it (see pump_pipe_ipc).
+        void broadcast_focus_change(hwnd window, hwnd parent_window);
+
         // Applies whatever named-pipe traffic has arrived from registered peers since the last call.
         // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
         // own work() pump.
@@ -607,6 +625,9 @@ namespace sogen
 
         void handle_ui_event(const ui_event& event);
         bool deliver_pointer_input_from_parent(hwnd window, const pointer_input_request& input);
+        void deliver_keyboard_input_from_parent(hwnd window, const keyboard_input_request& input);
+        void take_focus_from_parent(hwnd window, hwnd previous_focus);
+        void release_focus_to_parent(hwnd window, hwnd new_focus);
         void inject_scheduled_input();
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);
         void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);

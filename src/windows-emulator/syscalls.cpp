@@ -675,6 +675,7 @@ namespace sogen
         BOOL handle_NtUserSetForegroundWindow(const syscall_context& c, hwnd hWnd);
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
+        hwnd completion_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
         emulator_pointer handle_NtUserSetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
                                                        BOOL Ansi);
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
@@ -2136,6 +2137,7 @@ namespace sogen
         add_stateless_callback(NtUserEnumDisplayMonitors);
         add_callback(NtUserSetWindowPos, window_show_state);
         add_callback(NtUserMoveWindow, window_show_state);
+        add_callback(NtUserSetFocus, focus_change_state);
 
 #undef add_callback
 #undef add_stateless_callback

@@ -21,6 +21,7 @@
 #include "address_utils.hpp"
 #include "worker_factory_support.hpp"
 #include "window_control.hpp"
+#include "keyboard_layout.hpp"
 
 namespace sogen
 {
@@ -1054,24 +1055,9 @@ namespace sogen
 
         this->ui_backend_->set_event_sink([this](const ui_event& event) { this->handle_ui_event(event); });
 
-        // SOGEN_INJECT_INPUT=<window class>@<seconds>:<x>,<y>[;...]
         if (const auto* inject_input = std::getenv("SOGEN_INJECT_INPUT"))
         {
-            std::istringstream entries{inject_input};
-            for (std::string entry; std::getline(entries, entry, ';');)
-            {
-                scheduled_click click{};
-                std::array<char, 256> window_class{};
-                double seconds{};
-                if (std::sscanf(entry.c_str(), "%255[^@]@%lf:%d,%d", window_class.data(), &seconds, &click.x, &click.y) != 4)
-                {
-                    throw std::invalid_argument("Invalid SOGEN_INJECT_INPUT entry: " + entry);
-                }
-
-                click.window_class = u8_to_u16(window_class.data());
-                click.delay = std::chrono::milliseconds(static_cast<int64_t>(seconds * 1000.0));
-                this->scheduled_clicks_.push_back(std::move(click));
-            }
+            this->parse_scheduled_input(inject_input);
         }
 
 #ifndef OS_WINDOWS
@@ -1289,6 +1275,19 @@ namespace sogen
         }
     }
 
+    void windows_emulator::broadcast_focus_change(const hwnd window, const hwnd parent_window)
+    {
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::focus_changed;
+        message.window = window;
+        message.parent_window = parent_window;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
     bool windows_emulator::is_known_sibling_pid(const uint32_t pid) const
     {
         return this->known_sibling_pids_.contains(pid);
@@ -1324,6 +1323,18 @@ namespace sogen
                 else if (message->type == pipe_ipc_message_type::process_alive && message->client_process_id)
                 {
                     this->known_sibling_pids_.insert(*message->client_process_id);
+                }
+                else if (message->type == pipe_ipc_message_type::focus_changed && this->process.windows.get(message->parent_window))
+                {
+                    const auto previous = this->process.focus_window;
+                    this->process.focus_window = message->window;
+
+                    const auto* previous_window = this->process.windows.get(previous);
+                    if (auto* thread = previous_window ? get_thread_by_id(this->process, previous_window->thread_id) : nullptr)
+                    {
+                        thread->post_message(*this,
+                                             msg{.window = previous, .message = WM_KILLFOCUS, .wParam = message->window, .lParam = 0});
+                    }
                 }
 
                 // pipe_ipc_peers_ mirrors the process spawn tree (one entry for this process's own
@@ -2764,11 +2775,126 @@ namespace sogen
         return true;
     }
 
+    // SOGEN_INJECT_INPUT=<window class>@<seconds>:<action>[;...] where <action> is <x>,<y> (left click),
+    // key=<name> (Tab, Enter, Escape, Backspace, Space or a single character) or text=<characters>.
+    // text-file types the content of the file named by SOGEN_INJECT_TEXT_FILE, keeping it off command lines.
+    void windows_emulator::parse_scheduled_input(const std::string_view specification)
+    {
+        static const std::map<std::string, uint16_t, std::less<>> named_keys{
+            {"Backspace", keyboard_layout::vk_back}, {"Enter", keyboard_layout::vk_return}, {"Escape", keyboard_layout::vk_escape},
+            {"Space", keyboard_layout::vk_space},    {"Tab", keyboard_layout::vk_tab},
+        };
+
+        for (size_t start = 0; start <= specification.size();)
+        {
+            const auto end = std::min(specification.find(';', start), specification.size());
+            const auto entry = specification.substr(start, end - start);
+            start = end + 1;
+            if (entry.empty())
+            {
+                continue;
+            }
+
+            const auto fail = [&] { throw std::invalid_argument("Invalid SOGEN_INJECT_INPUT entry: " + std::string(entry)); };
+
+            const auto at = entry.find('@');
+            const auto colon = entry.find(':', at);
+            if (at == std::string_view::npos || colon == std::string_view::npos)
+            {
+                fail();
+            }
+
+            scheduled_input input{};
+            input.window_class = u8_to_u16(std::string(entry.substr(0, at)));
+            input.delay =
+                std::chrono::milliseconds(static_cast<int64_t>(std::stod(std::string(entry.substr(at + 1, colon - at - 1))) * 1000.0));
+
+            const auto action = entry.substr(colon + 1);
+            if (action.starts_with("key="))
+            {
+                const auto name = action.substr(4);
+                input.type = scheduled_input::kind::key;
+                if (const auto named = named_keys.find(name); named != named_keys.end())
+                {
+                    input.virtual_key = named->second;
+                }
+                else if (const auto stroke =
+                             name.size() == 1 ? keyboard_layout::key_stroke_for_character(static_cast<char16_t>(name[0])) : std::nullopt)
+                {
+                    input.virtual_key = stroke->vk;
+                }
+                else
+                {
+                    fail();
+                }
+            }
+            else if (action.starts_with("text="))
+            {
+                input.type = scheduled_input::kind::text;
+                input.text = u8_to_u16(std::string(action.substr(5)));
+            }
+            else if (action == "text-file")
+            {
+                const auto* path = std::getenv("SOGEN_INJECT_TEXT_FILE");
+                if (!path)
+                {
+                    throw std::invalid_argument("SOGEN_INJECT_INPUT text-file needs SOGEN_INJECT_TEXT_FILE");
+                }
+
+                std::vector<std::byte> content{};
+                if (!utils::io::read_file(path, &content))
+                {
+                    throw std::invalid_argument("SOGEN_INJECT_TEXT_FILE can not be read");
+                }
+
+                input.type = scheduled_input::kind::text;
+                input.text = u8_to_u16(std::string(reinterpret_cast<const char*>(content.data()), content.size()));
+                std::erase_if(input.text, [](const char16_t c) { return c == u'\r' || c == u'\n'; });
+            }
+            else if (std::sscanf(std::string(action).c_str(), "%d,%d", &input.x, &input.y) == 2)
+            {
+                input.type = scheduled_input::kind::click;
+            }
+            else
+            {
+                fail();
+            }
+
+            this->scheduled_inputs_.push_back(std::move(input));
+        }
+    }
+
+    void windows_emulator::deliver_key_stroke(const hwnd window, const uint16_t virtual_key, const bool shift)
+    {
+        const auto key_event = [&](const uint32_t message, const uint16_t vk) {
+            uint64_t l_param = 1 | (static_cast<uint64_t>(keyboard_layout::scan_code_for_virtual_key(vk)) << 16);
+            if (message == WM_KEYUP)
+            {
+                l_param |= (1ull << 30) | (1ull << 31);
+            }
+
+            this->deliver_ui_event(ui_event{.window = window, .message = message, .wParam = vk, .lParam = l_param});
+        };
+
+        if (shift)
+        {
+            key_event(WM_KEYDOWN, keyboard_layout::vk_shift);
+        }
+
+        key_event(WM_KEYDOWN, virtual_key);
+        key_event(WM_KEYUP, virtual_key);
+
+        if (shift)
+        {
+            key_event(WM_KEYUP, keyboard_layout::vk_shift);
+        }
+    }
+
     void windows_emulator::inject_scheduled_input()
     {
-        for (auto& click : this->scheduled_clicks_)
+        for (auto& input : this->scheduled_inputs_)
         {
-            if (click.delivered)
+            if (input.delivered)
             {
                 continue;
             }
@@ -2777,7 +2903,7 @@ namespace sogen
             for (const auto& win : this->process.windows | std::views::values)
             {
                 if ((win.style & WS_VISIBLE) != 0 &&
-                    (win.class_name == click.window_class || normalize_builtin_window_class_name(win.class_name) == click.window_class))
+                    (win.class_name == input.window_class || normalize_builtin_window_class_name(win.class_name) == input.window_class))
                 {
                     target = &win;
                 }
@@ -2789,32 +2915,133 @@ namespace sogen
             }
 
             const auto now = std::chrono::steady_clock::now();
-            if (!click.window_seen || click.seen_window != target->handle)
+            if (!input.window_seen || input.seen_window != target->handle)
             {
-                click.window_seen = now;
-                click.seen_window = target->handle;
+                input.window_seen = now;
+                input.seen_window = target->handle;
             }
 
-            if (now - *click.window_seen < click.delay)
+            if (now - *input.window_seen < input.delay)
             {
                 return;
             }
 
-            click.delivered = true;
+            input.delivered = true;
             const auto window = target->handle;
-            const auto point = pack_point(click.x, click.y);
-            this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s)\n", click.x, click.y,
-                           static_cast<unsigned long long>(window), u16_to_u8(click.window_class).c_str());
+            const auto class_name = u16_to_u8(input.window_class);
 
-            this->deliver_ui_event(ui_event{.window = window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
-            this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
-            this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
+            switch (input.type)
+            {
+            case scheduled_input::kind::click: {
+                const auto point = pack_point(input.x, input.y);
+                this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s)\n", input.x, input.y,
+                               static_cast<unsigned long long>(window), class_name.c_str());
+
+                this->deliver_ui_event(ui_event{.window = window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
+                break;
+            }
+
+            case scheduled_input::kind::key:
+                this->log.info("[inject-input] key 0x%x in window 0x%llx (%s), focus 0x%llx\n", input.virtual_key,
+                               static_cast<unsigned long long>(window), class_name.c_str(),
+                               static_cast<unsigned long long>(this->process.focus_window));
+                this->deliver_key_stroke(window, input.virtual_key, false);
+                break;
+
+            case scheduled_input::kind::text: {
+                size_t typed = 0;
+                for (const auto character : input.text)
+                {
+                    if (const auto stroke = keyboard_layout::key_stroke_for_character(character))
+                    {
+                        this->deliver_key_stroke(window, stroke->vk, stroke->shift);
+                        ++typed;
+                    }
+                }
+
+                this->log.info("[inject-input] typed %zu of %zu characters in window 0x%llx (%s), focus 0x%llx\n", typed, input.text.size(),
+                               static_cast<unsigned long long>(window), class_name.c_str(),
+                               static_cast<unsigned long long>(this->process.focus_window));
+                break;
+            }
+            }
+
             return;
         }
     }
 
-    void windows_emulator::deliver_ui_event(const ui_event& event)
+    void windows_emulator::deliver_keyboard_input_from_parent(const hwnd window, const keyboard_input_request& input)
     {
+        this->deliver_ui_event(ui_event{.window = window, .message = input.message, .wParam = input.w_param, .lParam = input.l_param});
+    }
+
+    void windows_emulator::take_focus_from_parent(const hwnd window, const hwnd previous_focus)
+    {
+        const auto previous = this->process.focus_window;
+        this->process.focus_window = window;
+
+        const auto post_focus_message = [&](const hwnd target, const uint32_t message, const hwnd other) {
+            const auto* win = this->process.windows.get(target);
+            auto* thread = win ? get_thread_by_id(this->process, win->thread_id) : nullptr;
+            if (thread)
+            {
+                thread->post_message(*this, msg{.window = target, .message = message, .wParam = other, .lParam = 0});
+            }
+        };
+
+        if (previous != 0 && previous != window)
+        {
+            post_focus_message(previous, WM_KILLFOCUS, window);
+        }
+
+        if (previous != window)
+        {
+            post_focus_message(window, WM_SETFOCUS, previous != 0 ? previous : previous_focus);
+        }
+    }
+
+    void windows_emulator::release_focus_to_parent(const hwnd window, const hwnd new_focus)
+    {
+        if (this->process.focus_window != window)
+        {
+            return;
+        }
+
+        this->process.focus_window = 0;
+
+        const auto* win = this->process.windows.get(window);
+        if (auto* thread = win ? get_thread_by_id(this->process, win->thread_id) : nullptr)
+        {
+            thread->post_message(*this, msg{.window = window, .message = WM_KILLFOCUS, .wParam = new_focus, .lParam = 0});
+        }
+    }
+
+    void windows_emulator::deliver_ui_event(const ui_event& original_event)
+    {
+        auto event = original_event;
+        if (is_keyboard_message(event.message) && this->process.focus_window != 0 && this->process.focus_window != event.window)
+        {
+            const auto focus = this->process.focus_window;
+            if (syscalls::is_foreign_window_handle(this->process, focus))
+            {
+                const keyboard_input_request input{.message = event.message, .w_param = event.wParam, .l_param = event.lParam};
+                const auto response = syscalls::forward_window_control(*this, window_control_op::keyboard_input, focus, 0,
+                                                                       std::as_bytes(std::span{&input, 1}));
+                if (response && static_cast<NTSTATUS>(response->status) == STATUS_SUCCESS)
+                {
+                    return;
+                }
+
+                this->process.focus_window = 0;
+            }
+            else if (this->process.windows.get(focus))
+            {
+                event.window = focus;
+            }
+        }
+
         const auto* win = this->process.windows.get(event.window);
         if (!win)
         {

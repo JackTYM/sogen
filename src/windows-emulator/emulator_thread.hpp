@@ -200,6 +200,7 @@ namespace sogen
         NtUserEnumDisplayMonitors,
         NtUserSetWindowPos,
         NtUserMoveWindow,
+        NtUserSetFocus,
     };
 
     struct callback_frame

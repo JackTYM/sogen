@@ -24,6 +24,7 @@ namespace sogen
 
     namespace
     {
+        constexpr ULONG k_thread_state_focus_window = 0x0;
         constexpr ULONG k_thread_state_active_window = 0x1;
         constexpr ULONG k_thread_state_win32_thread_info = 0xE;
         constexpr ULONG k_thread_state_dialog_state = 0xA;
@@ -1579,6 +1580,11 @@ namespace sogen
             if (routine == k_thread_state_dialog_state)
             {
                 return c.vcpu.active_thread ? c.vcpu.active_thread->win32k_thread_state : 0;
+            }
+
+            if (routine == k_thread_state_focus_window)
+            {
+                return c.proc.focus_window;
             }
 
             if (routine == k_thread_state_active_window)
@@ -3437,6 +3443,7 @@ namespace sogen
                         {.message = WM_ACTIVATE, .wParam = 1, .lParam = 0},
                         {.message = WM_NCACTIVATE, .wParam = 1, .lParam = 0},
                     };
+                    c.proc.focus_window = handle.bits;
                     if (!is_message_only && !is_application_active(c))
                     {
                         show_messages.push_back({.message = WM_ACTIVATEAPP, .wParam = TRUE, .lParam = 0});
@@ -3850,6 +3857,7 @@ namespace sogen
                     };
                     state.activation_window_pos_alloc = c.emu.push_stack(activation_position);
 
+                    c.proc.focus_window = hwnd;
                     state.message_queue.push_back({.message = WM_SETFOCUS, .wParam = 0, .lParam = 0});
                     state.message_queue.push_back({.message = WM_ACTIVATE, .wParam = 1, .lParam = 0});
                     state.message_queue.push_back({.message = WM_NCACTIVATE, .wParam = TRUE, .lParam = 0});
@@ -3874,6 +3882,11 @@ namespace sogen
             }
             else
             {
+                if (c.proc.focus_window == hwnd)
+                {
+                    c.proc.focus_window = 0;
+                }
+
                 state.message_queue = {
                     {.message = WM_KILLFOCUS, .wParam = 0, .lParam = 0},
                     {.message = WM_ACTIVATE, .wParam = 0, .lParam = 0},
@@ -5458,13 +5471,166 @@ namespace sogen
             return find_foreground_window(c);
         }
 
+        namespace
+        {
+            // The window another process attached this window's top-level ancestor to, or 0 when the window
+            // belongs to a hierarchy owned by this process.
+            hwnd find_foreign_attachment(const process_context& proc, const hwnd window)
+            {
+                const auto desktop = proc.default_desktop_window_handle.bits;
+                auto current = window;
+                for (size_t depth = 0; depth < 256; ++depth)
+                {
+                    const auto* win = proc.windows.get(current);
+                    if (!win || win->parent_handle == 0 || win->parent_handle == desktop)
+                    {
+                        return 0;
+                    }
+
+                    if (is_foreign_window_handle(proc, win->parent_handle))
+                    {
+                        return win->parent_handle;
+                    }
+
+                    current = win->parent_handle;
+                }
+
+                return 0;
+            }
+
+            hwnd find_top_level_ancestor(const process_context& proc, const hwnd window)
+            {
+                const auto desktop = proc.default_desktop_window_handle.bits;
+                auto current = window;
+                for (size_t depth = 0; depth < 256; ++depth)
+                {
+                    const auto* win = proc.windows.get(current);
+                    if (!win)
+                    {
+                        return 0;
+                    }
+
+                    if (win->parent_handle == 0 || win->parent_handle == desktop || (win->style & WS_CHILD) == 0)
+                    {
+                        return current;
+                    }
+
+                    current = win->parent_handle;
+                }
+
+                return 0;
+            }
+
+            bool dispatch_next_focus_message(const syscall_context& c, focus_change_state& state)
+            {
+                while (!state.messages.empty())
+                {
+                    const auto m = state.messages.front();
+                    state.messages.erase(state.messages.begin());
+
+                    const auto* win = c.proc.windows.get(m.window);
+                    if (!win)
+                    {
+                        continue;
+                    }
+
+                    if (win->thread_id == c.thread().id)
+                    {
+                        dispatch_window_message(c, callback_id::NtUserSetFocus, std::move(state), *win, m.message, m.wParam, m.lParam);
+                        return true;
+                    }
+
+                    if (auto* owner = c.proc.find_thread_by_id(win->thread_id))
+                    {
+                        owner->post_message(c.win_emu, m);
+                    }
+                }
+
+                return false;
+            }
+        }
+
         hwnd handle_NtUserSetFocus(const syscall_context& c, const hwnd hwnd)
         {
+            const auto previous = c.proc.focus_window;
             if (hwnd != 0)
             {
-                set_thread_window_context(c, hwnd);
+                if (is_foreign_window_handle(c, hwnd))
+                {
+                    const auto forwarded = forward_window_control(c.win_emu, window_control_op::set_focus, hwnd, previous);
+                    if (!forwarded || static_cast<NTSTATUS>(forwarded->status) != STATUS_SUCCESS)
+                    {
+                        set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
+                        return 0;
+                    }
+                }
+                else
+                {
+                    const auto* win = c.proc.windows.get(hwnd);
+                    if (!win)
+                    {
+                        set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
+                        return 0;
+                    }
+
+                    if ((win->style & WS_DISABLED) != 0)
+                    {
+                        return 0;
+                    }
+                }
             }
-            return hwnd;
+
+            if (hwnd == previous)
+            {
+                return previous;
+            }
+
+            c.proc.focus_window = hwnd;
+
+            focus_change_state state{};
+            state.previous = previous;
+
+            if (previous != 0 && is_foreign_window_handle(c, previous))
+            {
+                (void)forward_window_control(c.win_emu, window_control_op::kill_focus, previous, hwnd);
+            }
+            else if (previous != 0)
+            {
+                state.messages.push_back({.window = previous, .message = WM_KILLFOCUS, .wParam = hwnd, .lParam = 0});
+            }
+
+            if (hwnd != 0 && !is_foreign_window_handle(c, hwnd))
+            {
+                if (const auto attachment = find_foreign_attachment(c.proc, hwnd))
+                {
+                    c.win_emu.broadcast_focus_change(hwnd, attachment);
+                }
+                else if (const auto top_level = find_top_level_ancestor(c.proc, hwnd);
+                         top_level != 0 && top_level != c.proc.foreground_window)
+                {
+                    c.proc.set_foreground_window(top_level);
+                }
+
+                state.messages.push_back({.window = hwnd, .message = WM_SETFOCUS, .wParam = previous, .lParam = 0});
+            }
+
+            if (dispatch_next_focus_message(c, state))
+            {
+                return {};
+            }
+
+            return previous;
+        }
+
+        hwnd completion_NtUserSetFocus(const syscall_context& c, const hwnd /*hwnd*/)
+        {
+            auto& state = c.get_completion_state<focus_change_state>();
+            if (dispatch_next_focus_message(c, state))
+            {
+                return {};
+            }
+
+            return state.previous;
         }
 
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
@@ -7339,7 +7505,9 @@ namespace sogen
             {
                 return FALSE;
             }
-            info = {.cbSize = sizeof(info), .hwndActive = active, .hwndFocus = active, .hwndCapture = capture};
+            const auto* focused = c.proc.windows.get(c.proc.focus_window);
+            const auto focus = focused && focused->thread_id == target_thread_id ? c.proc.focus_window : 0;
+            info = {.cbSize = sizeof(info), .hwndActive = active, .hwndFocus = focus, .hwndCapture = capture};
             c.emu.write_memory(info_address, info);
 
             return TRUE;
@@ -7370,11 +7538,16 @@ namespace sogen
             return FALSE;
         }
 
-        bool is_foreign_window_handle(const syscall_context& c, const uint64_t hwnd)
+        bool is_foreign_window_handle(const process_context& proc, const uint64_t hwnd)
         {
             constexpr uint32_t namespace_mask = user_handle_table::NAMESPACE_COUNT - 1;
             const auto handle_namespace = (get_handle_value(hwnd).id >> user_handle_table::INDEX_BITS) & namespace_mask;
-            return handle_namespace != c.proc.user_handles.handle_namespace();
+            return handle_namespace != proc.user_handles.handle_namespace();
+        }
+
+        bool is_foreign_window_handle(const syscall_context& c, const uint64_t hwnd)
+        {
+            return is_foreign_window_handle(c.proc, hwnd);
         }
 
         std::optional<process_control_response> forward_window_control(windows_emulator& win_emu, const window_control_op op,
@@ -7422,6 +7595,30 @@ namespace sogen
                 const auto desktop = process.default_desktop_window_handle.bits;
                 response.base_address = win->parent_handle != 0 ? win->parent_handle : desktop;
                 win->parent_handle = request.size;
+                response.status = STATUS_SUCCESS;
+                return;
+            }
+
+            case window_control_op::set_focus:
+                target.take_focus_from_parent(win->handle, request.size);
+                response.status = STATUS_SUCCESS;
+                return;
+
+            case window_control_op::kill_focus:
+                target.release_focus_to_parent(win->handle, request.size);
+                response.status = STATUS_SUCCESS;
+                return;
+
+            case window_control_op::keyboard_input: {
+                keyboard_input_request input{};
+                if (request.payload.size() != sizeof(input))
+                {
+                    response.status = STATUS_INVALID_PARAMETER;
+                    return;
+                }
+
+                std::memcpy(&input, request.payload.data(), sizeof(input));
+                target.deliver_keyboard_input_from_parent(win->handle, input);
                 response.status = STATUS_SUCCESS;
                 return;
             }

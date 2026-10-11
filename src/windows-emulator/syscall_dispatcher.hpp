@@ -191,6 +191,25 @@ namespace sogen
         }
     };
 
+    struct focus_change_state : completion_state
+    {
+        hwnd previous{};
+        std::vector<msg> messages{};
+
+      private:
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->previous);
+            buffer.write_vector(this->messages);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->previous);
+            buffer.read_vector(this->messages);
+        }
+    };
+
     struct message_call_state : completion_state
     {
         hwnd window{};

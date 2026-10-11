@@ -12,6 +12,7 @@ namespace sogen
         connect = 1,
         server_created = 2,
         process_alive = 3,
+        focus_changed = 4,
     };
 
     // A single forwarded named-pipe event: bytes written on the sender's end (delivered verbatim
@@ -36,6 +37,11 @@ namespace sogen
         // named_pipe::connection_id), and for a `write`, whether it is headed to the server end.
         uint64_t connection_id{};
         bool to_server{};
+
+        // For `focus_changed`: the window that took keyboard focus and the window of another process its
+        // hierarchy is attached to (whose owner treats it as the focus of the shared input queue).
+        uint64_t window{};
+        uint64_t parent_window{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via
