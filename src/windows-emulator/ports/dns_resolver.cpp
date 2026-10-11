@@ -97,10 +97,9 @@ namespace sogen
                     write_record_list(writer, records, 0);
                 }
 
-                writer.align_to(writer.pointer_size());
-                writer.pad(24);
-                writer.write(error_code);
-                writer.pad(64);
+                writer.align_to(4);
+                writer.write(static_cast<uint64_t>(0));
+                writer.write(static_cast<uint32_t>(error_code));
             }
         };
 
