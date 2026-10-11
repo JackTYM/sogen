@@ -8,17 +8,28 @@
 #
 # Expects PATH/WIDL/CPPFLAGS/LDFLAGS to already be set in the environment by the
 # CMake caller (see CMakeLists.txt in this directory).
+#
+# Usage: build-vkd3d-shader.sh <source dir> [<build dir> [extra configure args...]]
+# Without a build dir the source tree is configured and built in place. With one, the build
+# runs in a pristine copy of the committed sources, so several targets can be built side by side.
 set -e
 
 SRC_DIR=$1
-cd "${SRC_DIR}"
+BUILD_DIR=${2:-${SRC_DIR}}
+[ $# -gt 2 ] && shift 2 || shift $#
+
+if [ "${BUILD_DIR}" != "${SRC_DIR}" ] && [ ! -f "${BUILD_DIR}/configure.ac" ]; then
+    mkdir -p "${BUILD_DIR}"
+    git -C "${SRC_DIR}" archive HEAD | tar -x -C "${BUILD_DIR}"
+fi
+cd "${BUILD_DIR}"
 
 if [ ! -x ./configure ]; then
     ./autogen.sh
 fi
 
 if [ ! -f Makefile ]; then
-    ./configure --disable-tests --disable-demos
+    ./configure --disable-tests --disable-demos "$@"
 fi
 
 # These headers are BUILT_SOURCES in Makefile.am, so a plain `make all` picks them

@@ -1,7 +1,14 @@
 include(ExternalProject)
 
 set(VKD3D_SHADER_SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../vkd3d)
-set(VKD3D_SHADER_LIB ${VKD3D_SHADER_SOURCE_DIR}/.libs/libvkd3d-shader.a)
+if(IOS)
+    # The host build configures deps/vkd3d in-source, and the device and simulator SDKs each need
+    # their own configure run, so every iOS SDK builds from its own pristine copy of the sources.
+    set(VKD3D_SHADER_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/vkd3d-build)
+else()
+    set(VKD3D_SHADER_BUILD_DIR ${VKD3D_SHADER_SOURCE_DIR})
+endif()
+set(VKD3D_SHADER_LIB ${VKD3D_SHADER_BUILD_DIR}/.libs/libvkd3d-shader.a)
 set(VKD3D_SHADER_BUILD_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/build-vkd3d-shader.sh)
 
 # vkd3d builds with autotools, not CMake. Its configure.ac unconditionally requires
@@ -73,25 +80,31 @@ if(NOT VKD3D_SHADER_VULKAN_INCLUDE_DIR OR NOT VKD3D_SHADER_SPIRV_INCLUDE_DIR)
                          "Install via 'brew install vulkan-headers spirv-headers'.")
 endif()
 
-# MSYS2/mingw-w64 ships the Vulkan loader import lib as libvulkan.dll.a, which an MSVC-generator
-# CMake (CMAKE_FIND_LIBRARY_PREFIXES "", CMAKE_FIND_LIBRARY_SUFFIXES .lib only) won't match
-# without both the "lib" prefix and the .dll.a/.a suffixes added.
-set(_vkd3d_shader_saved_lib_prefixes ${CMAKE_FIND_LIBRARY_PREFIXES})
-set(_vkd3d_shader_saved_lib_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
-list(APPEND CMAKE_FIND_LIBRARY_PREFIXES "lib")
-list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES ".dll.a" ".a")
-find_library(VKD3D_SHADER_LIBVULKAN NAMES vulkan-1 vulkan HINTS /opt/homebrew/lib /usr/local/lib)
-if(NOT VKD3D_SHADER_LIBVULKAN)
-    message(STATUS "vkd3d-shader: searched CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH} "
-                    "prefixes=${CMAKE_FIND_LIBRARY_PREFIXES} suffixes=${CMAKE_FIND_LIBRARY_SUFFIXES}")
+if(IOS)
+    # libvkd3d-shader never calls into a Vulkan loader. configure only probes for one, and an
+    # explicit SONAME_LIBVULKAN skips that probe, which could not link a macOS loader into an iOS binary.
+    set(VKD3D_SHADER_LIBVULKAN_DIR "")
+else()
+    # MSYS2/mingw-w64 ships the Vulkan loader import lib as libvulkan.dll.a, which an MSVC-generator
+    # CMake (CMAKE_FIND_LIBRARY_PREFIXES "", CMAKE_FIND_LIBRARY_SUFFIXES .lib only) won't match
+    # without both the "lib" prefix and the .dll.a/.a suffixes added.
+    set(_vkd3d_shader_saved_lib_prefixes ${CMAKE_FIND_LIBRARY_PREFIXES})
+    set(_vkd3d_shader_saved_lib_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    list(APPEND CMAKE_FIND_LIBRARY_PREFIXES "lib")
+    list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES ".dll.a" ".a")
+    find_library(VKD3D_SHADER_LIBVULKAN NAMES vulkan-1 vulkan HINTS /opt/homebrew/lib /usr/local/lib)
+    if(NOT VKD3D_SHADER_LIBVULKAN)
+        message(STATUS "vkd3d-shader: searched CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH} "
+                        "prefixes=${CMAKE_FIND_LIBRARY_PREFIXES} suffixes=${CMAKE_FIND_LIBRARY_SUFFIXES}")
+    endif()
+    set(CMAKE_FIND_LIBRARY_PREFIXES ${_vkd3d_shader_saved_lib_prefixes})
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ${_vkd3d_shader_saved_lib_suffixes})
+    if(NOT VKD3D_SHADER_LIBVULKAN)
+        message(FATAL_ERROR "vkd3d-shader's configure needs to link a Vulkan loader. "
+                             "Install via 'brew install vulkan-loader'.")
+    endif()
+    get_filename_component(VKD3D_SHADER_LIBVULKAN_DIR ${VKD3D_SHADER_LIBVULKAN} DIRECTORY)
 endif()
-set(CMAKE_FIND_LIBRARY_PREFIXES ${_vkd3d_shader_saved_lib_prefixes})
-set(CMAKE_FIND_LIBRARY_SUFFIXES ${_vkd3d_shader_saved_lib_suffixes})
-if(NOT VKD3D_SHADER_LIBVULKAN)
-    message(FATAL_ERROR "vkd3d-shader's configure needs to link a Vulkan loader. "
-                         "Install via 'brew install vulkan-loader'.")
-endif()
-get_filename_component(VKD3D_SHADER_LIBVULKAN_DIR ${VKD3D_SHADER_LIBVULKAN} DIRECTORY)
 
 # The build script runs under `sh` (MSYS2 on Windows), which parses PATH as colon-delimited -
 # but a native Windows directory itself starts with a drive-letter colon (`C:\...`), so
@@ -105,17 +118,37 @@ else()
     set(VKD3D_SHADER_BUILD_PATH_ENV "${VKD3D_SHADER_LIBTOOL_BINDIR}:${VKD3D_SHADER_BISON_BINDIR}:$ENV{PATH}")
 endif()
 
+set(VKD3D_SHADER_BUILD_ENV
+    "PATH=${VKD3D_SHADER_BUILD_PATH_ENV}"
+    "WIDL=${VKD3D_SHADER_WIDL}"
+    "CPPFLAGS=-I${VKD3D_SHADER_VULKAN_INCLUDE_DIR} -I${VKD3D_SHADER_SPIRV_INCLUDE_DIR}"
+)
+set(VKD3D_SHADER_BUILD_SCRIPT_ARGS ${VKD3D_SHADER_SOURCE_DIR})
+if(IOS)
+    if(CMAKE_OSX_SYSROOT MATCHES "iPhoneSimulator")
+        set(_vkd3d_ios_min_flag -mios-simulator-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET})
+    else()
+        set(_vkd3d_ios_min_flag -miphoneos-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET})
+    endif()
+    list(APPEND VKD3D_SHADER_BUILD_ENV
+        "CC=${CMAKE_C_COMPILER}"
+        "CFLAGS=-O2 -arch ${CMAKE_OSX_ARCHITECTURES} -isysroot ${CMAKE_OSX_SYSROOT} ${_vkd3d_ios_min_flag}"
+        "SONAME_LIBVULKAN=libvulkan.dylib"
+    )
+    list(APPEND VKD3D_SHADER_BUILD_SCRIPT_ARGS ${VKD3D_SHADER_BUILD_DIR}
+        --host=aarch64-apple-darwin --disable-shared --enable-static)
+else()
+    list(APPEND VKD3D_SHADER_BUILD_ENV "LDFLAGS=-L${VKD3D_SHADER_LIBVULKAN_DIR}")
+endif()
+
 ExternalProject_Add(
     vkd3d-shader-project
     PREFIX ${CMAKE_CURRENT_BINARY_DIR}
     SOURCE_DIR ${VKD3D_SHADER_SOURCE_DIR}
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ${CMAKE_COMMAND} -E env
-        "PATH=${VKD3D_SHADER_BUILD_PATH_ENV}"
-        "WIDL=${VKD3D_SHADER_WIDL}"
-        "CPPFLAGS=-I${VKD3D_SHADER_VULKAN_INCLUDE_DIR} -I${VKD3D_SHADER_SPIRV_INCLUDE_DIR}"
-        "LDFLAGS=-L${VKD3D_SHADER_LIBVULKAN_DIR}"
-        sh ${VKD3D_SHADER_BUILD_SCRIPT} ${VKD3D_SHADER_SOURCE_DIR}
+        ${VKD3D_SHADER_BUILD_ENV}
+        sh ${VKD3D_SHADER_BUILD_SCRIPT} ${VKD3D_SHADER_BUILD_SCRIPT_ARGS}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_ALWAYS 1

@@ -127,7 +127,7 @@ include(zstd.cmake)
 
 ##########################################
 
-if(NOT ANDROID AND NOT IOS AND NOT EMSCRIPTEN)
+if(NOT ANDROID AND NOT EMSCRIPTEN)
   add_subdirectory(vkd3d-shader-bridge)
 endif()
 
