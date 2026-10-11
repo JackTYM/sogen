@@ -629,6 +629,9 @@ namespace sogen
                                       UINT msg_filter_max, UINT remove_message);
         BOOL handle_NtUserWaitMessage(const syscall_context& c);
         BOOL handle_NtUserInvalidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
+        int handle_NtUserScrollWindowEx(const syscall_context& c, hwnd hwnd, int dx, int dy, emulator_object<RECT> scroll_rect,
+                                        emulator_object<RECT> clip_rect, uint64_t update_region, emulator_object<RECT> update_rect,
+                                        UINT flags);
         BOOL handle_NtUserValidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect);
         BOOL handle_NtUserGetUpdateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
         BOOL handle_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
@@ -1825,6 +1828,7 @@ namespace sogen
         add_handler(NtUserPeekMessage);
         add_handler(NtUserWaitMessage);
         add_handler(NtUserInvalidateRect);
+        add_handler(NtUserScrollWindowEx);
         add_handler(NtUserValidateRect);
         add_handler(NtUserGetUpdateRect);
         add_handler(NtUserUpdateWindow);

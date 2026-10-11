@@ -1506,6 +1506,8 @@ namespace sogen
 
     namespace syscalls
     {
+        ULONG store_region_rects(const syscall_context& c, uint32_t region, std::vector<RECT> rects);
+
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, handle bitmap);
         hdc create_gdi_window_dc(const syscall_context& c, hwnd window);
         uint32_t handle_NtGdiDeleteObjectApp(const syscall_context& c, uint32_t handle_value);
@@ -4404,6 +4406,71 @@ namespace sogen
 
             invalidate_window(c, *win, update_rect, erase != FALSE);
             return TRUE;
+        }
+
+        // The emulator keeps no retained window contents to shift, so the whole scrolled area is reported and
+        // invalidated as the update region; the window repaints it at the new scroll position.
+        int handle_NtUserScrollWindowEx(const syscall_context& c, const hwnd hwnd, const int dx, const int dy,
+                                        const emulator_object<RECT> scroll_rect, const emulator_object<RECT> clip_rect,
+                                        const uint64_t update_region, const emulator_object<RECT> update_rect, const UINT flags)
+        {
+            constexpr UINT sw_scrollchildren = 0x0001;
+            constexpr UINT sw_invalidate = 0x0002;
+            constexpr UINT sw_erase = 0x0004;
+            constexpr int null_region = 1;
+            constexpr int simple_region = 2;
+
+            auto* win = c.proc.windows.get(hwnd);
+            if (!win)
+            {
+                set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
+                return 0;
+            }
+
+            auto area = scroll_rect ? scroll_rect.read() : get_client_rect(*win);
+            if (clip_rect)
+            {
+                const auto clip = clip_rect.read();
+                area.left = std::max(area.left, clip.left);
+                area.top = std::max(area.top, clip.top);
+                area.right = std::min(area.right, clip.right);
+                area.bottom = std::min(area.bottom, clip.bottom);
+            }
+
+            const bool empty = area.left >= area.right || area.top >= area.bottom;
+            if (empty)
+            {
+                area = {};
+            }
+
+            if ((flags & sw_scrollchildren) != 0 && !scroll_rect)
+            {
+                for (auto& [index, child] : c.proc.windows)
+                {
+                    (void)index;
+                    if (child.parent_handle == hwnd)
+                    {
+                        update_window_geometry(c, child, child.x + dx, child.y + dy, child.width, child.height, false);
+                    }
+                }
+            }
+
+            if (!empty && (flags & sw_invalidate) != 0)
+            {
+                invalidate_window(c, *win, area, (flags & sw_erase) != 0);
+            }
+
+            if (update_rect)
+            {
+                update_rect.write(area);
+            }
+
+            if (update_region != 0)
+            {
+                store_region_rects(c, static_cast<uint32_t>(update_region), empty ? std::vector<RECT>{} : std::vector<RECT>{area});
+            }
+
+            return empty ? null_region : simple_region;
         }
 
         BOOL handle_NtUserValidateRect(const syscall_context& c, const hwnd hwnd, const emulator_object<RECT> /*rect*/)
