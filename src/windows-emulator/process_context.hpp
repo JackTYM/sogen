@@ -149,6 +149,7 @@ namespace sogen
         uint32_t guest_bpp{32};
         bool guest_top_down{};
         bool guest_owns_memory{};
+        bool monochrome{};
 
         int32_t clip_left{INT32_MIN};
         int32_t clip_top{INT32_MIN};
@@ -171,6 +172,7 @@ namespace sogen
             buffer.write(this->guest_bpp);
             buffer.write(this->guest_top_down);
             buffer.write(this->guest_owns_memory);
+            buffer.write(this->monochrome);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -183,6 +185,7 @@ namespace sogen
             buffer.read(this->guest_bpp);
             buffer.read(this->guest_top_down);
             buffer.read(this->guest_owns_memory);
+            buffer.read(this->monochrome);
         }
     };
 
@@ -529,6 +532,7 @@ namespace sogen
         uint64_t zw_callback_return{};
         uint64_t dispatch_client_message{};
         uint32_t gdi_default_dc_handle{};
+        uint32_t gdi_default_bitmap_handle{};
         std::map<uint32_t, gdi_dc_state> gdi_dc_states{};
         // Per-DC stack of states pushed by NtGdiSaveDC and popped by NtGdiRestoreDC.
         std::map<uint32_t, std::vector<gdi_dc_state>> gdi_dc_save_states{};
@@ -601,13 +605,17 @@ namespace sogen
 
         uint32_t next_cursor_icon_id{0x100};
 
-        struct cursor_icon_size
+        struct cursor_icon_data
         {
             uint32_t cx{};
             uint32_t cy{};
+            int16_t hotspot_x{};
+            int16_t hotspot_y{};
+            gdi_bitmap_surface mask{};
+            gdi_bitmap_surface color{};
         };
 
-        std::map<uint64_t, cursor_icon_size> cursor_icon_sizes{};
+        std::map<uint64_t, cursor_icon_data> cursor_icons{};
 
         // For WOW64 processes
         std::optional<emulator_object<PEB32>> peb32;

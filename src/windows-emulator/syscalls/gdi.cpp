@@ -42,8 +42,8 @@ namespace sogen
 
             constexpr uint32_t k_gdi_dc_attr_hbrush_offset = 0x10;
             constexpr uint32_t k_gdi_dc_attr_hpen_offset = 0x18;
-            constexpr uint32_t k_gdi_dc_attr_background_color_offset = 0x20; // DC_ATTR.crBackgroundClr (SetBkColor)
-            constexpr uint32_t k_gdi_dc_attr_text_color_offset = 0x28;       // DC_ATTR.crForegroundClr (SetTextColor)
+            constexpr uint32_t k_gdi_dc_attr_background_color_offset = 0xB4; // DC_ATTR.crBackgroundClr (SetBkColor)
+            constexpr uint32_t k_gdi_dc_attr_text_color_offset = 0xBC;       // DC_ATTR.crForegroundClr (SetTextColor)
             constexpr uint32_t k_gdi_dc_attr_pt_current_offset = 0xD8;
             constexpr uint32_t k_gdi_dc_attr_font_offset = 0x128;
 
@@ -60,8 +60,12 @@ namespace sogen
 
             constexpr uint32_t k_logfontw_size = 0x5C;
             constexpr uint32_t k_logbrush_size = 0x0C;
+            constexpr uint32_t k_logbrush64_size = 0x10;
             constexpr uint32_t k_logpen_size = 0x10;
             constexpr uint32_t k_bitmap_size = 0x18;
+            constexpr uint32_t k_bitmap64_size = 0x20;
+            constexpr uint32_t k_dibsection_size = 0x54;
+            constexpr uint32_t k_dibsection64_size = 0x68;
 
             constexpr uint32_t k_textmetric_size = 0x3C;
             constexpr uint32_t k_default_font_height = 16;
@@ -882,6 +886,21 @@ namespace sogen
                 }
             }
 
+            // GDI bitmaps carry real alpha only in memory DCs: AlphaBlend reads it from 32-bpp DIB data, whereas the
+            // unused fourth byte of a BI_RGB DIB drawn onto a window must not make the surface transparent.
+            uint32_t dib_pixel_to_surface_pixel(const uint8_t* row, const uint32_t x, const uint16_t bpp, const uint32_t* palette,
+                                                const bool keep_alpha)
+            {
+                if (keep_alpha && bpp == 32)
+                {
+                    uint32_t pixel = 0;
+                    std::memcpy(&pixel, row + static_cast<size_t>(x) * sizeof(uint32_t), sizeof(pixel));
+                    return pixel;
+                }
+
+                return dib_pixel_to_bgra32(row, x, bpp, palette);
+            }
+
             std::optional<uint32_t> get_surface_pixel(const gdi_bitmap_surface& surface, const int x, const int y)
             {
                 if (x < 0 || y < 0 || x >= static_cast<int>(surface.width) || y >= static_cast<int>(surface.height))
@@ -1519,6 +1538,24 @@ namespace sogen
                 return handle_value;
             }
 
+            // Every memory DC starts out with the stock 1x1 monochrome bitmap selected. Callers rely on SelectObject returning
+            // it so they can later deselect their own bitmap by selecting it back.
+            uint32_t ensure_default_bitmap(const syscall_context& c)
+            {
+                if (c.proc.gdi_default_bitmap_handle == 0)
+                {
+                    gdi_bitmap_surface* surface = nullptr;
+                    c.proc.gdi_default_bitmap_handle = create_gdi_bitmap_surface(c, 1, 1, k_default_bitmap_fill, &surface);
+                    if (surface != nullptr)
+                    {
+                        surface->monochrome = true;
+                        std::ranges::fill(surface->pixels, 0xFF000000u);
+                    }
+                }
+
+                return c.proc.gdi_default_bitmap_handle;
+            }
+
             hdc ensure_default_hdc(const syscall_context& c)
             {
                 if (c.proc.gdi_default_dc_handle != 0)
@@ -1592,18 +1629,19 @@ namespace sogen
                 }
             }
 
-            uint32_t get_gdi_object_size(const uint8_t type)
+            uint32_t get_gdi_object_size(const syscall_context& c, const uint8_t type)
             {
+                const auto wow64 = c.proc.is_wow64_process;
                 switch (type)
                 {
                 case k_gdi_brush_type:
-                    return k_logbrush_size;
+                    return wow64 ? k_logbrush_size : k_logbrush64_size;
                 case k_gdi_pen_type:
                     return k_logpen_size;
                 case k_gdi_font_type:
                     return k_logfontw_size;
                 case k_gdi_bitmap_type:
-                    return k_bitmap_size;
+                    return wow64 ? k_bitmap_size : k_bitmap64_size;
                 case k_gdi_region_type:
                     return k_gdi_region_attr_size;
                 default:
@@ -2160,9 +2198,9 @@ namespace sogen
 
             it->second.is_memory_dc = true;
 
-            // Memory DCs begin with a default monochrome bitmap selected, and SelectObject
-            // returns that previous bitmap on the first real bitmap selection.
-            const auto default_bitmap = create_gdi_bitmap_surface(c, 1, 1, 0xFF000000u);
+            // Memory DCs begin with the stock monochrome bitmap selected, and SelectObject returns it on the first real
+            // bitmap selection so callers can later deselect theirs by selecting it back.
+            const auto default_bitmap = ensure_default_bitmap(c);
             if (default_bitmap == 0)
             {
                 return 0;
@@ -2287,6 +2325,11 @@ namespace sogen
             const auto handle_value = create_gdi_bitmap_surface(c, width, height, k_default_bitmap_fill, &surface);
             if (surface != nullptr)
             {
+                surface->monochrome = planes == 1 && bits_pixel == 1;
+                if (surface->monochrome)
+                {
+                    std::ranges::fill(surface->pixels, 0xFF000000u);
+                }
                 if (bits != 0 && planes == 1 && bits_pixel == 32)
                 {
                     const auto byte_count = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
@@ -2592,7 +2635,7 @@ namespace sogen
                         break;
                     }
                     set_surface_pixel(*surface, x_dest + origin_x + static_cast<int>(i), y_dest + origin_y + static_cast<int>(j),
-                                      dib_pixel_to_bgra32(row, src_x, bit_count, palette_data));
+                                      dib_pixel_to_surface_pixel(row, src_x, bit_count, palette_data, dc_state->selected_bitmap != 0));
                 }
                 ++copied;
             }
@@ -2747,6 +2790,13 @@ namespace sogen
                 return 0;
             }
 
+            if (entry.Type == k_gdi_bitmap_type && std::ranges::any_of(c.proc.gdi_dc_states, [&](const auto& dc_entry) {
+                    return dc_entry.second.selected_bitmap == handle_value;
+                }))
+            {
+                return 0;
+            }
+
             const emulator_object<GDI_HANDLE_ENTRY64> entry_obj{c.emu, entry_addr};
             entry_obj.access([&](GDI_HANDLE_ENTRY64& writable) {
                 const auto unique = writable.Unique;
@@ -2783,17 +2833,21 @@ namespace sogen
                 return 0;
             }
 
+            const auto default_bitmap = ensure_default_bitmap(c);
             const auto bitmap_handle = static_cast<uint32_t>(bitmap.bits);
             if (!c.proc.gdi_bitmap_surfaces.contains(bitmap_handle))
             {
                 return 0;
             }
 
-            for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
+            if (bitmap_handle != default_bitmap)
             {
-                if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
+                for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
                 {
-                    return 0;
+                    if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
+                    {
+                        return 0;
+                    }
                 }
             }
 
@@ -2867,7 +2921,7 @@ namespace sogen
                 return 0;
             }
 
-            const uint32_t object_size = get_gdi_object_size(entry.Type);
+            uint32_t object_size = get_gdi_object_size(c, entry.Type);
             if (object_size == 0)
             {
                 return 0;
@@ -2876,6 +2930,15 @@ namespace sogen
             if (buffer == 0)
             {
                 return object_size;
+            }
+
+            const auto dib_section_size = c.proc.is_wow64_process ? k_dibsection_size : k_dibsection64_size;
+            const auto bmp_it =
+                entry.Type == k_gdi_bitmap_type ? c.proc.gdi_bitmap_surfaces.find(handle_value) : c.proc.gdi_bitmap_surfaces.end();
+            const bool is_dib_section = bmp_it != c.proc.gdi_bitmap_surfaces.end() && bmp_it->second.guest_bits != 0;
+            if (is_dib_section && size >= dib_section_size)
+            {
+                object_size = dib_section_size;
             }
 
             if (size < object_size)
@@ -2887,7 +2950,6 @@ namespace sogen
 
             if (entry.Type == k_gdi_bitmap_type)
             {
-                const auto bmp_it = c.proc.gdi_bitmap_surfaces.find(handle_value);
                 if (bmp_it != c.proc.gdi_bitmap_surfaces.end())
                 {
                     const auto& surface = bmp_it->second;
@@ -2896,15 +2958,44 @@ namespace sogen
                                                  ? surface.guest_stride
                                                  : static_cast<uint32_t>(((static_cast<uint64_t>(surface.width) * bpp + 31u) / 32u) * 4u);
 
-                    // BITMAP (32-bit layout): bmType@0, bmWidth@4, bmHeight@8, bmWidthBytes@12,
-                    // bmPlanes@16 (WORD), bmBitsPixel@18 (WORD), bmBits@20 (PVOID32).
+                    // BITMAP: bmType@0, bmWidth@4, bmHeight@8, bmWidthBytes@12, bmPlanes@16 (WORD), bmBitsPixel@18 (WORD),
+                    // bmBits@20 (PVOID32) for WoW64 guests and @24 (PVOID64) for native 64-bit guests.
                     const utils::safe_buffer_accessor<uint8_t> bitmap{object_data};
                     bitmap.as<int32_t>(4).set(static_cast<int32_t>(surface.width));
                     bitmap.as<int32_t>(8).set(static_cast<int32_t>(surface.height));
                     bitmap.as<int32_t>(12).set(static_cast<int32_t>(width_bytes));
                     bitmap.as<uint16_t>(16).set(1);
                     bitmap.as<uint16_t>(18).set(bpp);
-                    bitmap.as<uint32_t>(20).set(static_cast<uint32_t>(surface.guest_bits));
+                    if (c.proc.is_wow64_process)
+                    {
+                        bitmap.as<uint32_t>(20).set(static_cast<uint32_t>(surface.guest_bits));
+                    }
+                    else
+                    {
+                        bitmap.as<uint64_t>(24).set(surface.guest_bits);
+                    }
+
+                    if (object_size == dib_section_size)
+                    {
+                        constexpr uint32_t bi_rgb = 0;
+                        constexpr uint32_t bi_bitfields = 3;
+                        const auto info_offset = c.proc.is_wow64_process ? k_bitmap_size : k_bitmap64_size;
+                        EMU_BITMAPINFOHEADER header{};
+                        header.biSize = sizeof(header);
+                        header.biWidth = static_cast<LONG>(surface.width);
+                        header.biHeight = surface.guest_top_down ? -static_cast<LONG>(surface.height) : static_cast<LONG>(surface.height);
+                        header.biPlanes = 1;
+                        header.biBitCount = bpp;
+                        header.biCompression = (bpp == 16 || bpp == 32) ? bi_bitfields : bi_rgb;
+                        header.biSizeImage = width_bytes * surface.height;
+                        std::memcpy(object_data.data() + info_offset, &header, sizeof(header));
+
+                        if (bpp == 16 || bpp == 32)
+                        {
+                            constexpr std::array<uint32_t, 3> masks = {0x00FF0000u, 0x0000FF00u, 0x000000FFu};
+                            std::memcpy(object_data.data() + info_offset + sizeof(header), masks.data(), sizeof(masks));
+                        }
+                    }
                 }
             }
 
@@ -3869,7 +3960,32 @@ namespace sogen
                 }
             }
 
+            if (needs_source && dst_surface->monochrome != src_surface->monochrome)
+            {
+                if (dst_surface->monochrome)
+                {
+                    const auto source_background = get_dc_background_color(c, src_dc) & 0x00FFFFFFu;
+                    for (auto& pixel : src_snapshot)
+                    {
+                        pixel = (pixel & 0x00FFFFFFu) == source_background ? 0xFFFFFFFFu : 0xFF000000u;
+                    }
+                }
+                else
+                {
+                    const auto one_color = get_dc_background_color(c, dst_dc);
+                    const auto zero_color = get_dc_text_color(c, dst_dc);
+                    for (auto& pixel : src_snapshot)
+                    {
+                        pixel = (pixel & 0x00FFFFFFu) != 0 ? one_color : zero_color;
+                    }
+                }
+            }
+
             const uint32_t pattern = get_dc_brush_color(c, dst_dc);
+            // DIB sections expose their bits (including alpha) to the guest, whereas other surfaces are presented as opaque BGRA.
+            // Device-dependent bitmaps carry no alpha, so blitting them into a DIB section leaves its alpha bytes clear.
+            const uint32_t forced_alpha = dst_surface->guest_bits != 0 ? 0u : 0xFF000000u;
+            const uint32_t cleared_alpha = dst_surface->guest_bits != 0 && needs_source && src_surface->guest_bits == 0 ? 0xFF000000u : 0u;
             const auto clip_exclusions = compute_sibling_clip_exclusions(c, dst_dc, dst_origin_x, dst_origin_y);
 
             for (size_t row = 0; row < blt_height; ++row)
@@ -3908,7 +4024,7 @@ namespace sogen
                         }
                     }
 
-                    dst_row[col] = apply_rop3(rop3, src, dst, pattern) | 0xFF000000u;
+                    dst_row[col] = (apply_rop3(rop3, src, dst, pattern) & ~cleared_alpha) | forced_alpha;
                 }
             }
 
@@ -3950,6 +4066,138 @@ namespace sogen
 
         // Like BitBlt, but nearest-neighbour scales the source rectangle onto the destination rectangle.
         // Used by the user32 SS_BITMAP static control to paint its image (e.g. the open-iw5 splash).
+        std::optional<gdi_bitmap_surface> snapshot_gdi_bitmap(const syscall_context& c, const uint32_t bitmap)
+        {
+            const auto it = c.proc.gdi_bitmap_surfaces.find(bitmap);
+            if (it == c.proc.gdi_bitmap_surfaces.end())
+            {
+                return std::nullopt;
+            }
+
+            sync_surface_from_guest_dib(c, it->second);
+
+            gdi_bitmap_surface copy{};
+            copy.width = it->second.width;
+            copy.height = it->second.height;
+            copy.pixels = it->second.pixels;
+            return copy;
+        }
+
+        uint32_t create_gdi_bitmap_from_surface(const syscall_context& c, const gdi_bitmap_surface& surface)
+        {
+            if (surface.pixels.empty())
+            {
+                return 0;
+            }
+
+            gdi_bitmap_surface* created = nullptr;
+            const auto handle = create_gdi_bitmap_surface(c, surface.width, surface.height, k_default_bitmap_fill, &created);
+            if (created != nullptr)
+            {
+                created->pixels = surface.pixels;
+            }
+            return handle;
+        }
+
+        BOOL draw_cursor_icon(const syscall_context& c, const hdc dc, const int x, const int y, const int cx, const int cy,
+                              const process_context::cursor_icon_data& icon, const UINT flags)
+        {
+            constexpr UINT di_mask = 0x1;
+            constexpr UINT di_image = 0x2;
+            constexpr uint32_t white = 0x00FFFFFFu;
+
+            const auto icon_height = icon.cy / 2;
+            const auto draw_width = cx != 0 ? cx : static_cast<int>(icon.cx);
+            const auto draw_height = cy != 0 ? cy : static_cast<int>(icon_height);
+            if (icon.cx == 0 || icon_height == 0 || draw_width <= 0 || draw_height <= 0)
+            {
+                return TRUE;
+            }
+
+            int32_t origin_x = 0;
+            int32_t origin_y = 0;
+            uint32_t present_handle = 0;
+            auto* surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, present_handle);
+            if (surface == nullptr)
+            {
+                return FALSE;
+            }
+
+            const bool has_color = !icon.color.pixels.empty();
+            const bool has_alpha =
+                has_color && std::ranges::any_of(icon.color.pixels, [](const uint32_t pixel) { return (pixel >> 24) != 0; });
+            const auto& image = has_color ? icon.color : icon.mask;
+            const auto image_height = has_color ? icon.color.height : icon.mask.height / 2;
+
+            for (int row = 0; row < draw_height; ++row)
+            {
+                const auto src_y = static_cast<uint32_t>(static_cast<int64_t>(row) * icon_height / draw_height);
+                for (int col = 0; col < draw_width; ++col)
+                {
+                    const auto src_x = static_cast<uint32_t>(static_cast<int64_t>(col) * icon.cx / draw_width);
+                    if (src_x >= image.width || src_y >= image_height)
+                    {
+                        continue;
+                    }
+
+                    const auto dst_x = x + col + origin_x;
+                    const auto dst_y = y + row + origin_y;
+                    const auto dst_pixel = get_surface_pixel(*surface, dst_x, dst_y);
+                    if (!dst_pixel)
+                    {
+                        continue;
+                    }
+
+                    const auto sample = [&](const gdi_bitmap_surface& bitmap, const uint32_t sample_y) {
+                        return bitmap.pixels[static_cast<size_t>(sample_y) * bitmap.width + src_x];
+                    };
+
+                    uint32_t result = *dst_pixel & white;
+                    if (has_alpha)
+                    {
+                        if ((flags & di_image) != 0)
+                        {
+                            const auto source = sample(icon.color, src_y);
+                            const auto alpha = source >> 24;
+                            const auto blend = [&](const uint32_t shift) {
+                                const auto src_channel = (source >> shift) & 0xFFu;
+                                const auto dst_channel = (result >> shift) & 0xFFu;
+                                return ((src_channel * alpha + dst_channel * (255 - alpha) + 127) / 255) << shift;
+                            };
+                            result = blend(0) | blend(8) | blend(16);
+                        }
+                    }
+                    else if (has_color)
+                    {
+                        if ((flags & di_mask) != 0 && src_y < icon.mask.height && src_x < icon.mask.width)
+                        {
+                            result &= sample(icon.mask, src_y) & white;
+                        }
+                        if ((flags & di_image) != 0)
+                        {
+                            result ^= sample(icon.color, src_y) & white;
+                        }
+                    }
+                    else
+                    {
+                        if ((flags & di_mask) != 0)
+                        {
+                            result &= sample(icon.mask, src_y) & white;
+                        }
+                        if ((flags & di_image) != 0)
+                        {
+                            result ^= sample(icon.mask, src_y + image_height) & white;
+                        }
+                    }
+
+                    set_surface_pixel(*surface, dst_x, dst_y, result | 0xFF000000u);
+                }
+            }
+
+            present_win_surface(c, present_handle, surface);
+            return TRUE;
+        }
+
         BOOL handle_NtGdiStretchBlt(const syscall_context& c, const hdc dst_dc, const int x_dst, const int y_dst, const int dst_width,
                                     const int dst_height, const hdc src_dc, const int x_src, const int y_src, const int src_width,
                                     const int src_height, const DWORD rop, const DWORD /*cr_back_color*/)
@@ -4003,6 +4251,10 @@ namespace sogen
             const bool flip_src_y = src_height < 0;
 
             const uint32_t pattern = get_dc_brush_color(c, dst_dc);
+            // DIB sections expose their bits (including alpha) to the guest, whereas other surfaces are presented as opaque BGRA.
+            // Device-dependent bitmaps carry no alpha, so blitting them into a DIB section leaves its alpha bytes clear.
+            const uint32_t forced_alpha = dst_surface->guest_bits != 0 ? 0u : 0xFF000000u;
+            const uint32_t cleared_alpha = dst_surface->guest_bits != 0 && needs_source && src_surface->guest_bits == 0 ? 0xFF000000u : 0u;
 
             for (int dy = 0; dy < dst_h; ++dy)
             {
@@ -4047,7 +4299,7 @@ namespace sogen
                         src = src_surface->pixels[static_cast<size_t>(sy) * src_surface->width + static_cast<size_t>(sx)];
                     }
 
-                    dst_row[out_x] = apply_rop3(rop3, src, dst_row[out_x], pattern) | 0xFF000000u;
+                    dst_row[out_x] = (apply_rop3(rop3, src, dst_row[out_x], pattern) & ~cleared_alpha) | forced_alpha;
                 }
             }
 

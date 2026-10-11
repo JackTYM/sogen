@@ -982,6 +982,10 @@ namespace sogen
     namespace syscalls
     {
         BOOL erase_window_class_background(const syscall_context& c, const window& win, hdc dc);
+        std::optional<gdi_bitmap_surface> snapshot_gdi_bitmap(const syscall_context& c, uint32_t bitmap);
+        uint32_t create_gdi_bitmap_from_surface(const syscall_context& c, const gdi_bitmap_surface& surface);
+        BOOL draw_cursor_icon(const syscall_context& c, hdc dc, int x, int y, int cx, int cy, const process_context::cursor_icon_data& icon,
+                              UINT flags);
     } // namespace syscalls
 
     namespace
@@ -2795,24 +2799,42 @@ namespace sogen
             return make_pseudo_handle(c.proc.next_cursor_icon_id++, handle_types::reserved).bits;
         }
 
+        namespace
+        {
+            BOOL store_cursor_icon_data(const syscall_context& c, const hicon icon, const emulator_object<EMU_CURSORDATA> cursor_data)
+            {
+                if (icon == 0 || !cursor_data)
+                {
+                    return FALSE;
+                }
+
+                const auto data = cursor_data.read();
+                auto& stored = c.proc.cursor_icons[icon];
+                stored.hotspot_x = data.xHotspot;
+                stored.hotspot_y = data.yHotspot;
+                stored.mask = snapshot_gdi_bitmap(c, static_cast<uint32_t>(data.hbmMask)).value_or(gdi_bitmap_surface{});
+                stored.color = snapshot_gdi_bitmap(c, static_cast<uint32_t>(data.hbmColor)).value_or(gdi_bitmap_surface{});
+
+                stored.cx = data.cx;
+                stored.cy = data.cy;
+                return TRUE;
+            }
+        } // namespace
+
         BOOL handle_NtUserSetCursorIconData(const syscall_context& c, const hicon icon,
                                             const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*module_name*/,
                                             const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*resource_name*/,
                                             const emulator_object<EMU_CURSORDATA> cursor_data)
         {
-            if (icon == 0 || !cursor_data)
-            {
-                return FALSE;
-            }
-
-            const auto data = cursor_data.read();
-            c.proc.cursor_icon_sizes[icon] = {data.cx, data.cy};
-            return TRUE;
+            return store_cursor_icon_data(c, icon, cursor_data);
         }
 
-        BOOL handle_NtUserSetCursorIconDataEx()
+        BOOL handle_NtUserSetCursorIconDataEx(const syscall_context& c, const hicon icon,
+                                              const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*module_name*/,
+                                              const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*resource_name*/,
+                                              const emulator_object<EMU_CURSORDATA> cursor_data)
         {
-            return TRUE;
+            return store_cursor_icon_data(c, icon, cursor_data);
         }
 
         BOOL handle_NtUserGetRequiredCursorSizes()
@@ -2851,8 +2873,8 @@ namespace sogen
                 return FALSE;
             }
 
-            const auto entry = c.proc.cursor_icon_sizes.find(icon);
-            if (entry != c.proc.cursor_icon_sizes.end())
+            const auto entry = c.proc.cursor_icons.find(icon);
+            if (entry != c.proc.cursor_icons.end())
             {
                 cx.write(static_cast<int>(entry->second.cx));
                 cy.write(static_cast<int>(entry->second.cy));
@@ -2877,15 +2899,23 @@ namespace sogen
                 return FALSE;
             }
 
-            // The emulator's icons/cursors are bare pseudo-handles with no backing pixel data, so report a
-            // standard 32x32 icon with a centered hotspot and no mask/color bitmaps.
-            const EMU_ICONINFO info{
+            EMU_ICONINFO info{
                 .fIcon = TRUE,
                 .xHotspot = 16,
                 .yHotspot = 16,
                 .hbmMask = 0,
                 .hbmColor = 0,
             };
+
+            if (const auto entry = c.proc.cursor_icons.find(icon); entry != c.proc.cursor_icons.end())
+            {
+                const auto& stored = entry->second;
+                info.xHotspot = static_cast<DWORD>(stored.hotspot_x);
+                info.yHotspot = static_cast<DWORD>(stored.hotspot_y);
+                info.hbmMask = create_gdi_bitmap_from_surface(c, stored.mask);
+                info.hbmColor = create_gdi_bitmap_from_surface(c, stored.color);
+            }
+
             icon_info.write(info);
 
             const auto clear_name = [&](const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>& name) {
@@ -2908,13 +2938,16 @@ namespace sogen
             return TRUE;
         }
 
-        // Minimal stub: report success so icon/static (SS_ICON) paint completes. Rendering the actual
-        // system icon pixels is a separate task; for now the icon area is left unpainted.
-        BOOL handle_NtUserDrawIconEx(const syscall_context&, const hdc /*dc*/, const int /*x*/, const int /*y*/, const hicon icon,
-                                     const int /*cx*/, const int /*cy*/, const UINT /*istep*/, const uint64_t /*flicker_brush*/,
-                                     const UINT /*di_flags*/)
+        BOOL handle_NtUserDrawIconEx(const syscall_context& c, const hdc dc, const int x, const int y, const hicon icon, const int cx,
+                                     const int cy, const UINT /*istep*/, const uint64_t /*flicker_brush*/, const UINT di_flags)
         {
-            return icon != 0 ? TRUE : FALSE;
+            const auto entry = c.proc.cursor_icons.find(icon);
+            if (entry == c.proc.cursor_icons.end())
+            {
+                return icon != 0 ? TRUE : FALSE;
+            }
+
+            return draw_cursor_icon(c, dc, x, y, cx, cy, entry->second, di_flags);
         }
 
         uint64_t handle_NtUserFindWindowEx(const syscall_context& c, const hwnd parent, const hwnd child_after,
