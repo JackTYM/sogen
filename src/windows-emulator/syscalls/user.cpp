@@ -86,24 +86,26 @@ namespace sogen
 
         struct fn_in_lp_create_struct_cs
         {
-            pointer lpCreateParams{}; // +0x00: non-zero triggers SBCREATE dispatch path
-            pointer hInstance{};      // +0x08
-            pointer hMenu{};          // +0x10
-            pointer hwndParent{};     // +0x18
-            int cy{};                 // +0x20
-            int cx{};                 // +0x24
-            pointer xpfnHint{};       // +0x28: must be non-zero; use win.wnd_proc
-            pointer dispatchPtr{};    // +0x30: must = dispatch_client_message
-            pointer lpszName{};       // +0x38
-            pointer lpszClass{};      // +0x40
-            pointer xpfnProc{};       // +0x48: WndProc – dispatch_client_message reads [R9+0x48]
+            pointer lpCreateParams{};
+            pointer hInstance{};
+            pointer hMenu{};
+            pointer hwndParent{};
+            int cy{};
+            int cx{};
+            int y{};
+            int x{};
+            int32_t style{};
+            uint32_t _pad{};
+            pointer lpszName{};
+            pointer lpszClass{};
+            uint32_t dwExStyle{};
+            uint32_t _pad2{};
         };
 
-        static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnHint) == 0x28);
-        static_assert(offsetof(fn_in_lp_create_struct_cs, dispatchPtr) == 0x30);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, style) == 0x30);
         static_assert(offsetof(fn_in_lp_create_struct_cs, lpszName) == 0x38);
         static_assert(offsetof(fn_in_lp_create_struct_cs, lpszClass) == 0x40);
-        static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnProc) == 0x48);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, dwExStyle) == 0x48);
         static_assert(sizeof(fn_in_lp_create_struct_cs) == 0x50);
 
         struct fn_in_lp_create_struct_message
@@ -639,19 +641,54 @@ namespace sogen
             return {.left = border, .top = border, .right = border, .bottom = border};
         }
 
-        void sync_guest_window_rects(window& win)
+        std::pair<int32_t, int32_t> get_screen_origin(const process_context& proc, const window& win)
         {
-            const auto window_rect = get_window_rect(win);
+            int32_t origin_x = win.x;
+            int32_t origin_y = win.y;
+            const window* current = &win;
+            while ((current->style & WS_CHILD) != 0)
+            {
+                const auto* parent = proc.windows.get(current->parent_handle);
+                if (!parent)
+                {
+                    break;
+                }
+
+                origin_x += parent->x;
+                origin_y += parent->y + parent->client_top();
+                current = parent;
+            }
+
+            return {origin_x, origin_y};
+        }
+
+        void sync_guest_window_rects(const process_context& proc, window& win)
+        {
+            const auto [origin_x, origin_y] = get_screen_origin(proc, win);
+            const RECT window_rect{.left = origin_x, .top = origin_y, .right = origin_x + win.width, .bottom = origin_y + win.height};
             // Frameless: the client sits at the window origin, so it shares the top-left and shrinks by the frame.
-            const RECT client_rect{.left = win.x,
-                                   .top = win.y + win.client_top(),
-                                   .right = win.x + win.client_width(),
-                                   .bottom = win.y + win.client_top() + win.client_height()};
+            const RECT client_rect{.left = origin_x,
+                                   .top = origin_y + win.client_top(),
+                                   .right = origin_x + win.client_width(),
+                                   .bottom = origin_y + win.client_top() + win.client_height()};
 
             win.guest.access([&](USER_WINDOW& guest_win) {
                 guest_win.rcWindow = window_rect;
                 guest_win.rcClient = client_rect;
             });
+        }
+
+        void sync_guest_subtree_rects(process_context& proc, window& win)
+        {
+            sync_guest_window_rects(proc, win);
+            for (auto& [index, child] : proc.windows)
+            {
+                (void)index;
+                if (child.parent_handle == win.handle && (child.style & WS_CHILD) != 0)
+                {
+                    sync_guest_subtree_rects(proc, child);
+                }
+            }
         }
 
         void update_window_geometry(const syscall_context& c, window& win, const int x, const int y, const int width, const int height,
@@ -661,7 +698,7 @@ namespace sogen
             win.y = y;
             win.width = width;
             win.height = height;
-            sync_guest_window_rects(win);
+            sync_guest_subtree_rects(c.proc, win);
 
             if (win.host_surface_window)
             {
@@ -1203,11 +1240,12 @@ namespace sogen
                     args.cs.hwndParent = emu_cs.hwndParent;
                     args.cs.cy = emu_cs.cy;
                     args.cs.cx = emu_cs.cx;
-                    args.cs.xpfnHint = win.wnd_proc;
-                    args.cs.dispatchPtr = c.proc.dispatch_client_message;
+                    args.cs.y = emu_cs.y;
+                    args.cs.x = emu_cs.x;
+                    args.cs.style = emu_cs.style;
                     args.cs.lpszName = emu_cs.lpszName;
                     args.cs.lpszClass = emu_cs.lpszClass;
-                    args.cs.xpfnProc = c.proc.dispatch_client_message;
+                    args.cs.dwExStyle = emu_cs.dwExStyle;
 
                     // whcbfnINLPCREATESTRUCT reads lParam to find the CREATESTRUCT. The arg
                     // buffer lands at align_down(RSP,16) - align_up(sizeof(args),16); cs sits
@@ -3472,14 +3510,6 @@ namespace sogen
                 guest_win.ptrBase = win.guest.value();
                 guest_win.dwExStyle = ex_style;
                 guest_win.dwStyle = style;
-                guest_win.rcWindow = {.left = x, .top = y, .right = x + width, .bottom = y + height};
-                // The client rect is the window minus its non-client frame (see window::nonclient_border). The
-                // guest reads rcClient client-side to size its render target/backbuffer, so seeding it with the
-                // outer rect here makes a framed window render 2px too large and rescale (softening the frame).
-                guest_win.rcClient = {.left = x,
-                                      .top = y + win.client_top(),
-                                      .right = x + win.client_width(),
-                                      .bottom = y + win.client_top() + win.client_height()};
                 if (parent_win && has_child_parent)
                 {
                     guest_win.spwndParent = parent_win->guest.value();
@@ -3522,6 +3552,7 @@ namespace sogen
                     guest_win.pExtraBytes = c.win_emu.memory.allocate_memory(extra_size, memory_permission::read_write);
                 }
             });
+            sync_guest_window_rects(c.proc, win);
             write_guest_window_text(c, win, win.name);
 
             if (has_child_parent && parent_win && parent_win->guest.value() != 0)
