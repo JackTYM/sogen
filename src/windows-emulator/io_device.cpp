@@ -10,6 +10,7 @@
 #include "devices/steam_bridge.hpp"
 #include "devices/console.hpp"
 #include <iostream>
+#include <random>
 
 namespace sogen
 {
@@ -47,6 +48,42 @@ namespace sogen
             }
         };
 
+        // bcryptprimitives seeds each process's user-mode RNG (ProcessPrng, RtlGenRandom, ...) from these KsecDD
+        // ioctls on \Device\CNG. Identical seeds make every process generate the same "unguessable" tokens,
+        // which Chromium treats as forged IPC when two renderers report the same V8 context or frame token.
+        constexpr ULONG IOCTL_KSEC_RNG = 0x390004;
+        constexpr ULONG IOCTL_KSEC_RNG_REKEY = 0x390008;
+
+        struct cng_device : stateless_device
+        {
+            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
+            {
+                std::vector<std::byte> output(context.output_buffer ? context.output_buffer_length : 0);
+                if (context.io_control_code == IOCTL_KSEC_RNG || context.io_control_code == IOCTL_KSEC_RNG_REKEY)
+                {
+                    std::random_device entropy{};
+                    for (auto& byte : output)
+                    {
+                        byte = static_cast<std::byte>(entropy());
+                    }
+                }
+
+                if (!output.empty())
+                {
+                    win_emu.emu().write_memory(context.output_buffer, output.data(), output.size());
+                }
+
+                if (context.io_status_block)
+                {
+                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                    block.Information = output.size();
+                    context.io_status_block.write(block);
+                }
+
+                return STATUS_SUCCESS;
+            }
+        };
+
         struct transport_stub_device : stateless_device
         {
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
@@ -74,6 +111,11 @@ namespace sogen
             return std::make_unique<dummy_device>();
         }
 
+        std::unique_ptr<io_device> create_cng_device(const device_creation_context&)
+        {
+            return std::make_unique<cng_device>();
+        }
+
         std::unique_ptr<io_device> create_transport_stub_device(const device_creation_context&)
         {
             return std::make_unique<transport_stub_device>();
@@ -97,7 +139,7 @@ namespace sogen
 
         static const std::map<std::u16string_view, device_factory> registry = {
             // Dummy
-            {u"CNG"sv, create_dummy_device},
+            {u"CNG"sv, create_cng_device},
             {u"RasAcd"sv, create_dummy_device},
             {u"PcwDrv"sv, create_dummy_device},
             {u"DeviceApi\\CMApi"sv, create_dummy_device},
