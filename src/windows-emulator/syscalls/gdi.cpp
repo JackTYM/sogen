@@ -5871,8 +5871,20 @@ namespace sogen
 
             present_desc.access([&](const EMU_D3DKMT_PRESENT& present) {
                 constexpr uint32_t k_present_flag_blt = 0x1;
-                const auto target_window = present.hWindow != 0 ? present.hWindow : c.proc.dcomp_target_window;
-                if (target_window == 0 || (present.hWindow != 0 && (present.Flags & k_present_flag_blt) == 0))
+                std::optional<hwnd> target_window{};
+                if (present.hWindow != 0)
+                {
+                    if ((present.Flags & k_present_flag_blt) != 0)
+                    {
+                        target_window = present.hWindow;
+                    }
+                }
+                else if (present.PresentHistoryToken.Model == D3DKMT_PM_REDIRECTED_FLIP)
+                {
+                    target_window = c.proc.find_composition_surface_window(present.PresentHistoryToken.FlipLogicalSurface);
+                }
+
+                if (!target_window)
                 {
                     return;
                 }
@@ -5886,11 +5898,11 @@ namespace sogen
                 const auto pixels =
                     c.emu.read_memory(allocation->backing_memory, static_cast<size_t>(allocation->pitch) * allocation->height);
 
-                c.win_emu.ui().present_surface(target_window, ui_surface_desc{.width = static_cast<int>(allocation->width),
-                                                                              .height = static_cast<int>(allocation->height),
-                                                                              .stride = static_cast<int>(allocation->pitch),
-                                                                              .format = ui_surface_format::bgra8,
-                                                                              .pixels = pixels.data()});
+                c.win_emu.ui().present_surface(*target_window, ui_surface_desc{.width = static_cast<int>(allocation->width),
+                                                                               .height = static_cast<int>(allocation->height),
+                                                                               .stride = static_cast<int>(allocation->pitch),
+                                                                               .format = ui_surface_format::bgra8,
+                                                                               .pixels = pixels.data()});
 
                 dump_presented_frame(allocation->width, allocation->height, allocation->pitch, pixels);
 

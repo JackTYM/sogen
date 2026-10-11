@@ -534,6 +534,19 @@ namespace sogen
         UINT64 GpuVirtualAddress;
     };
 
+    constexpr UINT32 D3DKMT_PM_REDIRECTED_FLIP = 2;
+
+    // D3DKMT_PRESENTHISTORYTOKEN up to the hLogicalSurface field of its D3DKMT_FLIPMODEL_PRESENTHISTORYTOKEN
+    // union member; the remaining token fields are not modeled.
+    struct EMU_D3DKMT_PRESENTHISTORYTOKEN_HEADER
+    {
+        UINT32 Model;
+        UINT32 TokenSize;
+        UINT64 CompositionBindingId;
+        UINT64 FlipFenceValue;
+        UINT64 FlipLogicalSurface;
+    };
+
     struct EMU_D3DKMT_PRESENT
     {
         UINT32 hDevice;
@@ -549,7 +562,13 @@ namespace sogen
         UINT32 PresentCount;
         UINT32 FlipInterval;
         UINT32 Flags;
+        UINT32 BroadcastContextCount;
+        UINT32 BroadcastContext[64];
+        UINT64 PresentLimitSemaphore;
+        EMU_D3DKMT_PRESENTHISTORYTOKEN_HEADER PresentHistoryToken;
     };
+
+    static_assert(offsetof(EMU_D3DKMT_PRESENT, PresentHistoryToken) == 360);
 
     struct EMU_D3DKMT_GETDEVICESTATE
     {

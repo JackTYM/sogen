@@ -948,8 +948,7 @@ namespace sogen
 
         NTSTATUS handle_NtDCompositionCreateChannel(const syscall_context& c, emulator_object<handle> channel_handle,
                                                     emulator_object<uint64_t> section_size, emulator_object<uint64_t> section_base);
-        NTSTATUS handle_NtDCompositionDestroyChannel(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                                                     uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtDCompositionDestroyChannel(const syscall_context& c, handle channel_handle);
         NTSTATUS handle_NtDCompositionCommitChannel(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                                                     uint64_t a5, uint64_t a6);
         NTSTATUS handle_NtDCompositionProcessChannelBatchBuffer(const syscall_context& c, handle channel_handle, uint32_t batch_size,
@@ -1008,8 +1007,8 @@ namespace sogen
                                                  uint64_t a6);
         NTSTATUS handle_NtUnBindCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                                                    uint64_t a5, uint64_t a6);
-        NTSTATUS handle_NtCreateCompositionSurfaceHandle(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                                                         uint64_t a5, uint64_t a6);
+        NTSTATUS handle_NtCreateCompositionSurfaceHandle(const syscall_context& c, uint64_t object_attributes, ACCESS_MASK desired_access,
+                                                         emulator_object<handle> surface_handle);
         NTSTATUS handle_NtNotifyPresentToCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                                                             uint64_t a5, uint64_t a6);
         NTSTATUS handle_NtSetCompositionSurfaceBufferUsage(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,

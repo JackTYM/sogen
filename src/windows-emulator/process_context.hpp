@@ -205,6 +205,21 @@ namespace sogen
         }
     };
 
+    // A resource of a DirectComposition channel (visual, surface proxy, hwnd target, ...). Handles released by
+    // the channel stay alive while another resource still references them, as in the compositor.
+    struct dcomp_resource
+    {
+        uint64_t shared_handle{};
+        std::vector<std::shared_ptr<dcomp_resource>> children{};
+        std::map<uint32_t, std::shared_ptr<dcomp_resource>> references{};
+    };
+
+    struct dcomp_channel
+    {
+        uint64_t command_buffer{};
+        std::unordered_map<uint32_t, std::shared_ptr<dcomp_resource>> resources{};
+    };
+
     struct pending_pipe_connection
     {
         std::u16string name{};
@@ -577,6 +592,8 @@ namespace sogen
         void add_knowndll_section(const std::u16string& name, const section& section, bool is_32bit);
         bool has_knowndll_section(const std::u16string& name, bool is_32bit) const;
 
+        std::optional<hwnd> find_composition_surface_window(uint64_t surface_handle) const;
+
         void serialize(utils::buffer_serializer& buffer, const emulator_thread* active_thread) const;
         void deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread);
 
@@ -815,10 +832,8 @@ namespace sogen
         std::deque<pending_pipe_connection> pending_pipe_connections{};
         uint32_t next_pipe_connection_serial{};
 
-        // DirectComposition command-buffer mapping of every channel this process created, keyed by channel handle.
-        std::map<uint64_t, uint64_t> dcomp_channel_buffers{};
-        // Window the DirectComposition device last bound a target to; composition swap chains present into it.
-        uint64_t dcomp_target_window{};
+        std::map<uint64_t, dcomp_channel> dcomp_channels{};
+        std::map<uint64_t, hwnd> dcomp_hwnd_targets{};
         // Windows owned by a child host process that were reparented under one of this process's windows,
         // mapped to that parent. Pointer input hitting the parent is offered to them (see window_control).
         std::map<hwnd, hwnd> foreign_child_windows{};

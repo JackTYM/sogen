@@ -70,6 +70,19 @@ namespace sogen
             return sid_string_to_bytes(sid_string);
         }
 
+        bool visual_shows_surface(const dcomp_resource& visual, const uint64_t surface_handle)
+        {
+            constexpr uint32_t visual_content_property = 0xA;
+
+            const auto content = visual.references.find(visual_content_property);
+            if (content != visual.references.end() && content->second->shared_handle == surface_handle)
+            {
+                return true;
+            }
+
+            return std::ranges::any_of(visual.children, [&](const auto& child) { return visual_shows_surface(*child, surface_handle); });
+        }
+
         emulator_allocator create_allocator(memory_manager& memory, const size_t size, const bool is_wow64_process)
         {
             uint64_t default_allocation_base =
@@ -830,6 +843,27 @@ namespace sogen
         cls.access([&](USER_CLASS& value) { value.lpszAnsiClassName = ansi_class_name_ptr; });
 
         return cls_ptr;
+    }
+
+    std::optional<hwnd> process_context::find_composition_surface_window(const uint64_t surface_handle) const
+    {
+        constexpr uint32_t target_root_property = 0xD;
+
+        for (const auto& channel : this->dcomp_channels | std::views::values)
+        {
+            for (const auto& resource : channel.resources | std::views::values)
+            {
+                const auto target = this->dcomp_hwnd_targets.find(resource->shared_handle);
+                const auto root = resource->references.find(target_root_property);
+                if (target != this->dcomp_hwnd_targets.end() && root != resource->references.end() &&
+                    visual_shows_surface(*root->second, surface_handle))
+                {
+                    return target->second;
+                }
+            }
+        }
+
+        return std::nullopt;
     }
 
     void process_context::serialize(utils::buffer_serializer& buffer, const emulator_thread* active_thread) const
