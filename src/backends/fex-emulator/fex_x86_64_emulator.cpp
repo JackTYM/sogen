@@ -5142,23 +5142,6 @@ namespace sogen::fex
         }
 #endif
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-        {
-            // FEXCore has blessed its whole JIT region by now. Keeping the debugger attached makes it swallow every
-            // guest fault (e.g. each KUSD read, which can never be mapped inside a 64-bit iOS process's low 4GiB),
-            // so release it and let faults reach sogen's own signal handlers like on the other platforms.
-            static std::once_flag detach_once;
-            std::call_once(detach_once, [] {
-                if (std::getenv("EMULATOR_FEX_KEEP_JIT_DEBUGGER") == nullptr)
-                {
-                    sogen::utils::log_ios_device_milestone("[jit] FEX JIT region is blessed; detaching the JIT debugger");
-                    jit26_detach();
-                    sogen::utils::log_ios_device_milestone("[jit] JIT debugger detached");
-                }
-            });
-        }
-#endif
-
 #ifdef __APPLE__
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
@@ -5205,6 +5188,25 @@ namespace sogen::fex
         {
             this->create_thread32();
         }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        // Every FEX engine blesses its JIT code buffer through the attached debugger when its thread is created, so
+        // the debugger can only go once the last engine this process will ever create exists: both engines of a wow64
+        // vCPU, and no further vCPU. Keeping it attached makes it swallow every guest fault (e.g. each KUSD read,
+        // which can never be mapped inside a 64-bit iOS process's low 4GiB), so it is released as soon as that holds.
+        if (this->emulator_.vcpus_.size() == 1)
+        {
+            static std::once_flag detach_once;
+            std::call_once(detach_once, [] {
+                if (std::getenv("EMULATOR_FEX_KEEP_JIT_DEBUGGER") == nullptr)
+                {
+                    sogen::utils::log_ios_device_milestone("[jit] FEX JIT regions are blessed; detaching the JIT debugger");
+                    jit26_detach();
+                    sogen::utils::log_ios_device_milestone("[jit] JIT debugger detached");
+                }
+            });
+        }
+#endif
     }
 
     void fex_vcpu::create_thread32()
