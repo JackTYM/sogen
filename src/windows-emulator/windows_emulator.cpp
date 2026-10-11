@@ -1177,7 +1177,8 @@ namespace sogen
         this->child_control_channels_.erase(record_id);
     }
 
-    void windows_emulator::broadcast_named_pipe_write(const std::u16string_view name, const std::string_view data)
+    void windows_emulator::broadcast_named_pipe_write(const std::u16string_view name, const uint64_t connection_id, const bool to_server,
+                                                      const std::string_view data)
     {
         if (std::getenv("SOGEN_TRACE_PIPE_RELAY_HEALTH"))
         {
@@ -1194,6 +1195,8 @@ namespace sogen
         message.type = pipe_ipc_message_type::write;
         message.pipe_name = name;
         message.data = data;
+        message.connection_id = connection_id;
+        message.to_server = to_server;
 
         for (auto& peer : this->pipe_ipc_peers_)
         {
@@ -1201,7 +1204,8 @@ namespace sogen
         }
     }
 
-    void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name, const std::optional<uint32_t> client_process_id)
+    void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name, const uint64_t connection_id,
+                                                        const std::optional<uint32_t> client_process_id)
     {
         if (std::getenv("SOGEN_TRACE_PIPE_IO"))
         {
@@ -1218,6 +1222,7 @@ namespace sogen
         message.type = pipe_ipc_message_type::connect;
         message.pipe_name = name;
         message.client_process_id = client_process_id;
+        message.connection_id = connection_id;
 
         for (auto& peer : this->pipe_ipc_peers_)
         {
@@ -1282,11 +1287,12 @@ namespace sogen
 
                 if (message->type == pipe_ipc_message_type::write)
                 {
-                    deliver_bytes_to_named_pipe(this->process, message->pipe_name, message->data, nullptr);
+                    deliver_bytes_to_named_pipe(this->process, message->pipe_name, message->connection_id, message->to_server,
+                                                message->data, nullptr);
                 }
                 else if (message->type == pipe_ipc_message_type::connect)
                 {
-                    mark_named_pipe_connected(*this, this->process, message->pipe_name, message->client_process_id);
+                    connect_named_pipe_client(*this, this->process, message->pipe_name, message->connection_id, message->client_process_id);
                 }
                 else if (message->type == pipe_ipc_message_type::server_created)
                 {

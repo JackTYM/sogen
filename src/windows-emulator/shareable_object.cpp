@@ -122,11 +122,13 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            // A named pipe is routed by name, so the receiver only needs an instance with the same
-            // identity and parameters; it takes over the end the sender had.
+            // A named pipe end is routed by name and connection id, so the receiver only needs an instance
+            // with the same identity and parameters; it takes over the end the sender had.
             utils::buffer_serializer buffer{};
             buffer.write(pipe->name);
             buffer.write(pipe->is_server_instance);
+            buffer.write(pipe->connection_id);
+            buffer.write(pipe->accepting_connections);
             buffer.write(pipe->is_synchronous_handle);
             buffer.write(pipe->access);
             buffer.write(pipe->pipe_type);
@@ -214,6 +216,8 @@ namespace sogen
 
             buffer.read(pipe->name);
             buffer.read(pipe->is_server_instance);
+            buffer.read(pipe->connection_id);
+            buffer.read(pipe->accepting_connections);
             buffer.read(pipe->is_synchronous_handle);
             buffer.read(pipe->access);
             buffer.read(pipe->pipe_type);

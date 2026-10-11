@@ -31,6 +31,11 @@ namespace sogen
         // handle_named_pipe_create/mark_named_pipe_connected), or the newly-spawned pid being
         // announced for a `process_alive` message.
         std::optional<uint32_t> client_process_id{};
+
+        // The connection a `write` travels over and the connection a `connect` opens (see
+        // named_pipe::connection_id), and for a `write`, whether it is headed to the server end.
+        uint64_t connection_id{};
+        bool to_server{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via

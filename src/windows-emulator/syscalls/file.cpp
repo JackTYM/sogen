@@ -1619,8 +1619,7 @@ namespace sogen
                                            utils::string::to_hex_string(temp_buffer).c_str());
                     }
 
-                    deliver_bytes_to_named_pipe(c.proc, pipe->name, temp_buffer, pipe);
-                    c.win_emu.broadcast_named_pipe_write(pipe->name, temp_buffer);
+                    send_named_pipe_bytes(c.win_emu, *pipe, temp_buffer);
 
                     io_device_context ctx{c.emu};
                     ctx.event = handle{.bits = event};
@@ -1936,8 +1935,11 @@ namespace sogen
 
             c.win_emu.callbacks.on_generic_access("Creating/opening named pipe", filename);
 
-            mark_named_pipe_connected(c.win_emu, c.proc, filename, c.proc.process_id);
-            c.win_emu.broadcast_named_pipe_connect(filename, c.proc.process_id);
+            const auto connection_id = allocate_pipe_connection_id(c.proc);
+            if (!connect_named_pipe_client(c.win_emu, c.proc, filename, connection_id, c.proc.process_id))
+            {
+                c.win_emu.broadcast_named_pipe_connect(filename, connection_id, c.proc.process_id);
+            }
 
             io_device_creation_data data{};
 
@@ -1948,6 +1950,7 @@ namespace sogen
             if (auto* pipe_device = container.get_internal_device<named_pipe>())
             {
                 pipe_device->name = std::u16string(filename);
+                pipe_device->connection_id = connection_id;
                 pipe_device->access = desired_access;
                 pipe_device->is_synchronous_handle = (create_options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
             }
@@ -2502,6 +2505,11 @@ namespace sogen
 
             handle pipe_handle = c.proc.devices.store(std::move(container));
             file_handle.write(pipe_handle);
+
+            if (auto* pipe_device = c.proc.devices.get(pipe_handle)->get_internal_device<named_pipe>())
+            {
+                accept_pending_pipe_connection(c.win_emu, *pipe_device);
+            }
 
             c.win_emu.register_named_pipe_server(pipe_short_name(filename));
             c.win_emu.broadcast_named_pipe_server_created(filename);

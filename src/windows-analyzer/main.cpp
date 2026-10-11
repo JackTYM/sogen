@@ -659,6 +659,8 @@ namespace sogen
                 pipe->outbound_quota = inherited.outbound_quota;
                 pipe->default_timeout = inherited.default_timeout;
                 pipe->is_synchronous_handle = inherited.is_synchronous_handle;
+                pipe->is_server_instance = inherited.is_server_instance;
+                pipe->connection_id = inherited.connection_id;
             }
 
             if (!win_emu.process.devices.store_at(inherited.target_handle, std::move(container)))

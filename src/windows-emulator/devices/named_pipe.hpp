@@ -52,8 +52,8 @@ namespace sogen
 
     class named_pipe;
 
-    void deliver_bytes_to_named_pipe(process_context& proc, std::u16string_view name, std::string_view data,
-                                     const named_pipe* exclude_self);
+    void send_named_pipe_bytes(windows_emulator& win_emu, const named_pipe& sender, std::string_view data);
+    void accept_pending_pipe_connection(windows_emulator& win_emu, named_pipe& server);
 
     class named_pipe : public io_device
     {
@@ -73,6 +73,16 @@ namespace sogen
         // NtCreateFile connect (handle_named_pipe_create) creates a named_pipe object too, but it isn't a
         // server instance -- see windows_emulator::register_named_pipe_server, which this flag gates.
         bool is_server_instance{false};
+
+        // Identifies the client/server connection this end belongs to, the way real NPFS pairs one client
+        // handle with one server instance. A client end gets a fresh id when it opens the pipe (copies made
+        // by handle duplication or inheritance keep it); a server instance carries the id of the client it
+        // is connected to, or 0 while unconnected. Bytes are routed only to the opposite end with the same id.
+        uint64_t connection_id{};
+
+        // A server instance accepts a new client while listening. DisconnectNamedPipe takes it out of that
+        // state until the next ConnectNamedPipe; a freshly created instance starts out listening.
+        bool accepting_connections{true};
 
         // Mirrors the handle's real synchronous-vs-overlapped mode: false iff the creating
         // NtCreateFile/NtCreateNamedPipeFile's CreateOptions carried neither FILE_SYNCHRONOUS_IO_ALERT nor
@@ -174,8 +184,7 @@ namespace sogen
         }
 
         // Called once a client is known to have connected to this pipe instance, whether observed
-        // locally (handle_named_pipe_create's same-process device-table scan) or forwarded from a
-        // sibling OS process (mark_named_pipe_connected). Wakes a thread already parked in
+        // locally or forwarded from a sibling OS process (see connect_named_pipe_client). Wakes a thread already parked in
         // FSCTL_PIPE_LISTEN, in addition to the pre-existing synchronous client_connected check listen()
         // itself performs for the case where the client connects before the server ever listens.
         void mark_client_connected(windows_emulator& win_emu, std::optional<uint32_t> client_pid = std::nullopt)
@@ -335,9 +344,7 @@ namespace sogen
 
             if (c.io_control_code == FSCTL_PIPE_DISCONNECT)
             {
-                // DisconnectNamedPipe is synchronous on real Windows -- it never waits for a peer, it just
-                // tears down whatever connection state exists (none, here) immediately.
-                return STATUS_SUCCESS;
+                return this->disconnect();
             }
 
             if (c.io_control_code == FSCTL_PIPE_WAIT)
@@ -450,8 +457,28 @@ namespace sogen
         }
 
       private:
+        NTSTATUS disconnect()
+        {
+            if (!this->is_server_instance)
+            {
+                return STATUS_ILLEGAL_FUNCTION;
+            }
+
+            this->connection_id = 0;
+            this->client_connected = false;
+            this->accepting_connections = false;
+            this->write_queue.clear();
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS listen(windows_emulator& win_emu, const io_device_context& c)
         {
+            this->accepting_connections = true;
+            if (this->connection_id == 0)
+            {
+                accept_pending_pipe_connection(win_emu, *this);
+            }
+
             if (this->client_connected)
             {
                 this->client_connected = false;
@@ -793,64 +820,109 @@ namespace sogen
                                  u16_to_u8(this->name).c_str(), data.size(), c.thread().id, utils::string::to_hex_string(data).c_str());
             }
 
-            deliver_bytes_to_named_pipe(win_emu.process, this->name, data, this);
-            win_emu.broadcast_named_pipe_write(this->name, data);
-
+            send_named_pipe_bytes(win_emu, *this, data);
             return this->try_deliver_read(win_emu, c);
         }
     };
 
-    // Appends data to the write_queue of every named_pipe instance in proc.devices whose name matches,
-    // other than exclude_self. Used both for same-process delivery (a write on one same-named handle
-    // reaching another same-named handle in the same process's device table) and for applying a write
-    // forwarded from a sibling OS process (exclude_self is null there, since the writer's own instance
-    // isn't in this process's device table to begin with).
-    inline void deliver_bytes_to_named_pipe(process_context& proc, const std::u16string_view name, const std::string_view data,
-                                            const named_pipe* exclude_self)
+    inline uint64_t allocate_pipe_connection_id(process_context& proc)
     {
+        return (static_cast<uint64_t>(proc.process_id) << 32) | ++proc.next_pipe_connection_serial;
+    }
+
+    // Delivers bytes travelling over one connection to its server end (to_server) or client end, whether
+    // written in this process or forwarded from a sibling OS process (exclude_self is null there). Bytes
+    // for a connection still queued behind busy server instances wait with that pending connection.
+    inline void deliver_bytes_to_named_pipe(process_context& proc, const std::u16string_view name, const uint64_t connection_id,
+                                            const bool to_server, const std::string_view data, const named_pipe* exclude_self)
+    {
+        bool delivered = false;
         for (auto& entry : proc.devices)
         {
             auto* pipe = entry.second.get_internal_device<named_pipe>();
-            if (pipe && pipe != exclude_self && pipe->name == name)
+            if (pipe && pipe != exclude_self && pipe->name == name && pipe->is_server_instance == to_server &&
+                pipe->connection_id == connection_id)
             {
                 pipe->write_queue.emplace_back(data);
+                delivered = true;
+            }
+        }
+
+        if (delivered || !to_server)
+        {
+            return;
+        }
+
+        for (auto& pending : proc.pending_pipe_connections)
+        {
+            if (pending.name == name && pending.connection_id == connection_id)
+            {
+                pending.client_bytes.emplace_back(data);
+                return;
             }
         }
     }
 
-    // Marks every named_pipe instance in proc.devices whose name matches as having a connected client.
-    // Used both for a local client's NtCreateFile (handle_named_pipe_create, which passes its own
-    // c.proc.process_id as client_pid) and for a connect forwarded from a sibling OS process (which
-    // passes the sender's own PID, carried over the wire in pipe_ipc_message::client_process_id -- see
-    // named_pipe::client_process_id and broadcast_named_pipe_connect).
-    inline void mark_named_pipe_connected(windows_emulator& win_emu, process_context& proc, const std::u16string_view name,
-                                          std::optional<uint32_t> client_pid = std::nullopt)
+    inline void send_named_pipe_bytes(windows_emulator& win_emu, const named_pipe& sender, const std::string_view data)
     {
-        static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+        if (sender.connection_id == 0)
+        {
+            return;
+        }
 
-        bool matched = false;
+        const bool to_server = !sender.is_server_instance;
+        deliver_bytes_to_named_pipe(win_emu.process, sender.name, sender.connection_id, to_server, data, &sender);
+        win_emu.broadcast_named_pipe_write(sender.name, sender.connection_id, to_server, data);
+    }
+
+    // Connects a client to a listening server instance of this process. Returns false if this process
+    // serves no instance of the name; if it does but all of them are busy, the connection waits for the
+    // next instance that listens.
+    inline bool connect_named_pipe_client(windows_emulator& win_emu, process_context& proc, const std::u16string_view name,
+                                          const uint64_t connection_id, const std::optional<uint32_t> client_pid)
+    {
+        bool serves_name = false;
         for (auto& entry : proc.devices)
         {
-            if (auto* pipe = entry.second.get_internal_device<named_pipe>())
+            auto* pipe = entry.second.get_internal_device<named_pipe>();
+            if (!pipe || !pipe->is_server_instance || pipe->name != name)
             {
-                if (trace_pipe_io)
-                {
-                    win_emu.log.info("[pipe-io-trace] mark_named_pipe_connected candidate pipe='%s' incoming='%s' match=%d\n",
-                                     u16_to_u8(pipe->name).c_str(), u16_to_u8(name).c_str(), pipe->name == name);
-                }
+                continue;
+            }
 
-                if (pipe->name == name)
-                {
-                    matched = true;
-                    pipe->mark_client_connected(win_emu, client_pid);
-                }
+            serves_name = true;
+            if (pipe->accepting_connections && pipe->connection_id == 0)
+            {
+                pipe->connection_id = connection_id;
+                pipe->mark_client_connected(win_emu, client_pid);
+                return true;
             }
         }
 
-        if (trace_pipe_io && !matched)
+        if (serves_name)
         {
-            win_emu.log.info("[pipe-io-trace] mark_named_pipe_connected NO MATCH for incoming='%s'\n", u16_to_u8(name).c_str());
+            proc.pending_pipe_connections.push_back(
+                {.name = std::u16string(name), .connection_id = connection_id, .client_process_id = client_pid});
         }
+
+        return serves_name;
+    }
+
+    inline void accept_pending_pipe_connection(windows_emulator& win_emu, named_pipe& server)
+    {
+        auto& pending_connections = win_emu.process.pending_pipe_connections;
+        const auto pending =
+            std::ranges::find_if(pending_connections, [&](const pending_pipe_connection& p) { return p.name == server.name; });
+        if (pending == pending_connections.end())
+        {
+            return;
+        }
+
+        server.connection_id = pending->connection_id;
+        server.write_queue = std::move(pending->client_bytes);
+        const auto client_pid = pending->client_process_id;
+        pending_connections.erase(pending);
+        server.mark_client_connected(win_emu, client_pid);
     }
 
 } // namespace sogen

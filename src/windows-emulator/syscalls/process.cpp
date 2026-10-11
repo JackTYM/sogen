@@ -1510,6 +1510,8 @@ namespace sogen
                     .outbound_quota = pipe->outbound_quota,
                     .default_timeout = pipe->default_timeout,
                     .is_synchronous_handle = pipe->is_synchronous_handle,
+                    .is_server_instance = pipe->is_server_instance,
+                    .connection_id = pipe->connection_id,
                 });
             }
 

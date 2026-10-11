@@ -47,6 +47,8 @@ namespace sogen
         ULONG outbound_quota{};
         LARGE_INTEGER default_timeout{};
         bool is_synchronous_handle{true};
+        bool is_server_instance{};
+        uint64_t connection_id{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -61,6 +63,8 @@ namespace sogen
             buffer.write(this->outbound_quota);
             buffer.write(this->default_timeout);
             buffer.write(this->is_synchronous_handle);
+            buffer.write(this->is_server_instance);
+            buffer.write(this->connection_id);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -76,6 +80,8 @@ namespace sogen
             buffer.read(this->outbound_quota);
             buffer.read(this->default_timeout);
             buffer.read(this->is_synchronous_handle);
+            buffer.read(this->is_server_instance);
+            buffer.read(this->connection_id);
         }
     };
 
@@ -489,11 +495,12 @@ namespace sogen
         // Drops the control channel for record_id, e.g. once its child has exited.
         void drop_child_control_channel(uint32_t record_id);
 
-        // Broadcasts a named-pipe write/connect to every registered peer, so a same-named pipe instance
-        // in a sibling OS process observes it exactly like a same-process peer instance would (see
-        // deliver_bytes_to_named_pipe/mark_named_pipe_connected in devices/named_pipe.hpp).
-        void broadcast_named_pipe_write(std::u16string_view name, std::string_view data);
-        void broadcast_named_pipe_connect(std::u16string_view name, std::optional<uint32_t> client_process_id = std::nullopt);
+        // Broadcasts a named-pipe write/connect to every registered peer, so the other end of the connection
+        // in a sibling OS process observes it exactly like a same-process one would (see
+        // deliver_bytes_to_named_pipe/connect_named_pipe_client in devices/named_pipe.hpp).
+        void broadcast_named_pipe_write(std::u16string_view name, uint64_t connection_id, bool to_server, std::string_view data);
+        void broadcast_named_pipe_connect(std::u16string_view name, uint64_t connection_id,
+                                          std::optional<uint32_t> client_process_id = std::nullopt);
         void broadcast_named_pipe_server_created(std::u16string_view name);
 
         // Announces a newly-spawned guest pid (handle_NtCreateUserProcess) to every peer, which relays

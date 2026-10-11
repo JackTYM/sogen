@@ -205,6 +205,14 @@ namespace sogen
         }
     };
 
+    struct pending_pipe_connection
+    {
+        std::u16string name{};
+        uint64_t connection_id{};
+        std::optional<uint32_t> client_process_id{};
+        std::deque<std::string> client_bytes{};
+    };
+
     struct process_context
     {
         struct callbacks
@@ -800,6 +808,11 @@ namespace sogen
         user_handle_store<handle_types::window, window> windows{user_handles};
         user_handle_store<handle_types::type::menu, menu> menus{user_handles};
         handle_store<handle_types::timer, timer> timers{};
+
+        // Client connections to a pipe name this process serves while every server instance of that name is busy;
+        // the next instance to listen takes the oldest one, with any bytes the client already wrote.
+        std::deque<pending_pipe_connection> pending_pipe_connections{};
+        uint32_t next_pipe_connection_serial{};
 
         // DirectComposition command-buffer mapping of every channel this process created, keyed by channel handle.
         std::map<uint64_t, uint64_t> dcomp_channel_buffers{};

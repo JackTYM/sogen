@@ -490,6 +490,8 @@ namespace sogen
                 buffer.write(message.pipe_name);
                 buffer.write(message.data);
                 buffer.write_optional(message.client_process_id);
+                buffer.write(message.connection_id);
+                buffer.write(message.to_server);
 
                 const auto framed = frame_message(buffer.get_buffer());
                 this->pending_send_.insert(this->pending_send_.end(), framed.begin(), framed.end());
@@ -539,6 +541,8 @@ namespace sogen
                 deserializer.read(message.pipe_name);
                 deserializer.read(message.data);
                 deserializer.read_optional(message.client_process_id);
+                deserializer.read(message.connection_id);
+                deserializer.read(message.to_server);
 
                 return message;
             }
