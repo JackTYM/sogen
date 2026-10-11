@@ -2,6 +2,7 @@
 #include "../debug_font.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "dxgk_adapters.hpp"
 
 #include <array>
 #include <bit>
@@ -192,13 +193,9 @@ namespace sogen
                 std::array<gdi_batch_pat_rect, 1> rects{};
             };
 
-            constexpr uint32_t k_dxgk_adapter_count = 1;
-            constexpr uint32_t k_dxgk_adapter_handle = 0x4000;
             constexpr uint32_t k_dxgk_device_handle = 0x5000;
             constexpr uint32_t k_dxgk_context_handle = 0x6000;
             constexpr uint32_t k_dxgk_shared_primary_handle = 0x7000;
-            constexpr LUID k_dxgk_adapter_luid = {0x1000, 0};
-            constexpr uint32_t k_dxgk_adapter_source_count = 1;
             constexpr uint32_t k_dxgk_command_buffer_size = 0x1000;
             constexpr uint32_t k_dxgk_allocation_list_entry_size = 8;
             constexpr uint32_t k_dxgk_patch_location_list_entry_size = 24;
@@ -210,10 +207,7 @@ namespace sogen
             // overflow uint32. With these caps the byte sizes stay well under 4 GiB.
             constexpr uint32_t k_dxgk_max_command_buffer_size = 0x4000000; // 64 MiB
             constexpr uint32_t k_dxgk_max_list_count = 0x10000;            // 64k entries (<= 1.5 MiB of list bytes)
-            constexpr uint64_t k_dxgk_dedicated_video_memory_size = 4ull * 1024 * 1024 * 1024;
             constexpr uint64_t k_dxgk_shared_system_memory_size = 8ull * 1024 * 1024 * 1024;
-            constexpr uint32_t k_dxgk_fake_vendor_id = 0x1414;
-            constexpr uint32_t k_dxgk_fake_device_id = 0x02C1;
             constexpr uint32_t k_dxgk_fake_revision_id = 0xA1;
             constexpr int64_t k_dxgk_fake_umd_driver_version = 0x001F0000000F17CE; // 31.0.15.6094
             constexpr uint32_t k_dxgk_open_resource_resource_private_size = 0x18;
@@ -221,7 +215,6 @@ namespace sogen
             constexpr uint32_t k_dxgk_open_resource_descriptor_size = 0x80;
             constexpr uint32_t k_dxgk_open_resource_total_private_size =
                 k_dxgk_open_resource_allocation_private_size + k_dxgk_open_resource_descriptor_size;
-            constexpr GUID k_dxgk_adapter_guid = {0x5b45201d, 0xf2f2, 0x4f3b, {0x85, 0xbb, 0x30, 0xff, 0x1f, 0x95, 0x35, 0x99}};
 
             uint64_t ensure_gdi_shared_table(const syscall_context& c)
             {
@@ -1473,12 +1466,12 @@ namespace sogen
 #endif
             }
 
-            EMU_D3DKMT_ADAPTERINFO make_default_dxgk_adapter_info()
+            EMU_D3DKMT_ADAPTERINFO make_dxgk_adapter_info(const dxgk_adapter& adapter)
             {
                 EMU_D3DKMT_ADAPTERINFO adapter_info{};
-                adapter_info.hAdapter = k_dxgk_adapter_handle;
-                adapter_info.AdapterLuid = k_dxgk_adapter_luid;
-                adapter_info.NumOfSources = k_dxgk_adapter_source_count;
+                adapter_info.hAdapter = adapter.handle;
+                adapter_info.AdapterLuid = adapter.luid;
+                adapter_info.NumOfSources = adapter.source_count;
                 adapter_info.bPrecisePresentRegionsPreferred = FALSE;
                 return adapter_info;
             }
@@ -4439,20 +4432,23 @@ namespace sogen
             return read_gdi_entry_for_handle(c, static_cast<uint32_t>(h.bits), entry, entry_addr) ? TRUE : FALSE;
         }
 
-        NTSTATUS write_default_dxgk_adapter_array(const syscall_context& c, const UINT32 num_adapters, const UINT64 adapters_ptr)
+        NTSTATUS write_dxgk_adapter_array(const syscall_context& c, const UINT32 num_adapters, const UINT64 adapters_ptr)
         {
             if (adapters_ptr == 0)
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
-            if (num_adapters < k_dxgk_adapter_count)
+            if (num_adapters < k_dxgk_adapters.size())
             {
                 return STATUS_BUFFER_TOO_SMALL;
             }
 
-            const auto adapter_info = make_default_dxgk_adapter_info();
-            c.emu.write_memory(adapters_ptr, &adapter_info, sizeof(adapter_info));
+            for (size_t i = 0; i < k_dxgk_adapters.size(); ++i)
+            {
+                const auto adapter_info = make_dxgk_adapter_info(k_dxgk_adapters[i]);
+                c.emu.write_memory(adapters_ptr + (i * sizeof(adapter_info)), &adapter_info, sizeof(adapter_info));
+            }
 
             return STATUS_SUCCESS;
         }
@@ -4468,17 +4464,17 @@ namespace sogen
             enum_adapters.access([&](EMU_D3DKMT_ENUMADAPTERS2& desc) {
                 if (desc.pAdapters == 0)
                 {
-                    desc.NumAdapters = k_dxgk_adapter_count;
+                    desc.NumAdapters = static_cast<UINT32>(k_dxgk_adapters.size());
                     return;
                 }
 
-                status = write_default_dxgk_adapter_array(c, desc.NumAdapters, desc.pAdapters);
+                status = write_dxgk_adapter_array(c, desc.NumAdapters, desc.pAdapters);
                 if (status != STATUS_SUCCESS)
                 {
                     return;
                 }
 
-                desc.NumAdapters = k_dxgk_adapter_count;
+                desc.NumAdapters = static_cast<UINT32>(k_dxgk_adapters.size());
             });
 
             return status;
@@ -4495,17 +4491,17 @@ namespace sogen
             enum_adapters.access([&](EMU_D3DKMT_ENUMADAPTERS3& desc) {
                 if (desc.pAdapters == 0)
                 {
-                    desc.NumAdapters = k_dxgk_adapter_count;
+                    desc.NumAdapters = static_cast<UINT32>(k_dxgk_adapters.size());
                     return;
                 }
 
-                status = write_default_dxgk_adapter_array(c, desc.NumAdapters, desc.pAdapters);
+                status = write_dxgk_adapter_array(c, desc.NumAdapters, desc.pAdapters);
                 if (status != STATUS_SUCCESS)
                 {
                     return;
                 }
 
-                desc.NumAdapters = k_dxgk_adapter_count;
+                desc.NumAdapters = static_cast<UINT32>(k_dxgk_adapters.size());
             });
 
             return status;
@@ -4535,8 +4531,8 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                info.LuidLow = k_dxgk_adapter_luid.LowPart;
-                info.LuidHigh = k_dxgk_adapter_luid.HighPart;
+                info.LuidLow = primary_dxgk_adapter().luid.LowPart;
+                info.LuidHigh = static_cast<UINT32>(primary_dxgk_adapter().luid.HighPart);
                 info.SourceId = 0;
                 info.Flags = 1;
 
@@ -4568,10 +4564,14 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
-            if (query.hAdapter != k_dxgk_adapter_handle)
+            const auto* queried_adapter = find_dxgk_adapter_by_handle(query.hAdapter);
+            if (!queried_adapter)
             {
                 dxgk_warn(c, "NtGdiDdDDIQueryAdapterInfo: Querying unknown adapter handle 0x%X", query.hAdapter);
+                queried_adapter = &primary_dxgk_adapter();
             }
+
+            const auto& adapter = *queried_adapter;
 
             if (std::getenv("SOGEN_TRACE_DXGK_QUERY_TYPES"))
             {
@@ -4613,7 +4613,7 @@ namespace sogen
                         UINT64 SharedSystemMemorySize;
                     } segment_info{};
 
-                    segment_info.DedicatedVideoMemorySize = k_dxgk_dedicated_video_memory_size;
+                    segment_info.DedicatedVideoMemorySize = adapter.dedicated_video_memory_size;
                     segment_info.DedicatedSystemMemorySize = 0;
                     segment_info.SharedSystemMemorySize = k_dxgk_shared_system_memory_size;
 
@@ -4632,7 +4632,7 @@ namespace sogen
                         UINT64 SharedSystemMemorySize;
                     } segment_data{};
 
-                    segment_data.DedicatedVideoMemorySize = k_dxgk_dedicated_video_memory_size;
+                    segment_data.DedicatedVideoMemorySize = adapter.dedicated_video_memory_size;
                     segment_data.DedicatedSystemMemorySize = 0;
                     segment_data.SharedSystemMemorySize = k_dxgk_shared_system_memory_size;
 
@@ -4644,8 +4644,7 @@ namespace sogen
             }
 
             case KMTQAITYPE::KMTQAITYPE_ADAPTERGUID: {
-                GUID adapter_guid = k_dxgk_adapter_guid;
-                return write_query_adapter_info(c, query, adapter_guid);
+                return write_query_adapter_info(c, query, adapter.guid);
             }
 
             case KMTQAITYPE::KMTQAITYPE_FLIPQUEUEINFO: {
@@ -4698,7 +4697,7 @@ namespace sogen
             }
 
             case KMTQAITYPE::KMTQAITYPE_ADAPTERTYPE: {
-                return write_query_adapter_info(c, query, 1);
+                return write_query_adapter_info(c, query, adapter.adapter_type);
             }
 
             case KMTQAITYPE::KMTQAITYPE_PHYSICALADAPTERCOUNT: {
@@ -4717,8 +4716,8 @@ namespace sogen
                     UINT32 FunctionNumber;
                 } ids{};
 
-                ids.VendorID = k_dxgk_fake_vendor_id;
-                ids.DeviceID = k_dxgk_fake_device_id;
+                ids.VendorID = k_dxgk_adapter_vendor_id;
+                ids.DeviceID = adapter.device_id;
                 ids.SubSystemID = 0;
                 ids.RevisionID = k_dxgk_fake_revision_id;
                 ids.BusNumber = 0;
@@ -4729,12 +4728,11 @@ namespace sogen
             }
 
             case KMTQAITYPE::KMTQAITYPE_ADAPTERTYPE_RENDER: {
-                return write_query_adapter_info(c, query, 1);
+                return write_query_adapter_info(c, query, adapter.adapter_type);
             }
 
             case KMTQAITYPE::KMTQAITYPE_QUERY_ADAPTER_UNIQUE_GUID: {
-                GUID unique_guid = k_dxgk_adapter_guid;
-                return write_query_adapter_info(c, query, unique_guid);
+                return write_query_adapter_info(c, query, adapter.guid);
             }
 
             case KMTQAITYPE::KMTQAITYPE_DRIVER_DESCRIPTION_RENDER: {
@@ -4748,7 +4746,7 @@ namespace sogen
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                utils::string::copy(driver_description.DriverDescription, u"Microsoft RemoteFX Graphics Device");
+                utils::string::copy(driver_description.DriverDescription, adapter.description);
 
                 c.emu.write_memory(query.pPrivateDriverData, &driver_description, sizeof(driver_description));
                 return STATUS_SUCCESS;
@@ -4857,7 +4855,7 @@ namespace sogen
             }
 
             device_desc.access([&](EMU_D3DKMT_CREATEDEVICE& create_device) {
-                if (create_device.hAdapter != k_dxgk_adapter_handle)
+                if (!find_dxgk_adapter_by_handle(create_device.hAdapter))
                 {
                     dxgk_warn(c, "NtGdiDdDDICreateDevice: Invalid Adapter Handle 0x%X", create_device.hAdapter);
                 }
@@ -4882,7 +4880,7 @@ namespace sogen
 
             auto escape = escape_desc.read();
 
-            if (escape.hAdapter != k_dxgk_adapter_handle)
+            if (!find_dxgk_adapter_by_handle(escape.hAdapter))
             {
                 dxgk_warn(c, "NtGdiDdDDIEscape: Unknown Adapter 0x%X", escape.hAdapter);
             }
@@ -5358,7 +5356,7 @@ namespace sogen
             NTSTATUS status = STATUS_SUCCESS;
 
             display_mode_list.access([&](EMU_D3DKMT_GETDISPLAYMODELIST& params) {
-                if (params.hAdapter != k_dxgk_adapter_handle)
+                if (!find_dxgk_adapter_by_handle(params.hAdapter))
                 {
                     dxgk_warn(c, "NtGdiDdDDIGetDisplayModeList: Unknown adapter 0x%X", params.hAdapter);
                 }
@@ -5403,7 +5401,7 @@ namespace sogen
             }
 
             shared_primary.access([&](EMU_D3DKMT_GETSHAREDPRIMARYHANDLE& params) {
-                if (params.hAdapter != k_dxgk_adapter_handle)
+                if (!find_dxgk_adapter_by_handle(params.hAdapter))
                 {
                     dxgk_warn(c, "NtGdiDdDDIGetSharedPrimaryHandle: Unknown adapter 0x%X", params.hAdapter);
                 }
@@ -6095,8 +6093,9 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
-            open_adapter.access([](EMU_D3DKMT_OPENADAPTERFROMLUID& params) { //
-                params.hAdapter = k_dxgk_adapter_handle;
+            open_adapter.access([](EMU_D3DKMT_OPENADAPTERFROMLUID& params) {
+                const auto* adapter = find_dxgk_adapter_by_luid(params.AdapterLuid);
+                params.hAdapter = (adapter ? *adapter : primary_dxgk_adapter()).handle;
             });
 
             return STATUS_SUCCESS;
@@ -6111,8 +6110,8 @@ namespace sogen
             }
 
             open_adapter.access([](EMU_D3DKMT_OPENADAPTERFROMHDC& open_params) {
-                open_params.hAdapter = k_dxgk_adapter_handle;
-                open_params.AdapterLuid = k_dxgk_adapter_luid;
+                open_params.hAdapter = primary_dxgk_adapter().handle;
+                open_params.AdapterLuid = primary_dxgk_adapter().luid;
                 open_params.VidPnSourceId = 0;
             });
 

@@ -6,6 +6,7 @@
 #include "../window_control.hpp"
 #include "../cross_process.hpp"
 #include "segment_utils.hpp"
+#include "dxgk_adapters.hpp"
 #include "windows-emulator/user_callback_dispatch.hpp"
 #include <limits>
 
@@ -6110,7 +6111,7 @@ namespace sogen
                 const emulator_object<EMU_DISPLAYCONFIG_GET_SOURCE_FROM_HASH> source_from_hash{c.emu, packet};
 
                 source_from_hash.access([](EMU_DISPLAYCONFIG_GET_SOURCE_FROM_HASH& req) {
-                    req.adapterId = {.LowPart = 0x1000, .HighPart = 0}; // Must match k_dxgk_adapter_luid!
+                    req.adapterId = primary_dxgk_adapter().luid;
                     req.sourceId = 0;
                 });
 
@@ -6126,24 +6127,22 @@ namespace sogen
                 const emulator_object<EMU_GET_DISPLAY_INFO> display_info{c.emu, packet};
 
                 display_info.access([](EMU_GET_DISPLAY_INFO& info) {
-                    const bool known_adapter =
-                        info.adapterId.LowPart == 0x1000 && info.adapterId.HighPart == 0; // Must match k_dxgk_adapter_luid!
-
-                    if (!known_adapter)
+                    const auto* adapter = find_dxgk_adapter_by_luid(info.adapterId);
+                    if (!adapter)
                     {
                         return;
                     }
 
-                    const auto fill_block = [](EMU_DISPLAY_INFO_DEVICE_BLOCK& block) {
+                    const auto fill_block = [adapter](EMU_DISPLAY_INFO_DEVICE_BLOCK& block) {
                         block.Valid = 1;
-                        block.VendorID = 0x1414;
-                        block.DeviceID = 0x02C1;
-                        block.SubSystemVendorID = 0x1414;
+                        block.VendorID = k_dxgk_adapter_vendor_id;
+                        block.DeviceID = adapter->device_id;
+                        block.SubSystemVendorID = k_dxgk_adapter_vendor_id;
                         block.SubSystemID = 0;
                         block.RevisionID = 0xA1;
                         block.WddmVersion = 3200;
 
-                        utils::string::copy(block.AdapterDesc, u"Microsoft RemoteFX Graphics Device");
+                        utils::string::copy(block.AdapterDesc, adapter->description);
                         utils::string::copy(
                             block.AdapterDevicePath,
                             u"\\\\?\\PCI#VEN_1414&DEV_02C1&SUBSYS_00000000&REV_A1#4&1234567&0&0008#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}");
@@ -6165,28 +6164,41 @@ namespace sogen
                 const emulator_object<EMU_GET_DISPLAY_INFO_EX> display_info{c.emu, packet};
 
                 display_info.access([](EMU_GET_DISPLAY_INFO_EX& info) {
-                    const bool known_adapter =
-                        info.adapterId.LowPart == 0x1000 && info.adapterId.HighPart == 0; // Must match k_dxgk_adapter_luid!
-                    const bool known_source = info.sourceId == 0;
-
                     info.FailurePoint = 0;
 
-                    if (!known_adapter || !known_source)
+                    const auto* adapter = find_dxgk_adapter_by_luid(info.adapterId);
+                    if (!adapter)
                     {
                         return;
                     }
 
-                    info.DisplayAdapterVendorID = 0x1414;
-                    info.DisplayAdapterDeviceID = 0x02C1;
+                    // Adapters without display sources (render-only) are queried with source id 0xFFFFFFFF.
+                    const bool has_sources = adapter->source_count != 0;
+                    const bool known_source = has_sources ? info.sourceId < adapter->source_count : info.sourceId == ~0u;
+                    if (!known_source)
+                    {
+                        return;
+                    }
 
-                    info.VendorID = 0x1414;
-                    info.DeviceID = 0x02C1;
+                    info.DisplayAdapterVendorID = k_dxgk_adapter_vendor_id;
+                    info.DisplayAdapterDeviceID = adapter->device_id;
+
+                    info.VendorID = k_dxgk_adapter_vendor_id;
+                    info.DeviceID = adapter->device_id;
                     info.SubSysID0 = 0;
                     info.SubSysID1 = 0;
                     info.RevisionID = 0xA1;
                     info.WddmVersion = 2700;
 
-                    utils::string::copy(info.AdapterDesc, u"Microsoft RemoteFX Graphics Device");
+                    utils::string::copy(info.AdapterDesc, adapter->description);
+
+                    info.ReservedQwordLow = 0;
+                    info.ReservedQwordHigh = 0;
+
+                    if (!has_sources)
+                    {
+                        return;
+                    }
 
                     info.DisplayLeft = 0;
                     info.DisplayTop = 0;
@@ -6194,9 +6206,6 @@ namespace sogen
                     info.DisplayHeight = 1080;
 
                     utils::string::copy(info.DeviceName, u"\\\\.\\DISPLAY1");
-
-                    info.ReservedQwordLow = 0;
-                    info.ReservedQwordHigh = 0;
                 });
 
                 return STATUS_SUCCESS;
