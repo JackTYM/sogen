@@ -4066,6 +4066,44 @@ namespace sogen
             return s.was_visible ? TRUE : FALSE;
         }
 
+        // DefWindowProc turns a print request into messages for the window procedure itself: WM_PRINT becomes
+        // WM_ERASEBKGND and WM_PRINTCLIENT, and an unhandled WM_PRINTCLIENT becomes a WM_PAINT carrying the target DC.
+        uint64_t dispatch_default_print_messages(const syscall_context& c, const window& win, const UINT msg, const uint64_t w_param,
+                                                 const uint64_t l_param)
+        {
+            constexpr uint64_t prf_check_visible = 0x1;
+            constexpr uint64_t prf_client = 0x4;
+            constexpr uint64_t prf_erase_background = 0x8;
+
+            message_call_state state{};
+            state.window = win.handle;
+            state.message = msg;
+
+            if (msg == WM_PRINTCLIENT)
+            {
+                state.follow_up_messages.push_back({.message = WM_PAINT, .wParam = w_param, .lParam = 0});
+            }
+            else if ((l_param & prf_check_visible) == 0 || c.proc.is_window_effectively_visible(win.handle))
+            {
+                if ((l_param & prf_client) != 0)
+                {
+                    state.follow_up_messages.push_back({.message = WM_PRINTCLIENT, .wParam = w_param, .lParam = l_param});
+                }
+                if ((l_param & prf_erase_background) != 0)
+                {
+                    state.follow_up_messages.push_back({.message = WM_ERASEBKGND, .wParam = w_param, .lParam = 0});
+                }
+            }
+
+            if (state.follow_up_messages.empty())
+            {
+                return 0;
+            }
+
+            dispatch_next_message(c, callback_id::NtUserMessageCall, std::move(state), win, state.follow_up_messages);
+            return {};
+        }
+
         uint64_t handle_NtUserMessageCall(const syscall_context& c, const hwnd hwnd, const UINT msg, const uint64_t w_param,
                                           const uint64_t l_param, const uint64_t result_info, const DWORD type, const BOOL ansi)
         {
@@ -4077,6 +4115,11 @@ namespace sogen
 
             if (type == FNID_DEFWINDOW)
             {
+                if (msg == WM_PRINT || msg == WM_PRINTCLIENT)
+                {
+                    return dispatch_default_print_messages(c, *win, msg, w_param, l_param);
+                }
+
                 const auto result = handle_default_window_proc_message(c, *win, msg, w_param, l_param, ansi);
                 return write_message_call_result(c, result_info, result) ? TRUE : FALSE;
             }
@@ -4161,6 +4204,15 @@ namespace sogen
             if (state.scratch_text != 0)
             {
                 c.win_emu.memory.release_memory(state.scratch_text, 0);
+            }
+
+            if (!state.follow_up_messages.empty())
+            {
+                if (const auto* target = c.proc.windows.get(state.window))
+                {
+                    dispatch_next_message(c, callback_id::NtUserMessageCall, std::move(state), *target, state.follow_up_messages);
+                    return {};
+                }
             }
             if (state.message == WM_PAINT)
             {

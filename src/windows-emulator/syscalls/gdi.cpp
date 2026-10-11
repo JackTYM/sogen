@@ -6157,6 +6157,11 @@ namespace sogen
             return bgra_to_colorref(bgra);
         }
 
+        COLORREF handle_NtGdiGetNearestColor(const syscall_context& /*c*/, const hdc /*dc*/, const COLORREF color)
+        {
+            return color & 0x00FFFFFFu;
+        }
+
         COLORREF handle_NtGdiGetPixel(const syscall_context& c, const hdc dc, const int x, const int y)
         {
             constexpr uint64_t clr_invalid = 0xFFFFFFFF;

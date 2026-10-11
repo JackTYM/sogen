@@ -864,6 +864,7 @@ namespace sogen
         BOOL handle_NtGdiPatBlt(const syscall_context& c, hdc dc, LONG x, LONG y, LONG width, LONG height, DWORD rop);
         COLORREF handle_NtGdiSetPixel(const syscall_context& c, hdc dc, int x, int y, COLORREF color);
         COLORREF handle_NtGdiGetPixel(const syscall_context& c, hdc dc, int x, int y);
+        COLORREF handle_NtGdiGetNearestColor(const syscall_context& c, hdc dc, COLORREF color);
         BOOL handle_NtGdiBitBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int width, int height, hdc src_dc, int x_src,
                                 int y_src, DWORD rop, DWORD cr_back_color, FLONG fl);
         BOOL handle_NtGdiMaskBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int width, int height, hdc src_dc, int x_src,
@@ -3849,6 +3850,7 @@ namespace sogen
         add_handler(NtGdiPatBlt);
         add_handler(NtGdiBitBlt);
         add_handler(NtGdiMaskBlt);
+        add_handler(NtGdiGetNearestColor);
         add_handler(NtGdiStretchBlt);
         add_handler(NtGdiTransparentBlt);
         add_handler(NtGdiAlphaBlend);

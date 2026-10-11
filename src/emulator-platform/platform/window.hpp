@@ -269,6 +269,8 @@ namespace sogen
 #define WM_PAINT                    0x000F
 #define WM_CLOSE                    0x0010
 #define WM_ERASEBKGND               0x0014
+#define WM_PRINT                    0x0317
+#define WM_PRINTCLIENT              0x0318
 #define WM_NCHITTEST                0x0084
 #define WM_GETMINMAXINFO            0x0024
 #define WM_KEYDOWN                  0x0100

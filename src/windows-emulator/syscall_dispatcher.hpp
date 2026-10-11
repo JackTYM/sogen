@@ -222,6 +222,7 @@ namespace sogen
         UINT message{};
         uint64_t scratch_text{}; // guest buffer holding a re-encoded text payload; freed on completion
         bool dispatching_result_callback{};
+        std::vector<qmsg> follow_up_messages{}; // messages DefWindowProc still has to send, last one first
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -230,6 +231,7 @@ namespace sogen
             buffer.write(this->message);
             buffer.write(this->scratch_text);
             buffer.write(this->dispatching_result_callback);
+            buffer.write_vector(this->follow_up_messages);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -238,6 +240,7 @@ namespace sogen
             buffer.read(this->message);
             buffer.read(this->scratch_text);
             buffer.read(this->dispatching_result_callback);
+            buffer.read_vector(this->follow_up_messages);
         }
     };
 
