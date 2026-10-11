@@ -3476,10 +3476,67 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG /*x_left*/, const LONG /*y_top*/, const LONG /*x_right*/,
-                                           const LONG /*y_bottom*/)
+        // RGNATTR, the user-mode region attribute gdi32 reads for its rectangle fast paths.
+        struct gdi_region_attr
         {
-            return allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
+            ULONG attr_flags;
+            ULONG complexity;
+            RECT bounds;
+        };
+
+        constexpr ULONG k_gdi_region_attr_valid = 0x1;
+        constexpr ULONG k_gdi_null_region = 1;
+        constexpr ULONG k_gdi_simple_region = 2;
+
+        uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG x_left, const LONG y_top, const LONG x_right,
+                                           const LONG y_bottom)
+        {
+            const auto region = allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
+
+            uint64_t region_attr = 0;
+            if (!get_gdi_object_address(c, region, k_gdi_region_type, region_attr))
+            {
+                return region;
+            }
+
+            gdi_region_attr attr{.attr_flags = k_gdi_region_attr_valid};
+            attr.bounds = {std::min(x_left, x_right), std::min(y_top, y_bottom), std::max(x_left, x_right), std::max(y_top, y_bottom)};
+
+            if (attr.bounds.left == attr.bounds.right || attr.bounds.top == attr.bounds.bottom)
+            {
+                attr.complexity = k_gdi_null_region;
+                attr.bounds = {};
+            }
+            else
+            {
+                attr.complexity = k_gdi_simple_region;
+            }
+
+            c.emu.write_memory(region_attr, attr);
+            return region;
+        }
+
+        BOOL handle_NtGdiEqualRgn(const syscall_context& c, const handle first_region, const handle second_region)
+        {
+            uint64_t first_attr_address = 0;
+            uint64_t second_attr_address = 0;
+            if (!get_gdi_object_address(c, static_cast<uint32_t>(first_region.bits), k_gdi_region_type, first_attr_address) ||
+                !get_gdi_object_address(c, static_cast<uint32_t>(second_region.bits), k_gdi_region_type, second_attr_address))
+            {
+                return FALSE;
+            }
+
+            const auto first = c.emu.read_memory<gdi_region_attr>(first_attr_address);
+            const auto second = c.emu.read_memory<gdi_region_attr>(second_attr_address);
+
+            if (first.complexity != second.complexity)
+            {
+                return FALSE;
+            }
+
+            return first.complexity == k_gdi_null_region ||
+                   (first.bounds.left == second.bounds.left && first.bounds.top == second.bounds.top &&
+                    first.bounds.right == second.bounds.right && first.bounds.bottom == second.bounds.bottom);
         }
 
         int32_t handle_NtGdiGetRandomRgn(const syscall_context&, const hdc dc, const uint64_t region, const LONG /*index*/)
@@ -5601,6 +5658,34 @@ namespace sogen
         // software (WARP) device has no such bridge participant: DXGI's blt-model presentation for a
         // windowed WARP swapchain copies the backbuffer into the DXGK allocation named by hSource and
         // reaches the screen only through this DDI call.
+        void dump_presented_frame(const uint32_t width, const uint32_t height, const uint32_t pitch, const std::vector<std::byte>& bgra)
+        {
+            static const char* const dump_directory = std::getenv("SOGEN_DUMP_PRESENTS");
+            static uint32_t frame_index = 0;
+            if (!dump_directory)
+            {
+                return;
+            }
+
+            const auto path = std::filesystem::path(dump_directory) / ("present_" + std::to_string(frame_index++) + ".ppm");
+            std::ofstream file(path, std::ios::binary);
+            file << "P6\n" << width << " " << height << "\n255\n";
+
+            std::vector<char> row(static_cast<size_t>(width) * 3);
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    const auto* pixel = &bgra[static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * 4];
+                    row[x * 3 + 0] = static_cast<char>(pixel[2]);
+                    row[x * 3 + 1] = static_cast<char>(pixel[1]);
+                    row[x * 3 + 2] = static_cast<char>(pixel[0]);
+                }
+
+                file.write(row.data(), static_cast<std::streamsize>(row.size()));
+            }
+        }
+
         NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, const emulator_object<EMU_D3DKMT_PRESENT> present_desc)
         {
             if (!present_desc)
@@ -5630,6 +5715,8 @@ namespace sogen
                                                                               .stride = static_cast<int>(allocation->pitch),
                                                                               .format = ui_surface_format::bgra8,
                                                                               .pixels = pixels.data()});
+
+                dump_presented_frame(allocation->width, allocation->height, allocation->pitch, pixels);
 
                 dxgk_info(c, "NtGdiDdDDIPresent: hWindow=0x%llX hSource=0x%X %ux%u", present.hWindow, present.hSource, allocation->width,
                           allocation->height);
