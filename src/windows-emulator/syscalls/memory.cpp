@@ -1171,21 +1171,20 @@ namespace sogen
             const auto address = base_address.read();
             const auto size = region_size.read();
 
-            if (!address || !size)
+            if (!address)
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
             const auto aligned_start = page_align_down(address);
-            const auto aligned_end = page_align_up(address + size);
+            const auto view = c.win_emu.memory.get_region_info(aligned_start);
+            const auto view_end = view.allocation_base + view.allocation_length;
 
-            if (aligned_end <= aligned_start)
-            {
-                return STATUS_INVALID_PARAMETER;
-            }
+            // A zero RegionSize (FlushViewOfFile(base, 0), e.g. SQLite's memory-mapped database sync) flushes
+            // from the base address to the end of the view.
+            const auto aligned_end = size == 0 ? view_end : page_align_up(address + size);
 
-            const auto region_info = c.win_emu.memory.get_region_info(aligned_start);
-            if (!region_info.is_committed || region_info.start > aligned_start || region_info.start + region_info.length < aligned_end)
+            if (!view.is_committed || aligned_end <= aligned_start || aligned_end > view_end)
             {
                 return STATUS_INVALID_PARAMETER;
             }
