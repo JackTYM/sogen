@@ -348,9 +348,54 @@ namespace sogen
                 }
             };
 
+            struct dxgk_sync_object
+            {
+                uint32_t type{};
+                uint64_t fence_address{};
+
+                void serialize(utils::buffer_serializer& buffer) const
+                {
+                    buffer.write(this->type);
+                    buffer.write(this->fence_address);
+                }
+
+                void deserialize(utils::buffer_deserializer& buffer)
+                {
+                    buffer.read(this->type);
+                    buffer.read(this->fence_address);
+                }
+            };
+
+            struct dxgk_fence_event_wait
+            {
+                std::vector<uint32_t> sync_objects{};
+                std::vector<uint64_t> fence_values{};
+                bool wait_any{};
+                uint64_t event{};
+
+                void serialize(utils::buffer_serializer& buffer) const
+                {
+                    buffer.write_vector(this->sync_objects);
+                    buffer.write_vector(this->fence_values);
+                    buffer.write(this->wait_any);
+                    buffer.write(this->event);
+                }
+
+                void deserialize(utils::buffer_deserializer& buffer)
+                {
+                    buffer.read_vector(this->sync_objects);
+                    buffer.read_vector(this->fence_values);
+                    buffer.read(this->wait_any);
+                    buffer.read(this->event);
+                }
+            };
+
             uint32_t next_resource_handle{0x8000};
             uint32_t next_allocation_handle{0x9000};
+            uint32_t next_sync_object_handle{0x7100};
             std::map<uint32_t, dxgk_allocation> allocations{};
+            std::map<uint32_t, dxgk_sync_object> sync_objects{};
+            std::vector<dxgk_fence_event_wait> fence_event_waits{};
 
             dxgk_buffer command_buffer{};
             dxgk_buffer allocation_list{};
@@ -463,7 +508,10 @@ namespace sogen
             {
                 buffer.write(this->next_resource_handle);
                 buffer.write(this->next_allocation_handle);
+                buffer.write(this->next_sync_object_handle);
                 buffer.write_map(this->allocations);
+                buffer.write_map(this->sync_objects);
+                buffer.write_vector(this->fence_event_waits);
                 buffer.write(this->command_buffer);
                 buffer.write(this->allocation_list);
                 buffer.write(this->patch_location_list);
@@ -473,7 +521,10 @@ namespace sogen
             {
                 buffer.read(this->next_resource_handle);
                 buffer.read(this->next_allocation_handle);
+                buffer.read(this->next_sync_object_handle);
                 buffer.read_map(this->allocations);
+                buffer.read_map(this->sync_objects);
+                buffer.read_vector(this->fence_event_waits);
                 buffer.read(this->command_buffer);
                 buffer.read(this->allocation_list);
                 buffer.read(this->patch_location_list);

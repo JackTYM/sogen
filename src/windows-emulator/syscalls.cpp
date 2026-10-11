@@ -910,6 +910,11 @@ namespace sogen
         NTSTATUS handle_NtGdiDdDDICreateSynchronizationObject(const syscall_context& c, uint64_t argument);
         NTSTATUS handle_NtGdiDdDDIDestroySynchronizationObject(const syscall_context& c, uint64_t argument);
         NTSTATUS handle_NtGdiDdDDISignalSynchronizationObject(const syscall_context& c, uint64_t argument);
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObjectFromGpu(const syscall_context& c, uint64_t signal);
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObjectFromGpu2(const syscall_context& c, uint64_t signal);
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObjectFromCpu(const syscall_context& c, uint64_t signal);
+        NTSTATUS handle_NtGdiDdDDIWaitForSynchronizationObjectFromCpu(const syscall_context& c, uint64_t wait);
+        NTSTATUS handle_NtGdiDdDDIWaitForSynchronizationObjectFromGpu(const syscall_context& c, uint64_t wait);
         NTSTATUS handle_NtGdiDdDDIShareObjects(const syscall_context& c, uint32_t object_count, uint64_t objects,
                                                uint64_t object_attributes, uint32_t desired_access, emulator_object<handle> shared_handle);
         NTSTATUS handle_NtGdiDdDDIGetDeviceState(const syscall_context& c, emulator_object<EMU_D3DKMT_GETDEVICESTATE> device_state);
@@ -1922,6 +1927,11 @@ namespace sogen
         add_handler(NtGdiDdDDICreateSynchronizationObject);
         add_handler(NtGdiDdDDIDestroySynchronizationObject);
         add_handler(NtGdiDdDDISignalSynchronizationObject);
+        add_handler(NtGdiDdDDISignalSynchronizationObjectFromGpu);
+        add_handler(NtGdiDdDDISignalSynchronizationObjectFromGpu2);
+        add_handler(NtGdiDdDDISignalSynchronizationObjectFromCpu);
+        add_handler(NtGdiDdDDIWaitForSynchronizationObjectFromCpu);
+        add_handler(NtGdiDdDDIWaitForSynchronizationObjectFromGpu);
 
         add_handler(NtGdiDdDDIConfigureSharedResource);
         add_handler(NtGdiDdDDIWaitForVerticalBlankEvent);

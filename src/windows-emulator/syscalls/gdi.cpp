@@ -5228,28 +5228,299 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // Layouts from d3dkmthk.h (x64). D3DDDI_SYNCHRONIZATIONOBJECTINFO2 starts at +8 of the create
+        // structure; its type-specific union is 64 bytes, so hSyncObject lands at +0x58.
+        constexpr uint32_t d3dddi_monitored_fence = 5;
+        constexpr uint64_t create_sync_object_type_offset = 0x08;
+        constexpr uint64_t create_sync_object_initial_fence_offset = 0x10;
+        constexpr uint64_t create_sync_object_fence_cpu_address_offset = 0x18;
+        constexpr uint64_t create_sync_object_fence_gpu_address_offset = 0x20;
+        constexpr uint64_t create_sync_object_handle_offset = 0x58;
+        constexpr uint32_t d3dddicb_signalflag_enqueue_cpu_event = 0x2;
+        constexpr uint32_t d3dddi_wait_any = 0x1;
+
+        std::optional<uint64_t> read_fence_value(const syscall_context& c, const uint32_t sync_object)
+        {
+            const auto it = c.proc.dxgk.sync_objects.find(sync_object);
+            if (it == c.proc.dxgk.sync_objects.end() || it->second.fence_address == 0)
+            {
+                return std::nullopt;
+            }
+
+            return c.emu.read_memory<uint64_t>(it->second.fence_address);
+        }
+
+        bool fence_values_reached(const syscall_context& c, const std::vector<uint32_t>& sync_objects,
+                                  const std::vector<uint64_t>& fence_values, const bool wait_any)
+        {
+            for (size_t i = 0; i < sync_objects.size(); ++i)
+            {
+                const auto current = read_fence_value(c, sync_objects[i]);
+                const bool reached = !current || *current >= fence_values[i];
+                if (reached && wait_any)
+                {
+                    return true;
+                }
+
+                if (!reached && !wait_any)
+                {
+                    return false;
+                }
+            }
+
+            return !wait_any || sync_objects.empty();
+        }
+
+        void signal_guest_event(const syscall_context& c, const uint64_t event_handle)
+        {
+            if (auto* e = event_handle ? c.proc.events.get(event_handle) : nullptr)
+            {
+                e->set_signaled(true);
+            }
+        }
+
+        void complete_fence_event_waits(const syscall_context& c)
+        {
+            auto& waits = c.proc.dxgk.fence_event_waits;
+            for (auto it = waits.begin(); it != waits.end();)
+            {
+                if (!fence_values_reached(c, it->sync_objects, it->fence_values, it->wait_any))
+                {
+                    ++it;
+                    continue;
+                }
+
+                signal_guest_event(c, it->event);
+                it = waits.erase(it);
+            }
+        }
+
+        void signal_fence(const syscall_context& c, const uint32_t sync_object, const uint64_t value)
+        {
+            const auto it = c.proc.dxgk.sync_objects.find(sync_object);
+            if (it == c.proc.dxgk.sync_objects.end() || it->second.fence_address == 0)
+            {
+                return;
+            }
+
+            c.emu.write_memory(it->second.fence_address, value);
+        }
+
+        std::vector<uint32_t> read_sync_object_handles(const syscall_context& c, const uint64_t array, const uint32_t count)
+        {
+            std::vector<uint32_t> handles(count);
+            if (count != 0)
+            {
+                c.emu.read_memory(array, handles.data(), handles.size() * sizeof(uint32_t));
+            }
+
+            return handles;
+        }
+
+        std::vector<uint64_t> read_fence_values(const syscall_context& c, const uint64_t array, const uint32_t count)
+        {
+            std::vector<uint64_t> values(count);
+            if (count != 0)
+            {
+                c.emu.read_memory(array, values.data(), values.size() * sizeof(uint64_t));
+            }
+
+            return values;
+        }
+
         NTSTATUS handle_NtGdiDdDDICreateSynchronizationObject(const syscall_context& c, const uint64_t create_sync_object)
         {
-            constexpr uint64_t sync_object_offset = 72;
-            static uint32_t next_sync_object_handle = 0x7100;
-
             if (!create_sync_object)
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
-            c.emu.write_memory<uint32_t>(create_sync_object + sync_object_offset, next_sync_object_handle++);
+            auto& dxgk = c.proc.dxgk;
+            const auto handle = dxgk.next_sync_object_handle++;
+
+            process_context::dxgk_state::dxgk_sync_object sync_object{};
+            sync_object.type = c.emu.read_memory<uint32_t>(create_sync_object + create_sync_object_type_offset);
+
+            if (sync_object.type == d3dddi_monitored_fence)
+            {
+                sync_object.fence_address = c.win_emu.memory.allocate_memory(0x1000, memory_permission::read_write);
+                const auto initial_value = c.emu.read_memory<uint64_t>(create_sync_object + create_sync_object_initial_fence_offset);
+                c.emu.write_memory(sync_object.fence_address, initial_value);
+                c.emu.write_memory(create_sync_object + create_sync_object_fence_cpu_address_offset, sync_object.fence_address);
+                c.emu.write_memory(create_sync_object + create_sync_object_fence_gpu_address_offset, sync_object.fence_address);
+            }
+
+            dxgk.sync_objects[handle] = sync_object;
+            c.emu.write_memory<uint32_t>(create_sync_object + create_sync_object_handle_offset, handle);
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDIDestroySynchronizationObject(const syscall_context& /*c*/, const uint64_t /*destroy_sync_object*/)
+        NTSTATUS handle_NtGdiDdDDIDestroySynchronizationObject(const syscall_context& c, const uint64_t destroy_sync_object)
         {
+            if (!destroy_sync_object)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto handle = c.emu.read_memory<uint32_t>(destroy_sync_object);
+            const auto it = c.proc.dxgk.sync_objects.find(handle);
+            if (it == c.proc.dxgk.sync_objects.end())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            if (it->second.fence_address != 0)
+            {
+                c.win_emu.memory.release_memory(it->second.fence_address, 0);
+            }
+
+            c.proc.dxgk.sync_objects.erase(it);
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtGdiDdDDISignalSynchronizationObject(const syscall_context& /*c*/, const uint64_t /*signal_sync_object*/)
         {
             return STATUS_SUCCESS;
+        }
+
+        // D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU: hContext, ObjectCount, ObjectHandleArray,
+        // MonitoredFenceValueArray. The emulated GPU has no queue, so the signal is applied at submission.
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObjectFromGpu(const syscall_context& c, const uint64_t signal)
+        {
+            if (!signal)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto count = c.emu.read_memory<uint32_t>(signal + 0x04);
+            const auto objects = read_sync_object_handles(c, c.emu.read_memory<uint64_t>(signal + 0x08), count);
+            const auto values = read_fence_values(c, c.emu.read_memory<uint64_t>(signal + 0x10), count);
+
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                signal_fence(c, objects[i], values[i]);
+            }
+
+            complete_fence_event_waits(c);
+            return STATUS_SUCCESS;
+        }
+
+        // D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2: ObjectCount, ObjectHandleArray, Flags,
+        // BroadcastContextCount, BroadcastContextArray, then a union of FenceValue / CpuEventHandle /
+        // MonitoredFenceValueArray.
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObjectFromGpu2(const syscall_context& c, const uint64_t signal)
+        {
+            if (!signal)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto count = c.emu.read_memory<uint32_t>(signal + 0x00);
+            const auto objects = read_sync_object_handles(c, c.emu.read_memory<uint64_t>(signal + 0x08), count);
+            const auto flags = c.emu.read_memory<uint32_t>(signal + 0x10);
+            const auto payload = c.emu.read_memory<uint64_t>(signal + 0x20);
+
+            if (flags & d3dddicb_signalflag_enqueue_cpu_event)
+            {
+                signal_guest_event(c, payload);
+                return STATUS_SUCCESS;
+            }
+
+            if (count == 1)
+            {
+                const auto& sync_objects = c.proc.dxgk.sync_objects;
+                const auto it = sync_objects.find(objects[0]);
+                const bool monitored = it != sync_objects.end() && it->second.type == d3dddi_monitored_fence;
+                signal_fence(c, objects[0], monitored ? read_fence_values(c, payload, 1)[0] : payload);
+            }
+            else
+            {
+                const auto values = read_fence_values(c, payload, count);
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    signal_fence(c, objects[i], values[i]);
+                }
+            }
+
+            complete_fence_event_waits(c);
+            return STATUS_SUCCESS;
+        }
+
+        // D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU: hDevice, ObjectCount, ObjectHandleArray, FenceValueArray, Flags.
+        NTSTATUS handle_NtGdiDdDDISignalSynchronizationObjectFromCpu(const syscall_context& c, const uint64_t signal)
+        {
+            if (!signal)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto count = c.emu.read_memory<uint32_t>(signal + 0x04);
+            const auto objects = read_sync_object_handles(c, c.emu.read_memory<uint64_t>(signal + 0x08), count);
+            const auto values = read_fence_values(c, c.emu.read_memory<uint64_t>(signal + 0x10), count);
+
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                signal_fence(c, objects[i], values[i]);
+            }
+
+            complete_fence_event_waits(c);
+            return STATUS_SUCCESS;
+        }
+
+        // D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU: hDevice, ObjectCount, ObjectHandleArray,
+        // FenceValueArray, hAsyncEvent, Flags.
+        NTSTATUS handle_NtGdiDdDDIWaitForSynchronizationObjectFromCpu(const syscall_context& c, const uint64_t wait)
+        {
+            if (!wait)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto count = c.emu.read_memory<uint32_t>(wait + 0x04);
+            auto objects = read_sync_object_handles(c, c.emu.read_memory<uint64_t>(wait + 0x08), count);
+            auto values = read_fence_values(c, c.emu.read_memory<uint64_t>(wait + 0x10), count);
+            const auto async_event = c.emu.read_memory<uint64_t>(wait + 0x18);
+            const bool wait_any = (c.emu.read_memory<uint32_t>(wait + 0x20) & d3dddi_wait_any) != 0;
+
+            if (fence_values_reached(c, objects, values, wait_any))
+            {
+                signal_guest_event(c, async_event);
+                return STATUS_SUCCESS;
+            }
+
+            if (async_event)
+            {
+                c.proc.dxgk.fence_event_waits.push_back({
+                    .sync_objects = std::move(objects),
+                    .fence_values = std::move(values),
+                    .wait_any = wait_any,
+                    .event = async_event,
+                });
+                return STATUS_SUCCESS;
+            }
+
+            c.thread().await_host_condition = [&emu = c.emu, &proc = c.proc, objects = std::move(objects), values = std::move(values),
+                                               wait_any] {
+                for (size_t i = 0; i < objects.size(); ++i)
+                {
+                    const auto it = proc.dxgk.sync_objects.find(objects[i]);
+                    const bool reached = it == proc.dxgk.sync_objects.end() || it->second.fence_address == 0 ||
+                                         emu.read_memory<uint64_t>(it->second.fence_address) >= values[i];
+                    if (reached == wait_any)
+                    {
+                        return wait_any;
+                    }
+                }
+
+                return !wait_any;
+            };
+            c.win_emu.yield_thread(c.vcpu, false);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIWaitForSynchronizationObjectFromGpu(const syscall_context& /*c*/, const uint64_t wait)
+        {
+            return wait ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
         }
 
         NTSTATUS handle_NtGdiDdDDIShareObjects(const syscall_context& c, const uint32_t object_count, const uint64_t /*objects*/,
