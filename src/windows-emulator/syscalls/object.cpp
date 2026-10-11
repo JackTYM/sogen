@@ -312,9 +312,11 @@ namespace sogen
 
                 if (std::getenv("SOGEN_TRACE_DUPLICATE_OBJECT_INTO_CHILD"))
                 {
-                    c.win_emu.log.info("[duplicate-object-into-child-trace] pid=%u source_handle=0x%llx resolved_type=%u status=0x%x\n",
+                    c.win_emu.log.info("[duplicate-object-into-child-trace] pid=%u source_handle=0x%llx resolved_type=%u "
+                                       "target_process=0x%llx status=0x%x\n",
                                        c.proc.process_id, static_cast<unsigned long long>(source_handle.bits),
-                                       resolved_for_child.value.type, static_cast<unsigned>(status));
+                                       resolved_for_child.value.type, static_cast<unsigned long long>(target_process_handle.bits),
+                                       static_cast<unsigned>(status));
                 }
 
                 return status;
