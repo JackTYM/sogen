@@ -2526,11 +2526,6 @@ namespace sogen
             // WM_MOUSEWHEEL/WM_MOUSEHWHEEL carry screen coordinates in lParam, unlike button/move
             // messages which carry client coordinates. Keep the routed target but preserve screen coords.
             m.lParam = is_mouse_wheel_message(event.message) ? pack_point(new_cursor_x, new_cursor_y) : pack_point(target.x, target.y);
-
-            if (event.message == WM_LBUTTONDOWN)
-            {
-                this->process.last_button_down_window = target.window;
-            }
         }
         else if ((event.message == WM_ACTIVATE && event.wParam != 0) || event.message == WM_SETFOCUS)
         {
@@ -2602,45 +2597,6 @@ namespace sogen
         {
             this->log.warn("[input-diag] message=0x%x posted to thread_id=%u queue_size=%zu\n", event.message, win->thread_id,
                            thread->message_queue.size());
-        }
-
-        // The 32-bit ButtonWndProc tracks BST_PUSHED via direct memory access into tagWND at
-        // 32-bit offsets that don't match our 64-bit USER_WINDOW layout, so it never reads the
-        // pushed state back and therefore never calls ReleaseCapture or posts WM_COMMAND(BN_CLICKED).
-        // Synthesize both here when WM_LBUTTONUP arrives for the Button-class window that took the
-        // matching WM_LBUTTONDOWN. last_button_down_window (not mouse_capture_window) is the source of
-        // truth for this: a single input batch delivers WM_LBUTTONDOWN and WM_LBUTTONUP for the same tap
-        // before the guest thread ever runs, so the guest's own SetCapture call - and therefore
-        // mouse_capture_window - has not happened yet by the time WM_LBUTTONUP is processed here.
-        if (m.message == WM_LBUTTONUP && this->process.last_button_down_window == m.window)
-        {
-            const auto* btn_win = this->process.windows.get(m.window);
-            const auto& cn = btn_win ? btn_win->class_name : std::u16string{};
-            if (cn == u"Button" || cn == u"BUTTON" || cn == u"#1")
-            {
-                uint64_t button_id = 0;
-                btn_win->guest.access([&](const USER_WINDOW& gw) { button_id = gw.wID; });
-                const auto parent_hwnd = btn_win->parent_handle;
-
-                if (const auto* parent_win = this->process.windows.get(parent_hwnd))
-                {
-                    if (auto* parent_thread = get_thread_by_id(this->process, parent_win->thread_id))
-                    {
-                        msg cmd{};
-                        cmd.window = parent_hwnd;
-                        cmd.message = WM_COMMAND;
-                        cmd.wParam = button_id & 0xFFFF; // BN_CLICKED=0 in high word
-                        cmd.lParam = static_cast<uint32_t>(m.window);
-                        parent_thread->post_message(*this, cmd, true);
-                    }
-                }
-
-                this->process.mouse_capture_window = 0;
-            }
-        }
-        if (m.message == WM_LBUTTONUP)
-        {
-            this->process.last_button_down_window = 0;
         }
 
         if (event.message == WM_CLOSE || event.message == WM_COMMAND || is_key_down_message(event.message) ||

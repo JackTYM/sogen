@@ -1931,10 +1931,10 @@ namespace sogen
                 return destination_status;
             }
 
-            // 32-bit user32 copies this buffer verbatim to _gSharedInfo and reads awmControl at
-            // gSharedInfo+0x28 with 16-byte USER_WNDMSG entries (USER_SHAREDINFO layout). Writing
-            // WIN32K_USERCONNECT32 here would put awmControl at +0x40 with 8-byte entries, causing
-            // all window-class message bitmap gate checks to fail (including WM_PAINT for Button).
+            // 32-bit user32 copies this buffer verbatim to _gSharedInfo and reads its message bitmaps with
+            // 16-byte USER_WNDMSG entries (USER_SHAREDINFO layout). Writing WIN32K_USERCONNECT32 here would
+            // put them at +0x40 with 8-byte entries, causing all window-class message bitmap gate checks to
+            // fail (including WM_PAINT for Button).
             if (!win32k_userconnect::try_write_user_shared_info(c.emu, connect_destination, c.proc))
             {
                 return STATUS_INVALID_PARAMETER;
@@ -2144,6 +2144,19 @@ namespace sogen
             });
 
             return brush;
+        }
+
+        // Edit controls hide the pointer while typing and the pointer reappears on the next mouse move; the emulated
+        // pointer keeps its own visibility, driven by ShowCursor and SetCursor.
+        BOOL handle_NtUserHideCursorNoCapture()
+        {
+            return TRUE;
+        }
+
+        // The emulated shell has no taskbar to flash, so the window is never in a flashing state.
+        BOOL handle_NtUserFlashWindowEx(const syscall_context& /*c*/, const emulator_pointer /*flash_info*/)
+        {
+            return FALSE;
         }
 
         BOOL handle_NtUserReleaseDC()
@@ -5337,15 +5350,52 @@ namespace sogen
             return c.proc.resolve_foreground_window();
         }
 
+        hwnd advance_set_focus(const syscall_context& c, window_focus_state state)
+        {
+            const auto* new_window = c.proc.windows.get(state.target);
+            if (state.phase != window_focus_state::phase_set_focus && new_window && new_window->thread_id == c.vcpu.active_thread->id)
+            {
+                state.phase = window_focus_state::phase_set_focus;
+                const auto previous = state.previous;
+                dispatch_window_message(c, callback_id::NtUserSetFocus, std::move(state), *new_window, WM_SETFOCUS, previous, 0);
+                return {};
+            }
+
+            return state.previous;
+        }
+
         hwnd handle_NtUserSetFocus(const syscall_context& c, const hwnd hwnd)
         {
             const auto previous = c.proc.focus_window;
+            if (hwnd == previous)
+            {
+                return previous;
+            }
+
             c.proc.focus_window = hwnd;
             if (hwnd != 0)
             {
                 set_thread_window_context(c, hwnd);
             }
-            return previous;
+
+            window_focus_state state{};
+            state.previous = previous;
+            state.target = hwnd;
+
+            const auto* old_window = c.proc.windows.get(previous);
+            if (old_window && old_window->thread_id == c.vcpu.active_thread->id)
+            {
+                state.phase = window_focus_state::phase_kill_focus;
+                dispatch_window_message(c, callback_id::NtUserSetFocus, std::move(state), *old_window, WM_KILLFOCUS, hwnd, 0);
+                return {};
+            }
+
+            return advance_set_focus(c, std::move(state));
+        }
+
+        hwnd completion_NtUserSetFocus(const syscall_context& c, const hwnd /*hwnd*/)
+        {
+            return advance_set_focus(c, std::move(c.get_completion_state<window_focus_state>()));
         }
 
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,

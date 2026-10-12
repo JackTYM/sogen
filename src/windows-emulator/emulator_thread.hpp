@@ -192,6 +192,7 @@ namespace sogen
         NtUserEnumDisplayMonitors,
         NtUserSetWindowPos,
         NtUserGetComboBoxInfo,
+        NtUserSetFocus,
     };
 
     struct callback_frame

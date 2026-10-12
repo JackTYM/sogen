@@ -516,6 +516,8 @@ namespace sogen
         hwnd handle_NtUserWindowFromDC(const syscall_context& c, hdc dc);
         uint64_t handle_NtUserGetControlBrush(const syscall_context& c, hwnd window, hdc dc, uint32_t control_type);
         BOOL handle_NtUserReleaseDC();
+        BOOL handle_NtUserFlashWindowEx(const syscall_context& c, emulator_pointer flash_info);
+        BOOL handle_NtUserHideCursorNoCapture();
         hwnd handle_NtUserSetCapture(const syscall_context& c, hwnd window);
         BOOL handle_NtUserReleaseCapture(const syscall_context& c);
         BOOL handle_NtUserRegisterRawInputDevices(const syscall_context& c, emulator_pointer devices, uint32_t device_count, uint32_t size);
@@ -677,6 +679,7 @@ namespace sogen
         NTSTATUS handle_NtUserSetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
+        hwnd completion_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
         emulator_pointer handle_NtUserSetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
                                                        BOOL Ansi);
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
@@ -851,6 +854,7 @@ namespace sogen
                                           emulator_pointer fit_count, emulator_pointer partial_extents, emulator_pointer size, ULONG flags);
         BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, hdc dc, UINT first_char, UINT char_count, emulator_pointer chars,
                                        UINT flags, emulator_pointer buffer);
+        BOOL handle_NtGdiGetCharWidthInfo(const syscall_context& c, hdc dc, emulator_pointer info);
         BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, hdc dc, UINT first_char, UINT char_count, emulator_pointer chars,
                                            UINT flags, emulator_pointer buffer);
         NTSTATUS handle_NtGdiExtCreateRegion();
@@ -3842,6 +3846,7 @@ namespace sogen
         add_handler(NtGdiGetTextExtentExW);
         add_handler(NtGdiGetCharWidthW);
         add_handler(NtGdiGetCharABCWidthsW);
+        add_handler(NtGdiGetCharWidthInfo);
         add_handler(NtGdiGetGlyphOutline);
         add_handler(NtGdiCreateRectRgn);
         add_handler(NtGdiGetRandomRgn);
@@ -3985,6 +3990,8 @@ namespace sogen
         add_handler(NtUserGetKeyState);
         add_handler(NtUserGetAsyncKeyState);
         add_handler(NtUserReleaseDC);
+        add_handler(NtUserFlashWindowEx);
+        add_handler(NtUserHideCursorNoCapture);
         add_handler(NtUserFindExistingCursorIcon);
         add_handler(NtUserCreateEmptyCursorObject);
         add_handler(NtUserSetCursorIconData);
@@ -4296,6 +4303,7 @@ namespace sogen
         add_stateless_callback(NtUserEnumDisplayMonitors);
         add_stateless_callback(NtUserGetComboBoxInfo);
         add_callback(NtUserSetWindowPos, window_set_pos_state);
+        add_callback(NtUserSetFocus, window_focus_state);
 
 #undef add_callback
 #undef add_stateless_callback

@@ -2117,11 +2117,11 @@ namespace sogen
             const bool pressed = offset == 2 || offset == 3;
             const bool disabled_mark = indeterminate || offset == 4;
 
-            gdi_dc_state* dc_state = nullptr;
-            gdi_bitmap_surface* surface = nullptr;
             int32_t origin_x = 0;
             int32_t origin_y = 0;
-            if (!get_dc_state_and_surface(c, dc, dc_state, surface, origin_x, origin_y) || !surface)
+            uint32_t present_handle = 0;
+            auto* surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, present_handle);
+            if (surface == nullptr)
             {
                 return;
             }
@@ -2161,6 +2161,7 @@ namespace sogen
                         set_surface_pixel(*surface, ox + center + dx, oy + center + dy, color);
                     }
                 }
+                present_win_surface(c, present_handle, surface);
                 return;
             }
 
@@ -2206,6 +2207,8 @@ namespace sogen
                     }
                 }
             }
+
+            present_win_surface(c, present_handle, surface);
         }
 
         BOOL handle_NtGdiFlush(const syscall_context& c)
@@ -3504,6 +3507,18 @@ namespace sogen
                 widths.push_back({.abcA = 0, .abcB = static_cast<UINT>(font.advance(code)), .abcC = 0});
             }
             c.emu.write_memory(buffer, widths.data(), widths.size() * sizeof(ABC));
+            return TRUE;
+        }
+
+        BOOL handle_NtGdiGetCharWidthInfo(const syscall_context& c, const hdc dc, const emulator_pointer info)
+        {
+            if (dc == 0 || info == 0)
+            {
+                return FALSE;
+            }
+
+            const std::array<int32_t, 3> width_info{};
+            c.emu.write_memory(info, width_info.data(), sizeof(width_info));
             return TRUE;
         }
 

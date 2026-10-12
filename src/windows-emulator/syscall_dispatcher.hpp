@@ -188,6 +188,32 @@ namespace sogen
         }
     };
 
+    struct window_focus_state : completion_state
+    {
+        static constexpr uint32_t phase_none = 0;
+        static constexpr uint32_t phase_kill_focus = 1;
+        static constexpr uint32_t phase_set_focus = 2;
+
+        hwnd previous{};
+        hwnd target{};
+        uint32_t phase{};
+
+      private:
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->previous);
+            buffer.write(this->target);
+            buffer.write(this->phase);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->previous);
+            buffer.read(this->target);
+            buffer.read(this->phase);
+        }
+    };
+
     struct window_set_pos_state : completion_state
     {
         hwnd handle{};

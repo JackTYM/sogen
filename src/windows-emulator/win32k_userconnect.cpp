@@ -396,9 +396,8 @@ namespace sogen
 
         bool try_write_wow64_hybrid_userconnect(memory_interface& memory, const uint64_t destination, const process_context& process)
         {
-            // Write USER_SHAREDINFO so awmControl[0..13] is populated for KCT window-message dispatch
-            // (rendering). Then overwrite awmControl[14] — which lands at offset 0x108 where 32-bit
-            // user32 expects wndmsg_count/wndmsg_bits — with the flat zero bitmap so that
+            // Write USER_SHAREDINFO for KCT window-message dispatch (rendering). Then overwrite the slot at
+            // offset 0x108, where 32-bit user32 expects wndmsg_count/wndmsg_bits, with the flat zero bitmap so that
             // WM_LBUTTONDOWN (bit not set) falls through to the stored wndproc instead of taking a
             // garbage KCT path.
             if (!try_write_user_shared_info(memory, destination, process))
@@ -406,9 +405,8 @@ namespace sogen
                 return false;
             }
 
-            static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x28);
-            constexpr size_t k_wndmsg_awm_index = 14;
-            const uint64_t awm14_addr = destination + offsetof(USER_SHAREDINFO, awmControl) + k_wndmsg_awm_index * sizeof(USER_WNDMSG);
+            constexpr uint64_t k_wow64_wndmsg_offset = 0x108;
+            const uint64_t awm14_addr = destination + k_wow64_wndmsg_offset;
 
             USER_WNDMSG awm14{};
             awm14.maxMsgs = k_wow64_wndmsg_count;
@@ -429,9 +427,9 @@ namespace sogen
         {
             // gSharedInfo RVA in 64-bit user32.dll (IDB base 0x180000000):
             //   gSharedInfo at IDB VA 0x1800B9030 → RVA 0xB9030
-            // awmControl starts at gSharedInfo+0x28; FNID_BUTTON (index 7) lands at +0x98,
-            // exactly where ButtonWndProcW reads its message bitmap gate.
-            static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x28);
+            // The message bitmaps start at FNID_BUTTON, gSharedInfo+0x98, exactly where ButtonWndProcW reads
+            // its message bitmap gate.
+            static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x98);
             constexpr uint64_t k_idb_base = 0x180000000ULL;
             constexpr uint64_t k_gsharedinfo_idb = 0x1800B9030ULL;
             constexpr uint64_t k_gsharedinfo_rva = k_gsharedinfo_idb - k_idb_base;
