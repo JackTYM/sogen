@@ -59,6 +59,19 @@ namespace sogen
                 {
                     srv.systemMetrics[index] = value;
                 }
+
+                constexpr std::pair<size_t, size_t> k_dpi_metric_slots[] = {
+                    {2, 0},   {3, 1},   {4, 2},   {9, 3},   {10, 4},  {11, 5},  {12, 6},  {13, 7},  {14, 8},  {15, 9},  {20, 10},
+                    {21, 11}, {28, 16}, {29, 17}, {30, 12}, {31, 13}, {32, 14}, {33, 15}, {34, 16}, {35, 18}, {38, 18}, {39, 19},
+                    {49, 20}, {50, 21}, {51, 22}, {52, 23}, {53, 24}, {54, 25}, {55, 26}, {71, 27}, {72, 28}, {92, 29},
+                };
+                for (const auto& [metric, slot] : k_dpi_metric_slots)
+                {
+                    for (auto& block : srv.dpiMetrics)
+                    {
+                        block[slot] = srv.systemMetrics[metric];
+                    }
+                }
             });
 
             const auto handle_table_size = static_cast<size_t>(page_align_up(sizeof(USER_HANDLEENTRY) * MAX_HANDLES));

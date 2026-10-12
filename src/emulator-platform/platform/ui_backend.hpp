@@ -73,6 +73,13 @@ namespace sogen
         {
         }
 
+        // Whether the emulator has to draw the frame and title bar of top-level windows itself, because the host
+        // presents the window surfaces without a window manager.
+        virtual bool draws_window_frames() const
+        {
+            return false;
+        }
+
         virtual void create_window(const ui_window_desc& /*desc*/)
         {
         }

@@ -927,6 +927,11 @@ namespace sogen
 
         for (auto it = message_queue.begin(); it != message_queue.end(); ++it)
         {
+            if (it->window == 0 && it->message >= WM_KEYDOWN && it->message <= WM_SYSDEADCHAR)
+            {
+                it->window = win_emu.process.resolve_focus_window();
+            }
+
             if (hwnd_filter == static_cast<hwnd>(-1))
             {
                 if (it->window != 0)

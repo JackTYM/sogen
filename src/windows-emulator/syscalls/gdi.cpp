@@ -604,6 +604,7 @@ namespace sogen
                     return nullptr;
                 }
 
+                off_x += win->client_left();
                 off_y += win->client_top();
 
                 const auto top_handle = static_cast<uint32_t>(win->handle);

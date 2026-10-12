@@ -655,7 +655,7 @@ namespace sogen
                     break;
                 }
 
-                origin_x += parent->x;
+                origin_x += parent->x + parent->client_left();
                 origin_y += parent->y + parent->client_top();
                 current = parent;
             }
@@ -668,9 +668,9 @@ namespace sogen
             const auto [origin_x, origin_y] = get_screen_origin(proc, win);
             const RECT window_rect{.left = origin_x, .top = origin_y, .right = origin_x + win.width, .bottom = origin_y + win.height};
             // Frameless: the client sits at the window origin, so it shares the top-left and shrinks by the frame.
-            const RECT client_rect{.left = origin_x,
+            const RECT client_rect{.left = origin_x + win.client_left(),
                                    .top = origin_y + win.client_top(),
-                                   .right = origin_x + win.client_width(),
+                                   .right = origin_x + win.client_left() + win.client_width(),
                                    .bottom = origin_y + win.client_top() + win.client_height()};
 
             win.guest.access([&](USER_WINDOW& guest_win) {
@@ -1178,6 +1178,22 @@ namespace sogen
             case WM_PAINT:
                 validate_window(win);
                 return FALSE;
+
+            case 0x0112: {
+                constexpr uint64_t sc_command_mask = 0xFFF0;
+                constexpr uint64_t sc_close = 0xF060;
+                if ((w_param & sc_command_mask) == sc_close)
+                {
+                    if (auto* thread = c.proc.find_thread_by_id(win.thread_id))
+                    {
+                        sogen::msg close_message{};
+                        close_message.window = win.handle;
+                        close_message.message = WM_CLOSE;
+                        thread->post_message(c.win_emu, close_message);
+                    }
+                }
+                return FALSE;
+            }
 
             default:
                 return FALSE;
@@ -3708,6 +3724,7 @@ namespace sogen
                 guest_win.processId = process_context::process_id;
 
                 win.host_surface_window = !is_message_only;
+                win.emulated_frame = c.win_emu.ui().draws_window_frames();
 
                 if (wnd_class->cbWndExtra > 0)
                 {

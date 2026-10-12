@@ -4,6 +4,7 @@
 #include "windows_emulator.hpp"
 #include "font_renderer.hpp"
 #include "font_manager.hpp"
+#include "window_frame.hpp"
 
 namespace sogen
 {
@@ -472,6 +473,21 @@ namespace sogen
     {
         select_menu_font(win_emu);
         const auto* top_level = win_emu.process.windows.get(window_handle);
+        if (top_level && top_level->is_decorated() && !surface.pixels.empty())
+        {
+            gdi_bitmap_surface composed{};
+            composed.width = surface.width;
+            composed.height = surface.height;
+            composed.pixels = surface.pixels;
+            draw_window_frame(win_emu, *top_level, composed);
+            win_emu.ui().present_surface(window_handle, ui_surface_desc{.width = static_cast<int>(composed.width),
+                                                                        .height = static_cast<int>(composed.height),
+                                                                        .stride = static_cast<int>(composed.width * sizeof(uint32_t)),
+                                                                        .format = ui_surface_format::bgra8,
+                                                                        .pixels = composed.pixels.data()});
+            return;
+        }
+
         if (top_level && top_level->has_menu_bar())
         {
             present_with_menu(win_emu, *top_level, surface);

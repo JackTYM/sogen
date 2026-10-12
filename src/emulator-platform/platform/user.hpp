@@ -48,7 +48,10 @@ namespace sogen
         uint64_t apfnClientWorker[FNID_ARRAY_SIZE];
         uint8_t pad_3c8[0x3A0];
         int32_t systemMetrics[0x61];
-        uint8_t pad_8ec[0x8EC];
+        // DPI-dependent system metrics, one block of slots for the system DPI and one for 96 DPI; the slot of each
+        // SM_* index is fixed by user32's GetSystemMetricsForDpi.
+        int32_t dpiMetrics[2][30];
+        uint8_t pad_9dc[0x7FC];
         uint32_t argbSystem[USER_NUM_SYSCOLORS];
         uint8_t pad_1254[0x4];
         uint64_t ahbrSystem[USER_SERVERINFO_BRUSH_SLOT_COUNT];
@@ -65,6 +68,7 @@ namespace sogen
 
     static_assert(offsetof(USER_SERVERINFO, apfnClientA) == 0x188);
     static_assert(offsetof(USER_SERVERINFO, systemMetrics) == 0x768);
+    static_assert(offsetof(USER_SERVERINFO, dpiMetrics) == 0x8EC);
     static_assert(offsetof(USER_SERVERINFO, argbSystem) == 0x11D8);
     static_assert(offsetof(USER_SERVERINFO, ahbrSystem) == 0x1258);
     static_assert(offsetof(USER_SERVERINFO, defaultFontHeightScale) == 0x138C);

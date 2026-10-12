@@ -1,5 +1,6 @@
 #include "std_include.hpp"
 #include "menu_bar.hpp"
+#include "window_frame.hpp"
 #include "windows_emulator.hpp"
 
 #include <pthread.h>
@@ -156,6 +157,7 @@ namespace sogen
                 current_handle = current->parent_handle;
                 if (const auto* parent = process.windows.get(current_handle))
                 {
+                    origin.x += parent->client_left();
                     origin.y += parent->client_top();
                 }
             }
@@ -392,13 +394,14 @@ namespace sogen
 
             // Otherwise deliver to the deepest visible/enabled child under the cursor.
             const auto* top_window = process.windows.get(top_level);
+            const auto client_x = x - (top_window ? top_window->client_left() : 0);
             const auto client_y = y - (top_window ? top_window->client_top() : 0);
-            if (const auto child = find_child_window_at(process, top_level, x, client_y))
+            if (const auto child = find_child_window_at(process, top_level, client_x, client_y))
             {
                 return {.window = child->win->handle, .x = child->x, .y = child->y};
             }
 
-            return {.window = top_level, .x = x, .y = client_y};
+            return {.window = top_level, .x = client_x, .y = client_y};
         }
 
         bool has_pending_host_wait(const process_context& process)
@@ -2400,7 +2403,6 @@ namespace sogen
         const bool is_syskey = vk == VK_MENU || vk == VK_F10 || alt_context;
 
         msg m{};
-        m.window = target;
         m.message = is_syskey ? WM_SYSKEYDOWN : WM_KEYDOWN;
         m.wParam = vk;
         m.lParam = static_cast<lparam>(pack_key_lparam(scan_code, extended, alt_context, was_down, false));
@@ -2428,7 +2430,6 @@ namespace sogen
         const bool is_syskey = vk == VK_MENU || vk == VK_F10 || alt_context;
 
         msg m{};
-        m.window = target;
         m.message = is_syskey ? WM_SYSKEYUP : WM_KEYUP;
         m.wParam = vk;
         m.lParam = static_cast<lparam>(pack_key_lparam(scan_code, extended, alt_context, true, true));
@@ -2510,6 +2511,11 @@ namespace sogen
                     // the corresponding window messages. For wheel messages the delta lives in usButtonData.
                     this->deliver_raw_mouse_input(0, 0, buttons, raw_mouse_button_data(event.message, event.wParam));
                 }
+            }
+
+            if (handle_frame_pointer(*this, *win, event.message, point_x(event.lParam), point_y(event.lParam)))
+            {
+                return;
             }
 
             if (handle_menu_pointer(*this, *win, event.message, point_x(event.lParam), point_y(event.lParam)))

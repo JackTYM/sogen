@@ -1112,14 +1112,84 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& /*c*/)
+        // Fills the structures of the SPI_GET* queries user32 builds its window frame metrics from; the values are
+        // Windows 10's at 96 DPI. Every other action is acknowledged without touching the caller's buffer.
+        bool fill_system_parameters(const syscall_context& c, const uint32_t action, const uint32_t param, const emulator_pointer buffer)
         {
-            return STATUS_SUCCESS;
+            constexpr uint32_t spi_getnonclientmetrics = 0x0029;
+            constexpr uint32_t spi_geticontitlelogfont = 0x001F;
+            constexpr uint32_t spi_getworkarea = 0x0030;
+            constexpr size_t logfont_size = 92;
+            constexpr size_t nonclient_metrics_size = 504;
+
+            const auto write_logfont = [&](std::array<uint8_t, nonclient_metrics_size>& metrics, const size_t offset) {
+                const auto write_i32 = [&](const size_t at, const int32_t value) {
+                    std::memcpy(metrics.data() + at, &value, sizeof(value));
+                };
+                write_i32(offset + 0, -12);
+                write_i32(offset + 16, 400);
+                metrics[offset + 23] = 1;
+                metrics[offset + 26] = 5;
+                constexpr std::u16string_view face = u"Segoe UI";
+                std::memcpy(metrics.data() + offset + 28, face.data(), face.size() * sizeof(char16_t));
+            };
+
+            if (buffer == 0)
+            {
+                return false;
+            }
+
+            if (action == spi_getnonclientmetrics && param >= 500)
+            {
+                std::array<uint8_t, nonclient_metrics_size> metrics{};
+                const auto write_i32 = [&](const size_t at, const int32_t value) {
+                    std::memcpy(metrics.data() + at, &value, sizeof(value));
+                };
+                write_i32(0, static_cast<int32_t>(param));
+                write_i32(4, 1);
+                write_i32(8, 17);
+                write_i32(12, 17);
+                write_i32(16, 22);
+                write_i32(20, 22);
+                write_logfont(metrics, 24);
+                write_i32(116, 22);
+                write_i32(120, 22);
+                write_logfont(metrics, 124);
+                write_i32(216, 19);
+                write_i32(220, 19);
+                write_logfont(metrics, 224);
+                write_logfont(metrics, 224 + logfont_size);
+                write_logfont(metrics, 224 + 2 * logfont_size);
+                write_i32(500, 4);
+                return c.win_emu.memory.try_write_memory(buffer, metrics.data(), std::min<size_t>(param, metrics.size()));
+            }
+
+            if (action == spi_geticontitlelogfont)
+            {
+                std::array<uint8_t, nonclient_metrics_size> metrics{};
+                write_logfont(metrics, 0);
+                return c.win_emu.memory.try_write_memory(buffer, metrics.data(), logfont_size);
+            }
+
+            if (action == spi_getworkarea)
+            {
+                const std::array<int32_t, 4> work_area{0, 0, 1920, 1057};
+                return c.win_emu.memory.try_write_memory(buffer, work_area.data(), sizeof(work_area));
+            }
+
+            return false;
         }
 
-        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& /*c*/)
+        BOOL handle_NtUserSystemParametersInfo(const syscall_context& c, const uint32_t action, const uint32_t param,
+                                               const emulator_pointer buffer, const uint32_t /*win_ini*/)
         {
-            return STATUS_SUCCESS;
+            return fill_system_parameters(c, action, param, buffer) ? TRUE : FALSE;
+        }
+
+        BOOL handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, const uint32_t action, const uint32_t param,
+                                                     const emulator_pointer buffer, const uint32_t /*win_ini*/, const uint32_t /*dpi*/)
+        {
+            return fill_system_parameters(c, action, param, buffer) ? TRUE : FALSE;
         }
 
         NTSTATUS handle_NtUpdateWnfStateData(const syscall_context& /*c*/)

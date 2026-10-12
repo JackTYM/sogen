@@ -182,6 +182,7 @@ namespace sogen
         bool host_surface_window{};
         bool message_only{};
         bool unicode_proc{};
+        bool emulated_frame{};
 
         window(memory_interface& memory)
             : user_object(memory)
@@ -194,14 +195,69 @@ namespace sogen
         }
 
         // The guest sizes its window via AdjustWindowRect, which inflates the client rect it wants to render
-        // into by the non-client frame. user32 always adds a 1px border for framed windows (SM_CXBORDER/
-        // SM_CYBORDER are hardcoded to 1) and our system metrics for the sizing frame and caption are zero, so
-        // the only inset is that 1px border. Mirror it so the client size we report (GetClientRect, the Vulkan
-        // surface extent, the presented surface) matches what the guest actually renders -- otherwise the
-        // layer (DXVK) renders its whole frame onto a 1px-larger surface and the upscaled image softens.
+        // into by the non-client frame. Windows without an emulated frame are framed by the host (or not at all),
+        // so the only inset left is the 1px border user32 adds for bordered windows: the client size we report
+        // (GetClientRect, the Vulkan surface extent, the presented surface) has to match what the guest
+        // actually renders -- otherwise the layer (DXVK) renders its whole frame onto a 1px-larger surface and the
+        // upscaled image softens.
         int32_t nonclient_border() const
         {
             return (this->style & (WS_BORDER | WS_DLGFRAME | WS_THICKFRAME)) != 0 ? 1 : 0;
+        }
+
+        struct frame_insets
+        {
+            int32_t border{};
+            int32_t caption{};
+        };
+
+        // The frame user32's AdjustWindowRectEx assumes: a border whose thickness depends on the edge styles, plus
+        // a caption bar above the client area.
+        frame_insets frame() const
+        {
+            constexpr uint32_t ex_dlgmodalframe = 0x00000001;
+            constexpr uint32_t ex_toolwindow = 0x00000080;
+            constexpr uint32_t ex_clientedge = 0x00000200;
+            constexpr uint32_t ex_staticedge = 0x00020000;
+            constexpr int32_t caption_height = 23;
+            constexpr int32_t small_caption_height = 20;
+            constexpr int32_t sizing_frame = 8;
+            constexpr uint32_t border_bits = WS_CAPTION;
+
+            const bool has_caption = (this->style & border_bits) == border_bits;
+            const bool border_only = (this->style & border_bits) == WS_BORDER;
+            const bool windowedge =
+                (this->ex_style & ex_dlgmodalframe) != 0 ||
+                ((this->ex_style & ex_staticedge) == 0 && ((this->style & WS_THICKFRAME) != 0 || border_only || has_caption));
+            int32_t border = windowedge ? 2 : ((this->ex_style & ex_staticedge) != 0 ? 1 : 0);
+            if ((this->style & border_bits) != 0 || (this->ex_style & ex_dlgmodalframe) != 0)
+            {
+                border += 1;
+            }
+            if (has_caption)
+            {
+                // user32's AdjustWindowRectEx adds the padded border to every captioned window.
+                border += 1;
+            }
+            if ((this->style & WS_THICKFRAME) != 0)
+            {
+                border = sizing_frame;
+            }
+            if ((this->ex_style & ex_clientedge) != 0)
+            {
+                border += 2;
+            }
+
+            const int32_t caption = !has_caption ? 0 : ((this->ex_style & ex_toolwindow) != 0 ? small_caption_height : caption_height);
+            return {.border = border, .caption = caption};
+        }
+
+        // Top-level windows other than the application's main window get a frame and title bar drawn by the
+        // emulator when the host does not provide window management.
+        bool is_decorated() const
+        {
+            return this->emulated_frame && (this->style & WS_CHILD) == 0 && !this->message_only &&
+                   (this->style & WS_CAPTION) == WS_CAPTION && (this->owner_handle != 0 || this->is_dialog());
         }
 
         // A top-level window with a menu reserves a strip above its client area for the menu bar. The strip lives in
@@ -213,18 +269,34 @@ namespace sogen
             return this->menu_handle != 0 && (this->style & WS_CHILD) == 0;
         }
 
+        int32_t client_left() const
+        {
+            return this->is_decorated() ? this->frame().border : 0;
+        }
+
         int32_t client_top() const
         {
-            return this->has_menu_bar() ? menu_bar_height : 0;
+            const auto menu_strip = this->has_menu_bar() ? menu_bar_height : 0;
+            return menu_strip + (this->is_decorated() ? this->frame().border + this->frame().caption : 0);
         }
 
         int32_t client_width() const
         {
+            if (this->is_decorated())
+            {
+                return std::max(0, this->width - 2 * this->frame().border);
+            }
+
             return std::max(0, this->width - 2 * this->nonclient_border());
         }
 
         int32_t client_height() const
         {
+            if (this->is_decorated())
+            {
+                return std::max(0, this->height - this->client_top() - this->frame().border);
+            }
+
             return std::max(0, this->height - 2 * this->nonclient_border() - this->client_top());
         }
 
@@ -254,6 +326,7 @@ namespace sogen
             buffer.write(this->host_surface_window);
             buffer.write(this->message_only);
             buffer.write(this->unicode_proc);
+            buffer.write(this->emulated_frame);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -282,6 +355,7 @@ namespace sogen
             buffer.read(this->host_surface_window);
             buffer.read(this->message_only);
             buffer.read(this->unicode_proc);
+            buffer.read(this->emulated_frame);
         }
     };
 
