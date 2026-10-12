@@ -535,6 +535,7 @@ namespace sogen
         BOOL handle_NtUserBitBltSysBmp(const syscall_context& c, hdc dc, int x, int y, uint32_t bitmap_index);
         BOOL handle_NtUserGetClientRect(const syscall_context& c, hwnd window, emulator_pointer rect_ptr);
         hdc handle_NtUserBeginPaint(const syscall_context& c, hwnd window, emulator_object<EMU_PAINTSTRUCT> paint_struct);
+        hdc completion_NtUserBeginPaint(const syscall_context& c, hwnd window, emulator_object<EMU_PAINTSTRUCT> paint_struct);
         BOOL handle_NtUserEndPaint(const syscall_context& c, hwnd window, emulator_object<EMU_PAINTSTRUCT> paint_struct);
         BOOL handle_NtUserGetCursorPos(const syscall_context& c, emulator_pointer point_ptr);
         uint32_t handle_NtUserGetMessagePos(const syscall_context& c);
@@ -4306,6 +4307,7 @@ namespace sogen
         add_stateless_callback(NtUserGetComboBoxInfo);
         add_callback(NtUserSetWindowPos, window_set_pos_state);
         add_callback(NtUserSetFocus, window_focus_state);
+        add_callback(NtUserBeginPaint, window_paint_state);
 
 #undef add_callback
 #undef add_stateless_callback

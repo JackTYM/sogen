@@ -884,6 +884,115 @@ namespace sogen
             }
         }
 
+        // Every visible child overlapping the area has to repaint after its parent erased it (win32k excludes
+        // clipped children from the erase instead).
+        void invalidate_children_in_area(const syscall_context& c, const window& parent, const RECT& area)
+        {
+            for (auto& [index, child] : c.proc.windows)
+            {
+                (void)index;
+                if (child.parent_handle != parent.handle || (child.style & WS_VISIBLE) == 0)
+                {
+                    continue;
+                }
+
+                const bool overlaps =
+                    child.x < area.right && child.x + child.width > area.left && child.y < area.bottom && child.y + child.height > area.top;
+                if (overlaps)
+                {
+                    invalidate_window(c, child, std::nullopt, true);
+                }
+            }
+        }
+
+        // Hiding a child exposes whatever was beneath it: the parent erases and repaints that area, and so do the
+        // siblings that overlap it.
+        void invalidate_area_vacated_by(const syscall_context& c, const window& hidden)
+        {
+            if ((hidden.style & WS_CHILD) == 0)
+            {
+                return;
+            }
+
+            auto* parent = c.proc.windows.get(hidden.parent_handle);
+            if (parent == nullptr)
+            {
+                return;
+            }
+
+            const RECT vacated{.left = hidden.x, .top = hidden.y, .right = hidden.x + hidden.width, .bottom = hidden.y + hidden.height};
+            invalidate_window(c, *parent, vacated, true);
+            invalidate_children_in_area(c, *parent, vacated);
+        }
+
+        // The areas a paint DC must not touch: win32k clips a window's DC against its visible children when the
+        // window has WS_CLIPCHILDREN. Sibling stacking order is not tracked, so WS_CLIPSIBLINGS is approximated by
+        // repainting the siblings an erase covered (see invalidate_overlapped_windows).
+        std::vector<RECT> compute_paint_excludes(const syscall_context& c, const window& win)
+        {
+            std::vector<RECT> excludes{};
+            if ((win.style & WS_CLIPCHILDREN) == 0)
+            {
+                return excludes;
+            }
+
+            for (const auto& [index, child] : c.proc.windows)
+            {
+                (void)index;
+                if (child.parent_handle == win.handle && (child.style & WS_VISIBLE) != 0)
+                {
+                    excludes.push_back({.left = child.x, .top = child.y, .right = child.x + child.width, .bottom = child.y + child.height});
+                }
+            }
+
+            return excludes;
+        }
+
+        // After a window erased an area, whatever else lives in it has to paint again: its children when the
+        // window does not clip them out of the erase, and the siblings that overlap it.
+        void invalidate_overlapped_windows(const syscall_context& c, const window& erased, const RECT& area)
+        {
+            if ((erased.style & WS_CLIPCHILDREN) == 0)
+            {
+                invalidate_children_in_area(c, erased, area);
+            }
+
+            if (erased.parent_handle == 0)
+            {
+                return;
+            }
+
+            const auto* parent = c.proc.windows.get(erased.parent_handle);
+            if (parent == nullptr)
+            {
+                return;
+            }
+
+            const RECT in_parent{
+                .left = erased.x + area.left, .top = erased.y + area.top, .right = erased.x + area.right, .bottom = erased.y + area.bottom};
+            for (auto& [index, sibling] : c.proc.windows)
+            {
+                (void)index;
+                const bool overlaps = sibling.x < in_parent.right && sibling.x + sibling.width > in_parent.left &&
+                                      sibling.y < in_parent.bottom && sibling.y + sibling.height > in_parent.top;
+                if (sibling.parent_handle == erased.parent_handle && sibling.handle != erased.handle && (sibling.style & WS_VISIBLE) != 0 &&
+                    overlaps)
+                {
+                    invalidate_window(c, sibling);
+                }
+            }
+        }
+
+        void set_paint_clip(const syscall_context& c, const hdc dc, const std::optional<RECT>& area, std::vector<RECT> excludes = {})
+        {
+            if (const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc)); it != c.proc.gdi_dc_states.end())
+            {
+                it->second.has_paint_clip = area.has_value();
+                it->second.paint_clip = area.value_or(RECT{});
+                it->second.paint_excludes = std::move(excludes);
+            }
+        }
+
         void set_internal_paint_pending(const syscall_context& c, window& win, const bool pending)
         {
             win.internal_paint_pending = pending;
@@ -2579,11 +2688,14 @@ namespace sogen
                 return 0;
             }
 
+            const bool erase = win->erase_pending;
+            const RECT update_area = win->update_pending ? win->update_rect : get_client_rect(*win);
+
             if (paint_struct)
             {
                 EMU_PAINTSTRUCT ps{};
                 ps.paint_hdc = dc;
-                ps.fErase = win->erase_pending ? TRUE : FALSE;
+                ps.fErase = erase ? TRUE : FALSE;
                 ps.rcPaint = win->update_pending ? win->update_rect : RECT{};
                 ps.fRestore = FALSE;
                 ps.fIncUpdate = FALSE;
@@ -2592,7 +2704,41 @@ namespace sogen
 
             validate_window(*win);
             win->internal_paint_pending = false;
-            return dc;
+            set_paint_clip(c, dc, update_area, compute_paint_excludes(c, *win));
+
+            if (!erase)
+            {
+                return dc;
+            }
+
+            window_paint_state state{};
+            state.window = window;
+            state.dc = dc;
+            state.paint_struct = paint_struct.value();
+            state.area = update_area;
+            dispatch_window_message(c, callback_id::NtUserBeginPaint, std::move(state), *win, WM_ERASEBKGND, dc, 0);
+            return {};
+        }
+
+        hdc completion_NtUserBeginPaint(const syscall_context& c, const hwnd /*window*/,
+                                        const emulator_object<EMU_PAINTSTRUCT> /*paint_struct*/)
+        {
+            const auto& state = c.get_completion_state<window_paint_state>();
+
+            if (const auto* win = c.proc.windows.get(state.window))
+            {
+                invalidate_overlapped_windows(c, *win, state.area);
+            }
+
+            if (state.paint_struct != 0 && c.get_callback_result<uint64_t>() == 0)
+            {
+                const emulator_object<EMU_PAINTSTRUCT> ps_object{c.emu, state.paint_struct};
+                auto ps = ps_object.read();
+                ps.fErase = TRUE;
+                ps_object.write(ps);
+            }
+
+            return state.dc;
         }
 
         BOOL handle_NtUserEndPaint(const syscall_context& c, const hwnd window, const emulator_object<EMU_PAINTSTRUCT> paint_struct)
@@ -4109,6 +4255,7 @@ namespace sogen
                 };
 
                 win->style &= ~WS_VISIBLE;
+                invalidate_area_vacated_by(c, *win);
             }
 
             win->guest.access([&](USER_WINDOW& guest_win) { //
@@ -4216,6 +4363,23 @@ namespace sogen
                     return dispatch_default_print_messages(c, *win, msg, w_param, l_param);
                 }
 
+                if (msg == WM_PAINT && win->erase_pending)
+                {
+                    if (const auto erase_dc = handle_NtUserGetDCEx(c, hwnd, 0, 0))
+                    {
+                        message_call_state state{};
+                        state.window = hwnd;
+                        state.message = WM_PAINT;
+                        state.erase_dc = erase_dc;
+                        state.erase_area = win->update_pending ? win->update_rect : get_client_rect(*win);
+                        state.follow_up_messages.push_back({.message = WM_ERASEBKGND, .wParam = erase_dc, .lParam = 0});
+                        set_paint_clip(c, erase_dc, state.erase_area, compute_paint_excludes(c, *win));
+                        validate_window(*win);
+                        dispatch_next_message(c, callback_id::NtUserMessageCall, std::move(state), *win, state.follow_up_messages);
+                        return {};
+                    }
+                }
+
                 const auto result = handle_default_window_proc_message(c, *win, msg, w_param, l_param, ansi);
                 return write_message_call_result(c, result_info, result) ? TRUE : FALSE;
             }
@@ -4310,6 +4474,16 @@ namespace sogen
                     return {};
                 }
             }
+            if (state.erase_dc != 0)
+            {
+                if (const auto* painted = c.proc.windows.get(state.window))
+                {
+                    invalidate_overlapped_windows(c, *painted, state.erase_area);
+                }
+                (void)handle_NtGdiDeleteObjectApp(c, static_cast<uint32_t>(state.erase_dc));
+                state.erase_dc = 0;
+            }
+
             if (state.message == WM_PAINT)
             {
                 if (auto* win = c.proc.windows.get(state.window))
@@ -5198,6 +5372,7 @@ namespace sogen
             if ((flags & SWP_HIDEWINDOW) != 0)
             {
                 win->style &= ~WS_VISIBLE;
+                invalidate_area_vacated_by(c, *win);
                 win->guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win->style; });
                 if (win->host_surface_window)
                 {

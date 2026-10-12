@@ -249,6 +249,8 @@ namespace sogen
         uint64_t scratch_text{}; // guest buffer holding a re-encoded text payload; freed on completion
         bool dispatching_result_callback{};
         std::vector<qmsg> follow_up_messages{}; // messages DefWindowProc still has to send, last one first
+        uint64_t erase_dc{};                    // DC DefWindowProc's WM_PAINT erases through; released on completion
+        RECT erase_area{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -258,6 +260,8 @@ namespace sogen
             buffer.write(this->scratch_text);
             buffer.write(this->dispatching_result_callback);
             buffer.write_vector(this->follow_up_messages);
+            buffer.write(this->erase_dc);
+            buffer.write(this->erase_area);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -267,6 +271,33 @@ namespace sogen
             buffer.read(this->scratch_text);
             buffer.read(this->dispatching_result_callback);
             buffer.read_vector(this->follow_up_messages);
+            buffer.read(this->erase_dc);
+            buffer.read(this->erase_area);
+        }
+    };
+
+    struct window_paint_state : completion_state
+    {
+        hwnd window{};
+        hdc dc{};
+        uint64_t paint_struct{};
+        RECT area{};
+
+      private:
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->window);
+            buffer.write(this->dc);
+            buffer.write(this->paint_struct);
+            buffer.write(this->area);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->window);
+            buffer.read(this->dc);
+            buffer.read(this->paint_struct);
+            buffer.read(this->area);
         }
     };
 

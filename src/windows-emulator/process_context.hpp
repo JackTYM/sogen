@@ -156,10 +156,19 @@ namespace sogen
         int32_t clip_right{INT32_MAX};
         int32_t clip_bottom{INT32_MAX};
 
+        std::vector<RECT> clip_excludes{};
+
         bool is_writable(const int x, const int y) const
         {
-            return x >= 0 && y >= 0 && x < static_cast<int>(this->width) && y < static_cast<int>(this->height) && x >= this->clip_left &&
-                   x < this->clip_right && y >= this->clip_top && y < this->clip_bottom;
+            if (x < 0 || y < 0 || x >= static_cast<int>(this->width) || y >= static_cast<int>(this->height) || x < this->clip_left ||
+                x >= this->clip_right || y < this->clip_top || y >= this->clip_bottom)
+            {
+                return false;
+            }
+
+            return std::ranges::none_of(this->clip_excludes, [x, y](const RECT& excluded) {
+                return x >= excluded.left && x < excluded.right && y >= excluded.top && y < excluded.bottom;
+            });
         }
 
         void serialize(utils::buffer_serializer& buffer) const
@@ -221,6 +230,9 @@ namespace sogen
         int32_t current_x{};
         int32_t current_y{};
         bool is_memory_dc{};
+        bool has_paint_clip{};
+        RECT paint_clip{};
+        std::vector<RECT> paint_excludes{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -230,6 +242,19 @@ namespace sogen
             buffer.write(this->current_x);
             buffer.write(this->current_y);
             buffer.write(this->is_memory_dc);
+            buffer.write(this->has_paint_clip);
+            buffer.write(this->paint_clip.left);
+            buffer.write(this->paint_clip.top);
+            buffer.write(this->paint_clip.right);
+            buffer.write(this->paint_clip.bottom);
+            buffer.write(static_cast<uint32_t>(this->paint_excludes.size()));
+            for (const auto& excluded : this->paint_excludes)
+            {
+                buffer.write(excluded.left);
+                buffer.write(excluded.top);
+                buffer.write(excluded.right);
+                buffer.write(excluded.bottom);
+            }
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -240,6 +265,21 @@ namespace sogen
             buffer.read(this->current_x);
             buffer.read(this->current_y);
             buffer.read(this->is_memory_dc);
+            buffer.read(this->has_paint_clip);
+            buffer.read(this->paint_clip.left);
+            buffer.read(this->paint_clip.top);
+            buffer.read(this->paint_clip.right);
+            buffer.read(this->paint_clip.bottom);
+            uint32_t exclude_count{};
+            buffer.read(exclude_count);
+            this->paint_excludes.resize(exclude_count);
+            for (auto& excluded : this->paint_excludes)
+            {
+                buffer.read(excluded.left);
+                buffer.read(excluded.top);
+                buffer.read(excluded.right);
+                buffer.read(excluded.bottom);
+            }
         }
     };
 

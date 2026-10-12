@@ -193,6 +193,7 @@ namespace sogen
         NtUserSetWindowPos,
         NtUserGetComboBoxInfo,
         NtUserSetFocus,
+        NtUserBeginPaint,
     };
 
     struct callback_frame

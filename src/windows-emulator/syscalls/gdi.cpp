@@ -632,6 +632,7 @@ namespace sogen
                 surface.clip_top = INT32_MIN;
                 surface.clip_right = INT32_MAX;
                 surface.clip_bottom = INT32_MAX;
+                surface.clip_excludes.clear();
 
                 const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
                 if (dc_it == c.proc.gdi_dc_states.end() || dc_it->second.selected_bitmap != 0 || dc_it->second.target_window == 0)
@@ -670,6 +671,22 @@ namespace sogen
                     right = std::min(right, parent_origin_x + extent_width(*parent));
                     bottom = std::min(bottom, parent_origin_y + extent_height(*parent));
                     win = parent;
+                }
+
+                if (const auto& dc_state = dc_it->second; dc_state.has_paint_clip)
+                {
+                    left = std::max(left, origin_x + dc_state.paint_clip.left);
+                    top = std::max(top, origin_y + dc_state.paint_clip.top);
+                    right = std::min(right, origin_x + dc_state.paint_clip.right);
+                    bottom = std::min(bottom, origin_y + dc_state.paint_clip.bottom);
+                }
+
+                for (const auto& excluded : dc_it->second.paint_excludes)
+                {
+                    surface.clip_excludes.push_back({.left = origin_x + excluded.left,
+                                                     .top = origin_y + excluded.top,
+                                                     .right = origin_x + excluded.right,
+                                                     .bottom = origin_y + excluded.bottom});
                 }
 
                 surface.clip_left = left;
