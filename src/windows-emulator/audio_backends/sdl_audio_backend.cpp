@@ -2,11 +2,16 @@
 #include <platform/audio_backend.hpp>
 
 #include <cstddef>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <vector>
 
 #include <SDL3/SDL.h>
+
+// The embedding app owns main(); without this SDL refuses to initialize on iOS.
+#define SDL_MAIN_HANDLED
+#include <SDL3/SDL_main.h>
 
 namespace sogen
 {
@@ -63,9 +68,11 @@ namespace sogen
 
                 if (!this->initialized_)
                 {
+                    SDL_SetMainReady();
                     this->initialized_ = SDL_InitSubSystem(SDL_INIT_AUDIO);
                     if (!this->initialized_)
                     {
+                        std::fprintf(stderr, "[audio] SDL_InitSubSystem(AUDIO) failed: %s\n", SDL_GetError());
                         return false;
                     }
                 }
@@ -74,9 +81,12 @@ namespace sogen
                 this->stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
                 if (!this->stream_)
                 {
+                    std::fprintf(stderr, "[audio] SDL_OpenAudioDeviceStream failed: %s\n", SDL_GetError());
                     return false;
                 }
 
+                std::fprintf(stderr, "[audio] started %u Hz, %u channels, %u bits%s\n", format.sample_rate, format.channels,
+                             format.bits_per_sample, format.is_float ? " (float)" : "");
                 this->format_ = format;
                 SDL_ResumeAudioStreamDevice(this->stream_);
                 return true;
