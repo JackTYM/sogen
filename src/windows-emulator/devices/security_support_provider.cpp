@@ -58,8 +58,85 @@ namespace sogen
                  0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x73, 0x00, 0x2E,
                  0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+            // IOCTL_KSEC_ENCRYPT_MEMORY / _DECRYPT_MEMORY and their _CROSS_PROC / _SAME_LOGON variants, issued by
+            // CryptProtectMemory/CryptUnprotectMemory on a buffer of whole 16-byte blocks that is transformed in place.
+            // Callers only rely on the transform being opaque and reversible within the scope the variant names, so a
+            // keystream XOR is used; the same-process variant mixes in the process id, the others share one key across
+            // the emulated logon session.
+            static std::optional<bool> memory_protection_is_process_scoped(const ULONG io_control_code)
+            {
+                switch (io_control_code)
+                {
+                case 0x39000E:
+                case 0x390012:
+                    return true;
+                case 0x390016:
+                case 0x39001A:
+                case 0x39001E:
+                case 0x390022:
+                    return false;
+                default:
+                    return std::nullopt;
+                }
+            }
+
+            static NTSTATUS transform_protected_memory(windows_emulator& win_emu, const io_device_context& c, const bool process_scoped)
+            {
+                constexpr size_t block_size = 16;
+                const auto buffer = c.output_buffer ? c.output_buffer : c.input_buffer;
+                const auto length = c.output_buffer ? c.output_buffer_length : c.input_buffer_length;
+                if (!buffer || length == 0 || length % block_size != 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> data(length);
+                if (c.input_buffer && c.input_buffer_length == length)
+                {
+                    win_emu.emu().read_memory(c.input_buffer, data.data(), data.size());
+                }
+                else
+                {
+                    win_emu.emu().read_memory(buffer, data.data(), data.size());
+                }
+
+                uint64_t state = 0x6B7365634D656D50ull ^ (process_scoped ? win_emu.process.process_id : 0);
+                const auto next = [&state] {
+                    state += 0x9E3779B97F4A7C15ull;
+                    auto z = state;
+                    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+                    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+                    return z ^ (z >> 31);
+                };
+
+                for (size_t offset = 0; offset < data.size(); offset += sizeof(uint64_t))
+                {
+                    auto key = next();
+                    for (size_t i = 0; i < sizeof(uint64_t); ++i, key >>= 8)
+                    {
+                        data[offset + i] ^= static_cast<std::byte>(key & 0xFF);
+                    }
+                }
+
+                win_emu.emu().write_memory(buffer, data.data(), data.size());
+
+                if (c.io_status_block)
+                {
+                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                    block.Information = length;
+                    c.io_status_block.write(block);
+                }
+
+                return STATUS_SUCCESS;
+            }
+
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
             {
+                if (const auto process_scoped = memory_protection_is_process_scoped(c.io_control_code))
+                {
+                    return transform_protected_memory(win_emu, c, *process_scoped);
+                }
+
                 if (c.io_control_code != 0x390400)
                 {
                     return STATUS_NOT_SUPPORTED;
