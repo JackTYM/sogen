@@ -1996,6 +1996,13 @@ namespace sogen
         // the guest falls through to the default handler instead of erasing the background itself.
         BOOL erase_window_class_background(const syscall_context& c, const window& win, const hdc dc)
         {
+            const auto window_class = c.proc.classes.find(win.class_name);
+            const bool has_class_brush = window_class != c.proc.classes.end() && window_class->second.wnd_class.hbrBackground != 0;
+            if (!has_class_brush && !win.is_dialog())
+            {
+                return FALSE;
+            }
+
             int32_t origin_x = 0;
             int32_t origin_y = 0;
             uint32_t present_handle = 0;
@@ -2006,7 +2013,7 @@ namespace sogen
             }
 
             const auto color = window_surface_fill_color(c, win);
-            fill_rect(*surface, origin_x, origin_y, origin_x + win.width, origin_y + win.height, color);
+            fill_rect(*surface, origin_x, origin_y, origin_x + win.client_width(), origin_y + win.client_height(), color);
             present_win_surface(c, present_handle, surface);
             return TRUE;
         }
