@@ -105,6 +105,22 @@ namespace sogen
         {
         }
 
+        virtual void set_window_parent(const hwnd /*window*/, const hwnd /*parent*/, const bool /*top_level*/)
+        {
+        }
+
+        // Composites a descendant window's frame (typically presented by another process) over the top-level's
+        // own content. destination and clip are in the top-level's client coordinates; the surface is scaled to
+        // destination and only the part inside clip is drawn.
+        virtual void present_layer(const hwnd /*top_level*/, const hwnd /*layer*/, const RECT& /*destination*/, const RECT& /*clip*/,
+                                   const ui_surface_desc& /*surface*/)
+        {
+        }
+
+        virtual void remove_layer(const hwnd /*layer*/)
+        {
+        }
+
         // Warp the host cursor so it tracks a guest SetCursorPos. Without this, the next host mouse-motion
         // event reports the (unchanged) host position and overwrites the recentered guest cursor, making
         // relative-mouse deltas (in-game look) jump. screen_x/y are emulated-desktop screen coordinates.

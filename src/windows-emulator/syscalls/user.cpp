@@ -5116,6 +5116,11 @@ namespace sogen
 
             append_to_parent();
 
+            if (child->host_surface_window)
+            {
+                c.win_emu.ui().set_window_parent(child->handle, child->parent_handle, child->parent_handle == desktop);
+            }
+
             return old_parent;
         }
 
@@ -7632,6 +7637,10 @@ namespace sogen
                 const auto desktop = process.default_desktop_window_handle.bits;
                 response.base_address = win->parent_handle != 0 ? win->parent_handle : desktop;
                 win->parent_handle = request.size;
+                if (win->host_surface_window)
+                {
+                    target.ui().set_window_parent(win->handle, win->parent_handle, win->parent_handle == 0);
+                }
                 response.status = STATUS_SUCCESS;
                 return;
             }

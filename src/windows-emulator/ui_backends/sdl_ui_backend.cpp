@@ -598,6 +598,16 @@ namespace sogen
         class sdl_ui_backend final : public ui_backend
         {
           public:
+            struct layer_state
+            {
+                hwnd layer{};
+                SDL_Texture* texture{};
+                int texture_width{};
+                int texture_height{};
+                RECT destination{};
+                RECT clip{};
+            };
+
             struct window_state
             {
                 ui_window_desc desc{};
@@ -608,6 +618,7 @@ namespace sogen
                 int texture_height{};
                 ui_surface_format texture_format{ui_surface_format::bgra8};
                 bool has_surface{};
+                std::vector<layer_state> layers{};
             };
 
             ~sdl_ui_backend() override
@@ -951,19 +962,22 @@ namespace sogen
 
             void destroy_window(const hwnd window) override
             {
-                this->queue_or_run([this, window] {
-                    if (const auto it = this->windows_.find(window); it != this->windows_.end())
+                this->queue_or_run([this, window] { this->destroy_window_impl(window); });
+            }
+
+            void destroy_window_impl(const hwnd window)
+            {
+                if (const auto it = this->windows_.find(window); it != this->windows_.end())
+                {
+                    // Child (non-top-level) windows have no SDL window; only top-level windows do.
+                    if (it->second.window)
                     {
-                        // Child (non-top-level) windows have no SDL window; only top-level windows do.
-                        if (it->second.window)
-                        {
-                            SDL_StopTextInput(it->second.window);
-                            this->guest_by_window_id_.erase(SDL_GetWindowID(it->second.window));
-                        }
-                        destroy_window_resources(it->second);
-                        this->windows_.erase(it);
+                        SDL_StopTextInput(it->second.window);
+                        this->guest_by_window_id_.erase(SDL_GetWindowID(it->second.window));
                     }
-                });
+                    destroy_window_resources(it->second);
+                    this->windows_.erase(it);
+                }
             }
 
             void set_window_rect(const hwnd window, const RECT& rect) override
@@ -1035,16 +1049,8 @@ namespace sogen
 
             void present_surface(const hwnd window, const ui_surface_desc& surface) override
             {
-                // The queued command runs on the pump thread after this call returns, by which point the
-                // guest's pixel buffer may be gone, so take a private copy of it now.
-                std::vector<uint8_t> pixels;
                 auto copy = surface;
-                if (surface.pixels && surface.stride > 0 && surface.height > 0)
-                {
-                    const auto size = static_cast<size_t>(surface.stride) * static_cast<size_t>(surface.height);
-                    pixels.resize(size);
-                    std::memcpy(pixels.data(), surface.pixels, size);
-                }
+                auto pixels = copy_surface_pixels(surface);
 
                 this->queue_or_run([this, window, copy, pixels = std::move(pixels)]() mutable {
                     copy.pixels = pixels.empty() ? nullptr : pixels.data();
@@ -1063,6 +1069,64 @@ namespace sogen
                         render_window(*state);
                     }
                 });
+            }
+
+            void set_window_parent(const hwnd window, const hwnd parent, const bool top_level) override
+            {
+                this->queue_or_run([this, window, parent, top_level] {
+                    auto* state = this->resolve_window(window);
+                    if (!state)
+                    {
+                        return;
+                    }
+
+                    auto desc = state->desc;
+                    desc.parent = top_level ? 0 : parent;
+                    if (desc.top_level == top_level)
+                    {
+                        state->desc = desc;
+                        this->redraw_related(window);
+                        return;
+                    }
+
+                    this->destroy_window_impl(window);
+                    desc.top_level = top_level;
+                    this->create_window_impl(desc);
+                });
+            }
+
+            void present_layer(const hwnd top_level, const hwnd layer, const RECT& destination, const RECT& clip,
+                               const ui_surface_desc& surface) override
+            {
+                auto copy = surface;
+                auto pixels = copy_surface_pixels(surface);
+
+                this->queue_or_run([this, top_level, layer, destination, clip, copy, pixels = std::move(pixels)]() mutable {
+                    copy.pixels = pixels.empty() ? nullptr : pixels.data();
+
+                    auto* state = this->resolve_window(top_level);
+                    if (!state || !state->renderer)
+                    {
+                        return;
+                    }
+
+                    auto entry = std::ranges::find(state->layers, layer, &layer_state::layer);
+                    if (entry == state->layers.end())
+                    {
+                        this->remove_layer_impl(layer);
+                        entry = state->layers.insert(state->layers.end(), layer_state{.layer = layer});
+                    }
+
+                    entry->destination = destination;
+                    entry->clip = clip;
+                    update_layer_texture(state->renderer, *entry, copy);
+                    render_window(*state);
+                });
+            }
+
+            void remove_layer(const hwnd layer) override
+            {
+                this->queue_or_run([this, layer] { this->remove_layer_impl(layer); });
             }
 
             void set_cursor_position(const hwnd window, const int32_t screen_x, const int32_t screen_y) override
@@ -1203,8 +1267,153 @@ namespace sogen
                 }
             }
 
+            // Queued commands run on the pump thread after the caller returns, by which point the guest's pixel
+            // buffer may be gone, so they work on a private copy.
+            static std::vector<uint8_t> copy_surface_pixels(const ui_surface_desc& surface)
+            {
+                std::vector<uint8_t> pixels;
+                if (surface.pixels && surface.stride > 0 && surface.height > 0)
+                {
+                    const auto size = static_cast<size_t>(surface.stride) * static_cast<size_t>(surface.height);
+                    pixels.resize(size);
+                    std::memcpy(pixels.data(), surface.pixels, size);
+                }
+                return pixels;
+            }
+
+            void remove_layer_impl(const hwnd layer)
+            {
+                for (auto& state : this->windows_ | std::views::values)
+                {
+                    const auto entry = std::ranges::find(state.layers, layer, &layer_state::layer);
+                    if (entry == state.layers.end())
+                    {
+                        continue;
+                    }
+
+                    if (entry->texture)
+                    {
+                        SDL_DestroyTexture(entry->texture);
+                    }
+                    state.layers.erase(entry);
+                    if (state.renderer)
+                    {
+                        render_window(state);
+                    }
+                }
+            }
+
+            static void update_layer_texture(SDL_Renderer* renderer, layer_state& layer, const ui_surface_desc& surface)
+            {
+                if (!surface.pixels || surface.width <= 0 || surface.height <= 0 || surface.stride <= 0)
+                {
+                    return;
+                }
+
+                if (!layer.texture || layer.texture_width != surface.width || layer.texture_height != surface.height)
+                {
+                    if (layer.texture)
+                    {
+                        SDL_DestroyTexture(layer.texture);
+                    }
+
+                    layer.texture = SDL_CreateTexture(renderer, get_sdl_pixel_format(surface.format), SDL_TEXTUREACCESS_STREAMING,
+                                                      surface.width, surface.height);
+                    if (!layer.texture)
+                    {
+                        layer.texture_width = 0;
+                        layer.texture_height = 0;
+                        return;
+                    }
+
+                    SDL_SetTextureBlendMode(layer.texture, SDL_BLENDMODE_NONE);
+                    SDL_SetTextureScaleMode(layer.texture, SDL_SCALEMODE_NEAREST);
+                    layer.texture_width = surface.width;
+                    layer.texture_height = surface.height;
+                }
+
+                SDL_UpdateTexture(layer.texture, nullptr, surface.pixels, surface.stride);
+            }
+
+            static void render_layer(SDL_Renderer* renderer, const layer_state& layer)
+            {
+                const auto& destination = layer.destination;
+                const auto width = destination.right - destination.left;
+                const auto height = destination.bottom - destination.top;
+                const RECT visible{
+                    .left = std::max(destination.left, layer.clip.left),
+                    .top = std::max(destination.top, layer.clip.top),
+                    .right = std::min(destination.right, layer.clip.right),
+                    .bottom = std::min(destination.bottom, layer.clip.bottom),
+                };
+
+                if (!layer.texture || width <= 0 || height <= 0 || visible.right <= visible.left || visible.bottom <= visible.top)
+                {
+                    return;
+                }
+
+                const auto scale_x = static_cast<float>(layer.texture_width) / static_cast<float>(width);
+                const auto scale_y = static_cast<float>(layer.texture_height) / static_cast<float>(height);
+                const SDL_FRect source{
+                    .x = static_cast<float>(visible.left - destination.left) * scale_x,
+                    .y = static_cast<float>(visible.top - destination.top) * scale_y,
+                    .w = static_cast<float>(visible.right - visible.left) * scale_x,
+                    .h = static_cast<float>(visible.bottom - visible.top) * scale_y,
+                };
+                const SDL_FRect target{
+                    .x = static_cast<float>(visible.left),
+                    .y = static_cast<float>(visible.top),
+                    .w = static_cast<float>(visible.right - visible.left),
+                    .h = static_cast<float>(visible.bottom - visible.top),
+                };
+                SDL_RenderTexture(renderer, layer.texture, &source, &target);
+            }
+
+            // Layers are placed in client coordinates, so a window that has any presents its client area as the
+            // logical surface (with the window's own content at the origin) instead of fitting its own texture.
+            static void render_layered_window(window_state& state)
+            {
+                const auto& insets = state.desc.client_insets;
+                const auto client_width = std::max<int>(1, (state.desc.rect.right - state.desc.rect.left) - insets.left - insets.right);
+                const auto client_height = std::max<int>(1, (state.desc.rect.bottom - state.desc.rect.top) - insets.top - insets.bottom);
+
+                SDL_SetRenderLogicalPresentation(state.renderer, client_width, client_height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+                SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, 255);
+                SDL_RenderClear(state.renderer);
+
+                if (state.has_surface && state.texture)
+                {
+                    const SDL_FRect base{
+                        .x = 0.0f, .y = 0.0f, .w = static_cast<float>(state.texture_width), .h = static_cast<float>(state.texture_height)};
+                    SDL_RenderTexture(state.renderer, state.texture, nullptr, &base);
+                }
+                else
+                {
+                    const SDL_FRect client{
+                        .x = 0.0f, .y = 0.0f, .w = static_cast<float>(client_width), .h = static_cast<float>(client_height)};
+                    SDL_SetRenderDrawColor(state.renderer, 224, 224, 224, 255);
+                    SDL_RenderFillRect(state.renderer, &client);
+                }
+
+                for (const auto& layer : state.layers)
+                {
+                    render_layer(state.renderer, layer);
+                }
+
+                SDL_RenderPresent(state.renderer);
+            }
+
             static void destroy_window_resources(window_state& state)
             {
+                for (auto& layer : state.layers)
+                {
+                    if (layer.texture)
+                    {
+                        SDL_DestroyTexture(layer.texture);
+                    }
+                }
+                state.layers.clear();
+
                 if (state.texture)
                 {
                     SDL_DestroyTexture(state.texture);
@@ -1272,6 +1481,12 @@ namespace sogen
 
             static void render_window(window_state& state)
             {
+                if (!state.layers.empty())
+                {
+                    render_layered_window(state);
+                    return;
+                }
+
                 if (state.has_surface && state.texture)
                 {
                     // The guest renders at a fixed resolution; fit it into the (independently sized) host window
