@@ -343,13 +343,16 @@ link either -- it's fixed-function-only (`D3DFVF_XYZRHW|D3DFVF_DIFFUSE`), no sha
 
 ## Stage
 
-The driver and the host share one wire protocol with no runtime version negotiation, so
 `sogen_d3d9um.dll` has to be re-staged into **every** root anything is run against whenever
-`sogen_d3d9_umd.cpp` or `d3d9_command_protocol.hpp` changes. A root left holding an older copy
-still loads and still negotiates a device; what goes wrong is that the host rejects each record
-whose size the two sides no longer agree on, so (for instance) a `lock_response` that grew fails
-every `Lock` the app makes and the app renders nothing. Roots are outside the build tree and
-nothing re-stages them for you.
+`sogen_d3d9_umd.cpp`, `d3d9_command_protocol.hpp` or `gpu_bridge_protocol.hpp` changes. Roots are
+outside the build tree and nothing re-stages them for you.
+
+Any change to the wire shape must come with a bump of `gpu_bridge::protocol_version`, which the two
+sides compare in a handshake `OpenAdapter` runs before it hands the runtime an adapter function
+table. A root left holding a driver built against a different version now fails device creation
+outright, with a `[sogen-d3d9-umd] FATAL: GPU bridge protocol mismatch` line naming both versions,
+instead of loading, negotiating a device and then misreading every response whose size the two sides
+no longer agree on.
 
 ```bash
 cp sogen_d3d9um-x64.dll <root>/filesys/c/windows/system32/sogen_d3d9um.dll
@@ -866,7 +869,7 @@ land in the WRONG place. **All 768 cell centers** (not a sample) are read back a
 own analytically-derived colors -- upgraded from an earlier 8-cell sample specifically because an
 arena/descriptor-overlap bug corrupts a CONTIGUOUS run of draws, which a sparse sample could miss
 entirely; all 768 read back byte-exact on both x64 and x86/WoW64. The host also logs
-`[d3d9-host] frame: draws=768 submits=10` (twice, once per host lock DDI call the one guest `LockRect`
+`[d3d9-host] frame: draws=768 submits=10` (with `EMULATOR_D3D9_FRAME_STATS` set; twice, once per host lock DDI call the one guest `LockRect`
 drives -- see `gpu_bridge.cpp`'s `handle_d3d9_lock` comment) -- the direct proof that batching is real,
 not just correct: 768 draws collapsed into 10 actual Vulkan submissions. The draw loop is bracketed by
 `QueryPerformanceCounter` and prints its wall-clock time; pre-batching (fully synchronous, one

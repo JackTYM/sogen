@@ -1,5 +1,6 @@
 #include "d3d9_host.hpp"
 
+#include "d3d9_bc_decode.hpp"
 #include "d3d9_format.hpp"
 #include "d3d9_shader_translator.hpp"
 
@@ -79,6 +80,9 @@ namespace sogen
             double readback_ms;
             double copy_ms;
             double interval_ms;
+            double max_interval_ms;
+            uint64_t frames_over_25ms;
+            uint64_t frames_over_50ms;
             uint64_t frames;
             std::chrono::steady_clock::time_point last_present;
         };
@@ -521,10 +525,23 @@ namespace sogen
             }
         }
 
+        uint32_t bc1_linear_features = 0;
+        uint32_t bc1_optimal_features = 0;
+        uint32_t bc1_buffer_features = 0;
+        const bool bc1_queried = this->vulkan_.get_physical_device_format_properties(phys_ids[0], VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+                                                                                     bc1_linear_features, bc1_optimal_features,
+                                                                                     bc1_buffer_features) == 0;
+        this->bc_decode_fallback_ = bc1_queried && (bc1_optimal_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0;
+
         this->vk_instance_ = instance;
         this->vk_physical_device_ = phys_ids[0];
         this->vk_device_ = device;
         return device;
+    }
+
+    uint32_t d3d9_host::texture_gpu_format(const uint32_t vk_format) const
+    {
+        return this->bc_decode_fallback_ && vk_format_is_bc1_to_bc3(vk_format) ? static_cast<uint32_t>(VK_FORMAT_R8G8B8A8_UNORM) : vk_format;
     }
 
     bool d3d9_host::ensure_draw_infra()
@@ -2186,7 +2203,9 @@ namespace sogen
 
     size_t d3d9_host::grown_arena_capacity(const size_t capacity, const size_t needed)
     {
-        size_t target = std::max(needed, capacity * 2);
+        // A capacity that is not a power of two (an earlier growth landed on `needed`) must not double past the
+        // cap: it is also the largest host-coherent allocation Metal grants, so anything bigger never succeeds.
+        size_t target = std::max(needed, std::min(capacity * 2, max_batch_arena_bytes));
         if (target < arena_jump_to_cap_bytes)
         {
             return target;
@@ -3269,6 +3288,7 @@ namespace sogen
                 uint64_t& sampled_view = sample_srgb ? tex.vk_image_view_sampled_srgb_id : tex.vk_image_view_sampled_id;
                 if (sampled_view == 0 && (sample_srgb || d3d9_format_to_vulkan(tex.format, view_format)))
                 {
+                    view_format = this->texture_gpu_format(view_format);
                     // Sampling view spans the texture's full mip chain (levelCount = mip_levels) so the
                     // sampler can select any level; single-mip textures still get levelCount 1. View
                     // type/layer-count follow the resource kind (cube/volume/2D) via the shared helper.
@@ -3327,6 +3347,7 @@ namespace sogen
                     uint32_t tex_vk_format = 0;
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
                     {
+                        tex_vk_format = this->texture_gpu_format(tex_vk_format);
                         const uint32_t view_levels = std::max(1u, tex.mip_levels);
                         const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
                         const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
@@ -4153,7 +4174,7 @@ namespace sogen
                     image_type = VK_IMAGE_TYPE_3D;
                     image_depth = std::max(1u, depth);
                 }
-                if (this->vulkan_.create_image(device, texture_vk_format, width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
+                if (this->vulkan_.create_image(device, this->texture_gpu_format(texture_vk_format), width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
                                                /*samples=*/1, image_type, image_depth, texture_mip_levels, array_layers, image_flags,
                                                vk_image) == 0 &&
                     vk_image != 0)
@@ -4282,6 +4303,10 @@ namespace sogen
             const std::byte* src;
         };
 
+        const bool decode_to_rgba8 = this->texture_gpu_format(vk_format) != vk_format;
+        std::vector<std::vector<std::byte>> decoded_levels;
+        decoded_levels.reserve(subresources.size());
+
         std::vector<subresource_upload> uploads;
         uint64_t total_size = 0;
         for (uint32_t index = 0; index < subresources.size(); ++index)
@@ -4292,8 +4317,18 @@ namespace sogen
             {
                 return false; // degenerate format/size only -- see the comment above this loop
             }
-            uploads.push_back({sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, sub.size, total_size, src.data()});
-            total_size += sub.size;
+
+            const std::byte* upload_src = src.data();
+            size_t upload_size = sub.size;
+            if (decode_to_rgba8)
+            {
+                upload_size = static_cast<size_t>(sub.width) * sub.height * sub.depth * 4;
+                auto& decoded = decoded_levels.emplace_back(upload_size);
+                decode_bc1_to_bc3_rgba8(vk_format, std::span{src.data(), sub.size}, sub.width, sub.height, sub.depth, decoded);
+                upload_src = decoded.data();
+            }
+            uploads.push_back({sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, upload_size, total_size, upload_src});
+            total_size += upload_size;
         }
 
         const uint64_t device = this->ensure_vk_device();
@@ -4860,7 +4895,11 @@ namespace sogen
             totals.copy_ms += elapsed_ms(t0, now);
             if (totals.last_present.time_since_epoch().count() != 0)
             {
-                totals.interval_ms += elapsed_ms(totals.last_present, now);
+                const double interval = elapsed_ms(totals.last_present, now);
+                totals.interval_ms += interval;
+                totals.max_interval_ms = std::max(totals.max_interval_ms, interval);
+                totals.frames_over_25ms += interval > 25.0 ? 1 : 0;
+                totals.frames_over_50ms += interval > 50.0 ? 1 : 0;
             }
             totals.last_present = now;
 
@@ -4871,10 +4910,12 @@ namespace sogen
                 const auto n = static_cast<double>(totals.frames);
                 fprintf(stderr,
                         "[d3d9-present-timing] %ux%u over %llu presents: interval=%.2fms (%.1f FPS) | flush=%.2fms "
-                        "readback=%.2fms copy=%.2fms | blocking=%.1f%% of frame\n",
+                        "readback=%.2fms copy=%.2fms | blocking=%.1f%% of frame | max=%.1fms over25ms=%llu over50ms=%llu\n",
                         out_width, out_height, static_cast<unsigned long long>(totals.frames), totals.interval_ms / n,
                         1000.0 * n / std::max(totals.interval_ms, 1e-9), totals.flush_ms / n, totals.readback_ms / n, totals.copy_ms / n,
-                        100.0 * (totals.flush_ms + totals.readback_ms + totals.copy_ms) / std::max(totals.interval_ms, 1e-9));
+                        100.0 * (totals.flush_ms + totals.readback_ms + totals.copy_ms) / std::max(totals.interval_ms, 1e-9),
+                        totals.max_interval_ms, static_cast<unsigned long long>(totals.frames_over_25ms),
+                        static_cast<unsigned long long>(totals.frames_over_50ms));
                 const auto last = totals.last_present;
                 totals = {};
                 totals.last_present = last;

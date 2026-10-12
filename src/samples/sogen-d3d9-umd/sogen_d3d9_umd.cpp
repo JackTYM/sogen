@@ -206,6 +206,39 @@ namespace
         return reinterpret_cast<gb::escape_command_header*>(buffer)->result >= 0;
     }
 
+    // This DLL is a hand-built blob staged into each emulation root, and nothing re-stages it when the
+    // host is rebuilt (see the README's Stage section), so a root can be left holding a driver that
+    // speaks an older wire shape than the host it runs against. Confirm the two agree once, before the
+    // runtime is allowed to build a device on this driver, so that shows up as the message below rather
+    // than as whatever the first structurally-disagreeing command does to the app's memory.
+    //
+    // Only a positive disagreement counts: a handshake the host never answered leaves the response
+    // zeroed, and treating that as a mismatch would turn any setup where the bridge is merely
+    // unreachable into one that refuses to start.
+    bool bridge_protocol_ok()
+    {
+        static const bool ok = [] {
+            gb::version_response response{};
+            if (!bridge_call(gb::ioctl_get_version, nullptr, 0, &response, sizeof(response)) || response.magic != gb::protocol_magic ||
+                response.version == gb::protocol_version)
+            {
+                return true;
+            }
+
+            char message[320];
+            std::snprintf(message, sizeof(message),
+                          "[sogen-d3d9-umd] FATAL: GPU bridge protocol mismatch -- this driver was built for version %u, the host "
+                          "speaks version %u. sogen_d3d9um.dll is stale: rebuild it (see src/samples/sogen-d3d9-umd/README.md) and "
+                          "re-stage it into every emulation root.\n",
+                          gb::protocol_version, response.version);
+            OutputDebugStringA(message);
+            std::fputs(message, stdout);
+            std::fflush(stdout);
+            return false;
+        }();
+        return ok;
+    }
+
     // Batched D3D9 streamed opcodes: same wire mechanism vulkan_shim.cpp's g_command_streams/
     // record_command use, but a single global stream since D3D9 has no command-buffer concept.
     // record_d3d9 only appends; bridge_call's flush-on-every-other-call guard above is what actually
@@ -3012,6 +3045,10 @@ extern "C" __declspec(dllexport) HRESULT APIENTRY OpenAdapter(D3DDDIARG_OPENADAP
     if (!pArgs->pAdapterFuncs)
     {
         return E_INVALIDARG;
+    }
+    if (!bridge_protocol_ok())
+    {
+        return E_FAIL;
     }
     pArgs->pAdapterFuncs->pfnGetCaps = umd_GetCaps;
     pArgs->pAdapterFuncs->pfnCreateDevice = umd_CreateDevice;

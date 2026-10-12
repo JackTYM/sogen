@@ -18,10 +18,10 @@ if(NOT TARGET SDL3::SDL3)
   endif()
 endif()
 
-# vkd3d-shader (real D3D9 SM2/3 shader translation) is a desktop-only feature: it's cross-compiled
-# from source via autotools and needs a widl IDL compiler plus GNU libtool/bison on the host, none of
-# which are meaningful (or available) on Android/iOS/Emscripten.
-if(NOT ANDROID AND NOT IOS AND NOT EMSCRIPTEN)
+# vkd3d-shader (real D3D9 SM2/3 shader translation) is cross-compiled from source via autotools and
+# needs a widl IDL compiler plus GNU libtool/bison on the build host, none of which exist on
+# Android/Emscripten. iOS cross-builds it from a Mac, so it has them.
+if(NOT ANDROID AND NOT EMSCRIPTEN)
   set(SOGEN_HAS_VKD3D_SHADER ON)
 endif()
 

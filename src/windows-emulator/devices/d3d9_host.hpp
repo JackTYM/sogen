@@ -665,6 +665,13 @@ namespace sogen
         uint64_t vk_physical_device_{}; // 0 until lazily created
         uint64_t vk_device_{};          // 0 until lazily created
 
+        // True when the GPU cannot sample BC1-BC3 (Metal on iOS has no block-compressed formats beyond
+        // ASTC/PVRTC/ETC). DXT textures then live on the GPU as R8G8B8A8, decoded at upload, while the
+        // guest-visible backing keeps the DXT layout.
+        bool bc_decode_fallback_{};
+
+        uint32_t texture_gpu_format(uint32_t vk_format) const;
+
         // Lazily created once per device: a single command pool/queue, plus a command_buffer_/fence_
         // pair reused (submitted and waited on synchronously) by the prep helpers
         // (ensure_depth_stencil_view, generate_mip_sub_levels, and ensure_texture_uploaded's

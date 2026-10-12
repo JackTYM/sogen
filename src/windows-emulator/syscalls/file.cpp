@@ -1264,6 +1264,7 @@ namespace sogen
                 if (auto* e = c.proc.events.get(event))
                 {
                     e->signaled = true;
+                    c.win_emu.notify_thread_readiness_change();
                 }
             }
 

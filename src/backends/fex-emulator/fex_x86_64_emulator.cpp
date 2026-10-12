@@ -76,6 +76,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cerrno>
@@ -4528,6 +4529,9 @@ namespace sogen::fex
             this->arm_plain_step();
         }
 
+        static std::atomic<uint32_t> logged_quantum_entries{0};
+        constexpr uint32_t max_logged_quantum_entries = 16;
+        if (logged_quantum_entries.fetch_add(1, std::memory_order_relaxed) < max_logged_quantum_entries)
         {
             uint64_t tid = 0;
             pthread_threadid_np(nullptr, &tid);
@@ -5142,23 +5146,6 @@ namespace sogen::fex
         }
 #endif
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-        {
-            // FEXCore has blessed its whole JIT region by now. Keeping the debugger attached makes it swallow every
-            // guest fault (e.g. each KUSD read, which can never be mapped inside a 64-bit iOS process's low 4GiB),
-            // so release it and let faults reach sogen's own signal handlers like on the other platforms.
-            static std::once_flag detach_once;
-            std::call_once(detach_once, [] {
-                if (std::getenv("EMULATOR_FEX_KEEP_JIT_DEBUGGER") == nullptr)
-                {
-                    sogen::utils::log_ios_device_milestone("[jit] FEX JIT region is blessed; detaching the JIT debugger");
-                    jit26_detach();
-                    sogen::utils::log_ios_device_milestone("[jit] JIT debugger detached");
-                }
-            });
-        }
-#endif
-
 #ifdef __APPLE__
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
@@ -5205,6 +5192,54 @@ namespace sogen::fex
         {
             this->create_thread32();
         }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        // Every FEX engine blesses its JIT code buffer through the attached debugger when its thread is created, and
+        // every code buffer it outgrows needs another. The debugger cannot stay: it swallows every guest fault (e.g.
+        // each KUSD read, which can never be mapped inside a 64-bit iOS process's low 4GiB). So the regions the rest of
+        // the process will ask for are blessed up front and parked as spares, and the debugger is released.
+        {
+            static std::once_flag detach_once;
+            const size_t vcpu_count = this->emulator_.vcpus_.size();
+            const size_t engines_per_vcpu = this->emulator_.is_wow64_process_ ? 2 : 1;
+            std::call_once(detach_once, [vcpu_count, engines_per_vcpu] {
+                if (std::getenv("EMULATOR_FEX_KEEP_JIT_DEBUGGER") != nullptr)
+                {
+                    return;
+                }
+
+                const auto reserve_spare = [](const size_t mib) {
+                    if (!FEXCore::Allocator::JIT26ReserveSpareRegion(mib << 20))
+                    {
+                        sogen::utils::log_ios_device_milestone("[jit] could not bless a spare JIT region");
+                    }
+                };
+
+                // The other vCPUs have not created their engines yet; each starts with a 16 MiB code buffer.
+                constexpr size_t initial_code_buffer_mib = 16;
+                for (size_t engine = 0; engine < (vcpu_count - 1) * engines_per_vcpu; ++engine)
+                {
+                    reserve_spare(initial_code_buffer_mib);
+                }
+
+                // FEXCore doubles an engine's code buffer each time it fills (16 -> 32 -> 64 MiB ...). A desktop MW2
+                // session was measured to reach the 32 MiB step on one of two engines, so every pair of engines
+                // shares one spare for that step and one for the next.
+                const size_t growth_pairs = std::max<size_t>(1, vcpu_count * engines_per_vcpu / 2);
+                for (size_t pair = 0; pair < growth_pairs; ++pair)
+                {
+                    reserve_spare(32);
+                    reserve_spare(64);
+                }
+
+                sogen::utils::log_ios_device_milestone("[jit] FEX JIT regions are blessed; detaching the JIT debugger");
+                // Flagged first so no code buffer asked for while the debugger is going can trap into it.
+                FEXCore::Allocator::JIT26OnDebuggerDetached();
+                jit26_detach();
+                sogen::utils::log_ios_device_milestone("[jit] JIT debugger detached");
+            });
+        }
+#endif
     }
 
     void fex_vcpu::create_thread32()

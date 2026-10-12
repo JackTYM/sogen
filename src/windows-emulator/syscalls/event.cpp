@@ -33,6 +33,7 @@ namespace sogen
             }
 
             entry->signaled = true;
+            c.win_emu.notify_thread_readiness_change();
             return STATUS_SUCCESS;
         }
 
@@ -65,6 +66,7 @@ namespace sogen
             }
 
             entry->signaled = false;
+            c.win_emu.notify_thread_readiness_change();
             return STATUS_SUCCESS;
         }
 
@@ -209,6 +211,7 @@ namespace sogen
             }
 
             e->signaled = true;
+            c.win_emu.notify_thread_readiness_change();
             return STATUS_SUCCESS;
         }
 

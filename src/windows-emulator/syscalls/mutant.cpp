@@ -25,6 +25,10 @@ namespace sogen
             }
 
             const auto [old_count, succeeded] = mutant->release(c.thread().id);
+            if (succeeded)
+            {
+                c.win_emu.notify_thread_readiness_change();
+            }
 
             if (previous_count)
             {
