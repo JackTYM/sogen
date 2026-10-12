@@ -5350,7 +5350,7 @@ namespace sogen
             return c.proc.resolve_foreground_window();
         }
 
-        hwnd advance_set_focus(const syscall_context& c, window_focus_state state)
+        hwnd advance_set_focus(const syscall_context& c, window_focus_state&& state)
         {
             const auto* new_window = c.proc.windows.get(state.target);
             if (state.phase != window_focus_state::phase_set_focus && new_window && new_window->thread_id == c.vcpu.active_thread->id)

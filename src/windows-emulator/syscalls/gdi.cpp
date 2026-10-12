@@ -1176,13 +1176,13 @@ namespace sogen
                 void draw(gdi_bitmap_surface& surface, const int x, const int y, const char16_t character, const uint32_t color,
                           const RECT* clip) const
                 {
-                    if (instance)
+                    if (instance == nullptr)
                     {
-                        instance->draw_glyph(surface, x, y, character, color, clip);
+                        draw_text_glyph(surface, x, y, static_cast<char32_t>(character), color, clip);
                         return;
                     }
 
-                    draw_text_glyph(surface, x, y, static_cast<char32_t>(character), color, clip);
+                    instance->draw_glyph(surface, x, y, character, color, clip);
                 }
             };
 
@@ -6384,7 +6384,7 @@ namespace sogen
 
         COLORREF handle_NtGdiGetNearestColor(const syscall_context& /*c*/, const hdc /*dc*/, const COLORREF color)
         {
-            return color & 0x00FFFFFFu;
+            return static_cast<COLORREF>(color & 0x00FFFFFFu);
         }
 
         COLORREF handle_NtGdiGetPixel(const syscall_context& c, const hdc dc, const int x, const int y)

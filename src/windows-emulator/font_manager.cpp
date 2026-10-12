@@ -1,5 +1,6 @@
 #include "std_include.hpp"
 #include "font_manager.hpp"
+#include <numeric>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -94,7 +95,7 @@ namespace sogen
         FT_Face face{};
         font_metrics metrics{};
         std::u16string face_name{};
-        std::unordered_map<char32_t, glyph_bitmap> glyphs{};
+        mutable std::unordered_map<char32_t, glyph_bitmap> glyphs{};
 
         ~impl()
         {
@@ -108,7 +109,7 @@ namespace sogen
             }
         }
 
-        const glyph_bitmap& glyph(const char32_t codepoint)
+        const glyph_bitmap& glyph(const char32_t codepoint) const
         {
             const auto cached = glyphs.find(codepoint);
             if (cached != glyphs.end())
@@ -141,7 +142,7 @@ namespace sogen
 
     font_instance::font_instance(const std::filesystem::path& file, const int32_t pixel_size, const font_request& request,
                                  const uint8_t family_flags)
-        : impl_(std::make_unique<impl>())
+        : impl_(new impl(), &destroy)
     {
         if (FT_Init_FreeType(&impl_->library) != 0 || FT_New_Face(impl_->library, file.string().c_str(), 0, &impl_->face) != 0)
         {
@@ -173,7 +174,10 @@ namespace sogen
         impl_->face_name = request.face;
     }
 
-    font_instance::~font_instance() = default;
+    void font_instance::destroy(impl* instance)
+    {
+        delete instance;
+    }
 
     bool font_instance::valid() const
     {
@@ -190,19 +194,15 @@ namespace sogen
         return this->impl_->face_name;
     }
 
-    int32_t font_instance::advance(const char32_t codepoint)
+    int32_t font_instance::advance(const char32_t codepoint) const
     {
         return this->impl_->glyph(codepoint).advance;
     }
 
-    int32_t font_instance::text_width(const std::u16string_view text)
+    int32_t font_instance::text_width(const std::u16string_view text) const
     {
-        int32_t width = 0;
-        for (const auto character : text)
-        {
-            width += this->advance(character);
-        }
-        return width;
+        return std::accumulate(text.begin(), text.end(), int32_t{0},
+                               [this](const int32_t width, const char16_t character) { return width + this->advance(character); });
     }
 
     void font_instance::draw_glyph(gdi_bitmap_surface& surface, const int32_t pen_x, const int32_t top_y, const char32_t codepoint,
@@ -303,9 +303,16 @@ namespace sogen
             return {};
         }
 
-        const auto* family = (family_flags & 0xF0) == k_ff_modern  ? "LiberationMono"
-                             : (family_flags & 0xF0) == k_ff_roman ? "LiberationSerif"
-                                                                   : "LiberationSans";
+        const char* family = "LiberationSans";
+        if ((family_flags & 0xF0) == k_ff_modern)
+        {
+            family = "LiberationMono";
+        }
+        else if ((family_flags & 0xF0) == k_ff_roman)
+        {
+            family = "LiberationSerif";
+        }
+
         constexpr std::array<const char*, 4> styles{"Regular", "Bold", "Italic", "BoldItalic"};
         auto path = this->fallback_directory_ / (std::string(family) + "-" + styles[style] + ".ttf");
         if (!std::filesystem::exists(path))

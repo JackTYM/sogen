@@ -38,7 +38,7 @@ namespace sogen
         constexpr uint8_t vk_multiply = 0x6A;
         constexpr uint8_t vk_divide = 0x6F;
         constexpr uint8_t vk_separator = 0x6C;
-        constexpr char16_t k_numpad_operators[]{u'*', u'+', u'\0', u'-', u'.', u'/'};
+        constexpr std::array<char16_t, 6> k_numpad_operators{u'*', u'+', u'\0', u'-', u'.', u'/'};
 
         std::optional<char16_t> control_character(const char16_t base)
         {
@@ -86,7 +86,7 @@ namespace sogen
             {
                 return std::nullopt;
             }
-            character = k_numpad_operators[virtual_key - vk_multiply];
+            character = k_numpad_operators.at(virtual_key - vk_multiply);
         }
         else if (virtual_key == vk_space)
         {

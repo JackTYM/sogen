@@ -669,7 +669,7 @@ namespace sogen
                 {
                     if (async_states)
                     {
-                        (*async_states)[virtual_key] = 1;
+                        async_states->at(virtual_key) = 1;
                     }
                     if (virtual_key == vk_capital || virtual_key == vk_numlock || virtual_key == vk_scroll)
                     {

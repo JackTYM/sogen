@@ -34,7 +34,7 @@ namespace sogen
     {
       public:
         font_instance(const std::filesystem::path& file, int32_t pixel_size, const font_request& request, uint8_t family_flags);
-        ~font_instance();
+        ~font_instance() = default;
 
         font_instance(const font_instance&) = delete;
         font_instance& operator=(const font_instance&) = delete;
@@ -42,15 +42,16 @@ namespace sogen
         bool valid() const;
         const font_metrics& metrics() const;
         const std::u16string& face_name() const;
-        int32_t advance(char32_t codepoint);
-        int32_t text_width(std::u16string_view text);
+        int32_t advance(char32_t codepoint) const;
+        int32_t text_width(std::u16string_view text) const;
 
         // pen_x is the glyph origin, top_y the top of the character cell.
         void draw_glyph(gdi_bitmap_surface& surface, int32_t pen_x, int32_t top_y, char32_t codepoint, uint32_t color, const RECT* clip);
 
       private:
         struct impl;
-        std::unique_ptr<impl> impl_;
+        static void destroy(impl* instance);
+        std::unique_ptr<impl, void (*)(impl*)> impl_;
     };
 
     class font_manager
