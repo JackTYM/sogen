@@ -387,6 +387,8 @@ namespace sogen
         uint64_t next_user_timer_id{1};
         std::vector<msg> message_queue;
         DWORD current_message_time{};
+        // INPUT_MESSAGE_DEVICE_TYPE of the message last retrieved from the queue (GetCurrentInputMessageSource).
+        uint32_t current_input_device{};
         std::array<uint32_t, 32> message_queue_status_bit_counts{};
         uint32_t message_queue_status_bits{};
         uint32_t queue_status_changed_bits{};
@@ -519,6 +521,7 @@ namespace sogen
             buffer.write(this->next_user_timer_id);
             buffer.write_vector(this->message_queue);
             buffer.write(this->current_message_time);
+            buffer.write(this->current_input_device);
             buffer.write(this->message_queue_status_bit_counts);
             buffer.write(this->message_queue_status_bits);
             buffer.write(this->queue_status_changed_bits);
@@ -589,6 +592,7 @@ namespace sogen
             buffer.read(this->next_user_timer_id);
             buffer.read_vector(this->message_queue);
             buffer.read(this->current_message_time);
+            buffer.read(this->current_input_device);
             buffer.read(this->message_queue_status_bit_counts);
             buffer.read(this->message_queue_status_bits);
             buffer.read(this->queue_status_changed_bits);

@@ -777,6 +777,7 @@ namespace sogen
         uint64_t handle_NtUserAttachThreadInput();
         BOOL handle_NtUserRegisterTouchHitTestingWindow();
         BOOL handle_NtUserGetGUIThreadInfo(const syscall_context& c, uint32_t thread_id, emulator_pointer info);
+        BOOL handle_NtUserGetCurrentInputMessageSource(const syscall_context& c, emulator_pointer source);
         BOOL handle_NtUserSetWinEventHook();
         BOOL handle_NtUserUnhookWinEvent();
         BOOL handle_NtUserDisableThreadIme();
@@ -2102,6 +2103,7 @@ namespace sogen
         add_handler(NtUserRegisterTouchHitTestingWindow);
         add_handler(NtUserActivateKeyboardLayout);
         add_handler(NtUserGetGUIThreadInfo);
+        add_handler(NtUserGetCurrentInputMessageSource);
         add_handler(NtNotifyChangeDirectoryFile);
         add_handler(NtUserChangeWindowMessageFilter);
         add_handler(NtUserSetWinEventHook);

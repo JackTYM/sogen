@@ -7471,6 +7471,29 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserGetCurrentInputMessageSource(const syscall_context& c, const emulator_pointer source)
+        {
+            if (source == 0)
+            {
+                set_guest_last_error(c, 87); // ERROR_INVALID_PARAMETER
+                return FALSE;
+            }
+
+            struct input_message_source
+            {
+                uint32_t device_type{};
+                uint32_t origin_id{};
+            };
+
+            constexpr uint32_t imo_unavailable = 0;
+            constexpr uint32_t imo_hardware = 1;
+
+            const auto device = c.thread().current_input_device;
+            c.emu.write_memory(source,
+                               input_message_source{.device_type = device, .origin_id = device != 0 ? imo_hardware : imo_unavailable});
+            return TRUE;
+        }
+
         BOOL handle_NtUserGetGUIThreadInfo(const syscall_context& c, const uint32_t thread_id, const emulator_pointer info_address)
         {
             if (info_address == 0)

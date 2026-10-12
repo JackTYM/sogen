@@ -1046,6 +1046,22 @@ namespace sogen
 
                 message_queue.erase(it);
                 win_emu.process.update_message_key_state(msg);
+
+                constexpr uint32_t imdt_unavailable = 0;
+                constexpr uint32_t imdt_keyboard = 1;
+                constexpr uint32_t imdt_mouse = 2;
+                if (msg.message >= WM_KEYDOWN && msg.message <= WM_UNICHAR)
+                {
+                    this->current_input_device = imdt_keyboard;
+                }
+                else if (msg.message >= WM_MOUSEMOVE && msg.message <= WM_MOUSEHWHEEL)
+                {
+                    this->current_input_device = imdt_mouse;
+                }
+                else
+                {
+                    this->current_input_device = imdt_unavailable;
+                }
             }
             return msg;
         }
