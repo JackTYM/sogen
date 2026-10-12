@@ -1135,6 +1135,7 @@ namespace sogen
     namespace syscalls
     {
         BOOL erase_window_class_background(const syscall_context& c, const window& win, hdc dc);
+        void present_released_window_dc(const syscall_context& c, hdc dc);
         std::optional<gdi_bitmap_surface> snapshot_gdi_bitmap(const syscall_context& c, uint32_t bitmap);
         uint32_t create_gdi_bitmap_from_surface(const syscall_context& c, const gdi_bitmap_surface& surface);
         BOOL draw_cursor_icon(const syscall_context& c, hdc dc, int x, int y, int cx, int cy, const process_context::cursor_icon_data& icon,
@@ -2284,9 +2285,10 @@ namespace sogen
             return FALSE;
         }
 
-        BOOL handle_NtUserReleaseDC(const syscall_context& c)
+        BOOL handle_NtUserReleaseDC(const syscall_context& c, const hdc dc)
         {
             (void)handle_NtGdiFlush(c);
+            syscalls::present_released_window_dc(c, dc);
             return TRUE;
         }
 

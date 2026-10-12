@@ -515,7 +515,7 @@ namespace sogen
         hdc handle_NtUserGetWindowDC(const syscall_context& c, hwnd window);
         hwnd handle_NtUserWindowFromDC(const syscall_context& c, hdc dc);
         uint64_t handle_NtUserGetControlBrush(const syscall_context& c, hwnd window, hdc dc, uint32_t control_type);
-        BOOL handle_NtUserReleaseDC(const syscall_context& c);
+        BOOL handle_NtUserReleaseDC(const syscall_context& c, hdc dc);
         BOOL handle_NtUserFlashWindowEx(const syscall_context& c, emulator_pointer flash_info);
         BOOL handle_NtUserHideCursorNoCapture();
         hwnd handle_NtUserSetCapture(const syscall_context& c, hwnd window);
