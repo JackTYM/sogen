@@ -855,6 +855,7 @@ namespace sogen
         BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, hdc dc, UINT first_char, UINT char_count, emulator_pointer chars,
                                        UINT flags, emulator_pointer buffer);
         BOOL handle_NtGdiGetCharWidthInfo(const syscall_context& c, hdc dc, emulator_pointer info);
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& c, hdc dc, emulator_pointer bounds, uint32_t flags);
         BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, hdc dc, UINT first_char, UINT char_count, emulator_pointer chars,
                                            UINT flags, emulator_pointer buffer);
         NTSTATUS handle_NtGdiExtCreateRegion();
@@ -3847,6 +3848,7 @@ namespace sogen
         add_handler(NtGdiGetCharWidthW);
         add_handler(NtGdiGetCharABCWidthsW);
         add_handler(NtGdiGetCharWidthInfo);
+        add_handler(NtGdiSetBoundsRect);
         add_handler(NtGdiGetGlyphOutline);
         add_handler(NtGdiCreateRectRgn);
         add_handler(NtGdiGetRandomRgn);

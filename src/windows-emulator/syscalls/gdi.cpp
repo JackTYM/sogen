@@ -3510,6 +3510,16 @@ namespace sogen
             return TRUE;
         }
 
+        // Drawing bounds are never accumulated, so a DC is always in its initial state: bounds empty and
+        // accumulation disabled (DCB_RESET | DCB_DISABLE).
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& /*c*/, const hdc /*dc*/, const emulator_pointer /*bounds*/,
+                                           const uint32_t /*flags*/)
+        {
+            constexpr uint32_t dcb_reset = 0x1;
+            constexpr uint32_t dcb_disable = 0x8;
+            return dcb_reset | dcb_disable;
+        }
+
         BOOL handle_NtGdiGetCharWidthInfo(const syscall_context& c, const hdc dc, const emulator_pointer info)
         {
             if (dc == 0 || info == 0)
