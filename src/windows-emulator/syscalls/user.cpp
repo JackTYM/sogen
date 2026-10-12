@@ -5580,6 +5580,12 @@ namespace sogen
                 }
             }
 
+            const auto attachment = hwnd != 0 && !is_foreign_window_handle(c, hwnd) ? find_foreign_attachment(c.proc, hwnd) : 0;
+            if (attachment != 0)
+            {
+                c.win_emu.broadcast_focus_change(hwnd, attachment);
+            }
+
             if (hwnd == previous)
             {
                 return previous;
@@ -5601,12 +5607,8 @@ namespace sogen
 
             if (hwnd != 0 && !is_foreign_window_handle(c, hwnd))
             {
-                if (const auto attachment = find_foreign_attachment(c.proc, hwnd))
-                {
-                    c.win_emu.broadcast_focus_change(hwnd, attachment);
-                }
-                else if (const auto top_level = find_top_level_ancestor(c.proc, hwnd);
-                         top_level != 0 && top_level != c.proc.foreground_window)
+                if (const auto top_level = find_top_level_ancestor(c.proc, hwnd);
+                    attachment == 0 && top_level != 0 && top_level != c.proc.foreground_window)
                 {
                     c.proc.set_foreground_window(top_level);
                 }
@@ -7610,15 +7612,15 @@ namespace sogen
                 return;
 
             case window_control_op::keyboard_input: {
-                keyboard_input_request input{};
-                if (request.payload.size() != sizeof(input))
+                if (request.payload.empty() || request.payload.size() % sizeof(keyboard_input_request) != 0)
                 {
                     response.status = STATUS_INVALID_PARAMETER;
                     return;
                 }
 
-                std::memcpy(&input, request.payload.data(), sizeof(input));
-                target.deliver_keyboard_input_from_parent(win->handle, input);
+                std::vector<keyboard_input_request> events(request.payload.size() / sizeof(keyboard_input_request));
+                std::memcpy(events.data(), request.payload.data(), request.payload.size());
+                target.deliver_keyboard_input_from_parent(win->handle, events);
                 response.status = STATUS_SUCCESS;
                 return;
             }

@@ -2864,7 +2864,7 @@ namespace sogen
         }
     }
 
-    void windows_emulator::deliver_key_stroke(const hwnd window, const uint16_t virtual_key, const bool shift)
+    void windows_emulator::append_key_stroke(std::vector<keyboard_input_request>& events, const uint16_t virtual_key, const bool shift)
     {
         const auto key_event = [&](const uint32_t message, const uint16_t vk) {
             uint64_t l_param = 1 | (static_cast<uint64_t>(keyboard_layout::scan_code_for_virtual_key(vk)) << 16);
@@ -2873,7 +2873,7 @@ namespace sogen
                 l_param |= (1ull << 30) | (1ull << 31);
             }
 
-            this->deliver_ui_event(ui_event{.window = window, .message = message, .wParam = vk, .lParam = l_param});
+            events.push_back({.message = message, .w_param = vk, .l_param = l_param});
         };
 
         if (shift)
@@ -2888,6 +2888,34 @@ namespace sogen
         {
             key_event(WM_KEYUP, keyboard_layout::vk_shift);
         }
+    }
+
+    void windows_emulator::deliver_keyboard_input(const hwnd window, const std::span<const keyboard_input_request> events)
+    {
+        if (this->process.focus_window != 0 && syscalls::is_foreign_window_handle(this->process, this->process.focus_window))
+        {
+            this->forward_keyboard_input(events);
+            return;
+        }
+
+        for (const auto& input : events)
+        {
+            this->deliver_ui_event(ui_event{.window = window, .message = input.message, .wParam = input.w_param, .lParam = input.l_param});
+        }
+    }
+
+    void windows_emulator::forward_keyboard_input(const std::span<const keyboard_input_request> events)
+    {
+        const auto focus = this->process.focus_window;
+        const auto response = syscalls::forward_window_control(*this, window_control_op::keyboard_input, focus, 0, std::as_bytes(events));
+        if (response && static_cast<NTSTATUS>(response->status) == STATUS_SUCCESS)
+        {
+            return;
+        }
+
+        this->log.warn("Keyboard input for foreign focus window 0x%llx was not delivered (%s)\n", static_cast<unsigned long long>(focus),
+                       response ? "rejected" : "no owner answered");
+        this->process.focus_window = 0;
     }
 
     void windows_emulator::inject_scheduled_input()
@@ -2943,23 +2971,29 @@ namespace sogen
                 break;
             }
 
-            case scheduled_input::kind::key:
+            case scheduled_input::kind::key: {
                 this->log.info("[inject-input] key 0x%x in window 0x%llx (%s), focus 0x%llx\n", input.virtual_key,
                                static_cast<unsigned long long>(window), class_name.c_str(),
                                static_cast<unsigned long long>(this->process.focus_window));
-                this->deliver_key_stroke(window, input.virtual_key, false);
+                std::vector<keyboard_input_request> events{};
+                append_key_stroke(events, input.virtual_key, false);
+                this->deliver_keyboard_input(window, events);
                 break;
+            }
 
             case scheduled_input::kind::text: {
                 size_t typed = 0;
+                std::vector<keyboard_input_request> events{};
                 for (const auto character : input.text)
                 {
                     if (const auto stroke = keyboard_layout::key_stroke_for_character(character))
                     {
-                        this->deliver_key_stroke(window, stroke->vk, stroke->shift);
+                        append_key_stroke(events, stroke->vk, stroke->shift);
                         ++typed;
                     }
                 }
+
+                this->deliver_keyboard_input(window, events);
 
                 this->log.info("[inject-input] typed %zu of %zu characters in window 0x%llx (%s), focus 0x%llx\n", typed, input.text.size(),
                                static_cast<unsigned long long>(window), class_name.c_str(),
@@ -2972,9 +3006,9 @@ namespace sogen
         }
     }
 
-    void windows_emulator::deliver_keyboard_input_from_parent(const hwnd window, const keyboard_input_request& input)
+    void windows_emulator::deliver_keyboard_input_from_parent(const hwnd window, const std::span<const keyboard_input_request> events)
     {
-        this->deliver_ui_event(ui_event{.window = window, .message = input.message, .wParam = input.w_param, .lParam = input.l_param});
+        this->deliver_keyboard_input(window, events);
     }
 
     void windows_emulator::take_focus_from_parent(const hwnd window, const hwnd previous_focus)
@@ -3027,16 +3061,11 @@ namespace sogen
             if (syscalls::is_foreign_window_handle(this->process, focus))
             {
                 const keyboard_input_request input{.message = event.message, .w_param = event.wParam, .l_param = event.lParam};
-                const auto response = syscalls::forward_window_control(*this, window_control_op::keyboard_input, focus, 0,
-                                                                       std::as_bytes(std::span{&input, 1}));
-                if (response && static_cast<NTSTATUS>(response->status) == STATUS_SUCCESS)
-                {
-                    return;
-                }
-
-                this->process.focus_window = 0;
+                this->forward_keyboard_input(std::span{&input, 1});
+                return;
             }
-            else if (this->process.windows.get(focus))
+
+            if (this->process.windows.get(focus))
             {
                 event.window = focus;
             }

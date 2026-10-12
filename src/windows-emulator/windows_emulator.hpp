@@ -443,7 +443,9 @@ namespace sogen
         std::vector<scheduled_input> scheduled_inputs_{};
 
         void parse_scheduled_input(std::string_view specification);
-        void deliver_key_stroke(hwnd window, uint16_t virtual_key, bool shift);
+        static void append_key_stroke(std::vector<keyboard_input_request>& events, uint16_t virtual_key, bool shift);
+        void deliver_keyboard_input(hwnd window, std::span<const keyboard_input_request> events);
+        void forward_keyboard_input(std::span<const keyboard_input_request> events);
 
         void deliver_ui_event(const ui_event& event);
         bool forward_pointer_input_to_foreign_children(hwnd parent, uint32_t message, uint64_t w_param, int32_t x, int32_t y);
@@ -625,7 +627,7 @@ namespace sogen
 
         void handle_ui_event(const ui_event& event);
         bool deliver_pointer_input_from_parent(hwnd window, const pointer_input_request& input);
-        void deliver_keyboard_input_from_parent(hwnd window, const keyboard_input_request& input);
+        void deliver_keyboard_input_from_parent(hwnd window, std::span<const keyboard_input_request> events);
         void take_focus_from_parent(hwnd window, hwnd previous_focus);
         void release_focus_to_parent(hwnd window, hwnd new_focus);
         void inject_scheduled_input();
