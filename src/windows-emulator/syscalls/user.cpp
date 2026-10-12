@@ -2268,8 +2268,9 @@ namespace sogen
             return FALSE;
         }
 
-        BOOL handle_NtUserReleaseDC()
+        BOOL handle_NtUserReleaseDC(const syscall_context& c)
         {
+            (void)handle_NtGdiFlush(c);
             return TRUE;
         }
 

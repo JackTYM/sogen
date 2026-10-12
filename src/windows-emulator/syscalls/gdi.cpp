@@ -1300,11 +1300,11 @@ namespace sogen
                 }
 
                 const auto dc = static_cast<hdc>(batch.HDC);
-                gdi_dc_state* dc_state = nullptr;
-                gdi_bitmap_surface* surface = nullptr;
                 int32_t origin_x = 0;
                 int32_t origin_y = 0;
-                if (!get_dc_state_and_surface(c, dc, dc_state, surface, origin_x, origin_y) || !surface)
+                uint32_t present_handle = 0;
+                auto* surface = resolve_dc_draw_surface(c, dc, origin_x, origin_y, present_handle);
+                if (surface == nullptr)
                 {
                     return true;
                 }
@@ -1389,6 +1389,7 @@ namespace sogen
                     offset += static_cast<size_t>(header->size);
                 }
 
+                present_win_surface(c, present_handle, surface);
                 return true;
             }
 
