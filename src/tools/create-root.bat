@@ -15,11 +15,13 @@ SET EMU_WINDIR=%EMU_FILESYS%\c\windows
 SET EMU_SYSDIR=%EMU_WINDIR%\system32
 SET EMU_SYSDIR_WOW64=%EMU_WINDIR%\syswow64
 SET EMU_CURSORDIR=%EMU_WINDIR%\cursors
+SET EMU_FONTDIR=%EMU_WINDIR%\fonts
 SET EMU_REGDIR=%EMU_ROOT%\registry
 
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
 MKDIR %EMU_CURSORDIR%
+MKDIR %EMU_FONTDIR%
 MKDIR %EMU_REGDIR%
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
@@ -196,6 +198,7 @@ CALL :collect samcli.dll
 CALL :collect samlib.dll
 CALL :collect shellstyle.dll
 CALL :collect structuredquery.dll
+CALL :collect textshaping.dll
 CALL :collect thumbcache.dll
 CALL :collect wkscli.dll
 CALL :collect xmllite.dll
@@ -238,6 +241,48 @@ CALL :collect c_437.nls
 CALL :collect c_850.nls
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
+CALL :collect_file "%WINDIR%\Fonts", segmdl2.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", SegoeIcons.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", segoeui.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", segoeuib.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", segoeuii.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", segoeuiz.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", tahoma.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", tahomabd.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", arial.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", arialbd.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", ariali.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", arialbi.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", micross.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", verdana.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", verdanab.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", verdanai.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", verdanaz.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", cour.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", courbd.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", couri.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", courbi.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", consola.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", consolab.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", consolai.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", consolaz.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", lucon.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", times.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", timesbd.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", timesi.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", timesbi.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", georgia.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", georgiab.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", georgiai.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", georgiaz.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", calibri.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", calibrib.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", calibrii.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", calibriz.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", trebuc.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", trebucbd.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", trebucit.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", trebucbi.ttf, %EMU_FONTDIR%
 
 EXIT /B 0
 
