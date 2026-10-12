@@ -12,6 +12,7 @@
 #include "host_wait_signal.hpp"
 #include "logger.hpp"
 #include "file_system.hpp"
+#include "font_manager.hpp"
 #include "memory_manager.hpp"
 #include "module/module_manager.hpp"
 #include "network/dns_lookup.hpp"
@@ -163,6 +164,7 @@ namespace sogen
         emulator_callbacks callbacks{};
         logger log{};
         file_system file_sys;
+        font_manager fonts{file_sys};
         memory_manager memory;
         registry_manager registry{};
         windows_version_manager version{};

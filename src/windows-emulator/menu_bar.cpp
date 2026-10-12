@@ -3,6 +3,7 @@
 #include "debug_font.hpp"
 #include "windows_emulator.hpp"
 #include "font_renderer.hpp"
+#include "font_manager.hpp"
 
 namespace sogen
 {
@@ -71,9 +72,23 @@ namespace sogen
             return (item.state & k_mfs_disabled) == 0 && !is_separator(item);
         }
 
+        // The menu font of the window being drawn or hit-tested; null when the emulation root and the bundle provide no
+        // fonts, in which case the fixed 8x16 cell is used.
+        font_instance* g_menu_font = nullptr;
+
+        void select_menu_font(windows_emulator& win_emu)
+        {
+            g_menu_font = win_emu.fonts.resolve({.face = u"Segoe UI", .height = -12}).get();
+        }
+
+        int32_t char_height()
+        {
+            return g_menu_font != nullptr ? g_menu_font->metrics().height : k_char_height;
+        }
+
         int32_t text_width(const std::u16string_view text)
         {
-            return static_cast<int32_t>(text.size()) * k_char_width;
+            return g_menu_font != nullptr ? g_menu_font->text_width(text) : static_cast<int32_t>(text.size()) * k_char_width;
         }
 
         struct slot
@@ -184,6 +199,13 @@ namespace sogen
         {
             for (const auto character : text)
             {
+                if (g_menu_font != nullptr)
+                {
+                    g_menu_font->draw_glyph(surface, x, y, character, color, nullptr);
+                    x += g_menu_font->advance(character);
+                    continue;
+                }
+
                 if (!ft_draw_glyph(surface, x, y, character, color, nullptr))
                 {
                     draw_debug_glyph(surface, x, y + (k_char_height - debug_font::glyph_height) / 2, character, color);
@@ -227,7 +249,7 @@ namespace sogen
                     fill_rect(surface, slots[i], k_color_highlight);
                 }
 
-                draw_text(surface, slots[i].left + k_bar_item_padding, (window::menu_bar_height - k_char_height) / 2,
+                draw_text(surface, slots[i].left + k_bar_item_padding, (window::menu_bar_height - char_height()) / 2,
                           split_label(item).text, is_enabled(item) ? k_color_text : k_color_text_disabled);
             }
         }
@@ -258,7 +280,7 @@ namespace sogen
                 }
 
                 const auto color = enabled ? k_color_text : k_color_text_disabled;
-                const auto text_top = row.top + (row.height - k_char_height) / 2;
+                const auto text_top = row.top + (row.height - char_height()) / 2;
                 const auto label = split_label(item);
 
                 if ((item.state & k_mfs_checked) != 0)
@@ -448,6 +470,7 @@ namespace sogen
 
     void present_window_surface(windows_emulator& win_emu, const hwnd window_handle, const gdi_bitmap_surface& surface)
     {
+        select_menu_font(win_emu);
         const auto* top_level = win_emu.process.windows.get(window_handle);
         if (top_level && top_level->has_menu_bar())
         {
@@ -464,6 +487,7 @@ namespace sogen
 
     bool handle_menu_pointer(windows_emulator& win_emu, const window& top_level, const uint32_t message, const int32_t x, const int32_t y)
     {
+        select_menu_font(win_emu);
         if (!top_level.has_menu_bar())
         {
             return false;

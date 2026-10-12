@@ -45,21 +45,20 @@ namespace sogen
                 // TEB while TEB.Win32ClientInfo[14] equals this serial. The cache is never filled here, so keep the serial
                 // different from it to make those queries reach NtUserGetKeyState.
                 srv.keyStateSerial = 1;
-                srv.systemMetrics[0] = 1920;  // SM_CXSCREEN
-                srv.systemMetrics[1] = 1080;  // SM_CYSCREEN
-                srv.systemMetrics[2] = 17;    // SM_CXVSCROLL
-                srv.systemMetrics[3] = 17;    // SM_CYHSCROLL
-                srv.systemMetrics[10] = 17;   // SM_CXHTHUMB
-                srv.systemMetrics[11] = 32;   // SM_CXICON
-                srv.systemMetrics[12] = 32;   // SM_CYICON
-                srv.systemMetrics[19] = 1;    // SM_MOUSEPRESENT
-                srv.systemMetrics[20] = 17;   // SM_CYVSCROLL
-                srv.systemMetrics[21] = 17;   // SM_CXHSCROLL
-                srv.systemMetrics[43] = 3;    // SM_CMOUSEBUTTONS
-                srv.systemMetrics[75] = 1;    // SM_MOUSEWHEELPRESENT
-                srv.systemMetrics[78] = 1920; // SM_CXVIRTUALSCREEN
-                srv.systemMetrics[79] = 1080; // SM_CYVIRTUALSCREEN
-                srv.systemMetrics[91] = 1;    // SM_MOUSEHORIZONTALWHEELPRESENT
+                // Windows 10 values at 96 DPI; indices are the SM_* constants.
+                constexpr std::pair<size_t, int32_t> k_system_metrics[] = {
+                    {0, 1920},  {1, 1080},  {2, 17},  {3, 17},  {4, 23},  {5, 1},   {6, 1},     {7, 3},     {8, 3},     {9, 17},
+                    {10, 17},   {11, 32},   {12, 32}, {13, 32}, {14, 32}, {15, 20}, {16, 1920}, {17, 1057}, {19, 1},    {20, 17},
+                    {21, 17},   {28, 136},  {29, 39}, {30, 22}, {31, 22}, {32, 4},  {33, 4},    {34, 136},  {35, 39},   {36, 4},
+                    {37, 4},    {38, 75},   {39, 75}, {43, 3},  {45, 2},  {46, 2},  {47, 160},  {48, 24},   {49, 16},   {50, 16},
+                    {51, 22},   {52, 22},   {53, 22}, {54, 18}, {55, 18}, {56, 8},  {57, 160},  {58, 28},   {59, 1936}, {60, 1056},
+                    {61, 1936}, {62, 1056}, {63, 1},  {68, 4},  {69, 4},  {71, 13}, {72, 13},   {75, 1},    {78, 1920}, {79, 1080},
+                    {80, 1},    {81, 1},    {83, 1},  {84, 1},  {91, 1},  {92, 4},
+                };
+                for (const auto& [index, value] : k_system_metrics)
+                {
+                    srv.systemMetrics[index] = value;
+                }
             });
 
             const auto handle_table_size = static_cast<size_t>(page_align_up(sizeof(USER_HANDLEENTRY) * MAX_HANDLES));

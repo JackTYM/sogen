@@ -189,9 +189,34 @@ namespace sogen
         }
     };
 
+    struct gdi_font_info
+    {
+        int32_t height{};
+        int32_t weight{400};
+        bool italic{};
+        std::u16string face{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->height);
+            buffer.write(this->weight);
+            buffer.write(this->italic);
+            buffer.write(this->face);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->height);
+            buffer.read(this->weight);
+            buffer.read(this->italic);
+            buffer.read(this->face);
+        }
+    };
+
     struct gdi_dc_state
     {
         uint32_t selected_bitmap{};
+        uint32_t selected_font{};
         hwnd target_window{};
         int32_t current_x{};
         int32_t current_y{};
@@ -200,6 +225,7 @@ namespace sogen
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->selected_bitmap);
+            buffer.write(this->selected_font);
             buffer.write(this->target_window);
             buffer.write(this->current_x);
             buffer.write(this->current_y);
@@ -209,6 +235,7 @@ namespace sogen
         void deserialize(utils::buffer_deserializer& buffer)
         {
             buffer.read(this->selected_bitmap);
+            buffer.read(this->selected_font);
             buffer.read(this->target_window);
             buffer.read(this->current_x);
             buffer.read(this->current_y);
@@ -563,6 +590,7 @@ namespace sogen
         menu_interaction open_menu{};
         uint32_t gdi_default_bitmap_handle{};
         std::map<uint32_t, gdi_dc_state> gdi_dc_states{};
+        std::map<uint32_t, gdi_font_info> gdi_fonts{};
         // Per-DC stack of states pushed by NtGdiSaveDC and popped by NtGdiRestoreDC.
         std::map<uint32_t, std::vector<gdi_dc_state>> gdi_dc_save_states{};
         std::map<uint32_t, gdi_bitmap_surface> gdi_bitmap_surfaces{};

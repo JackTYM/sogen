@@ -78,11 +78,12 @@ namespace sogen
     {
         DWORD dwMonitorCount;
         EMULATOR_CAST(uint64_t, USER_MONITOR*) pPrimaryMonitor;
-        uint8_t pad_10[0x8];
+        EMULATOR_CAST(uint64_t, USER_MONITOR*) pMonitorFirst;
         RECT rcScreen;
         uint8_t unknown[0xFF];
     };
 
+    static_assert(offsetof(USER_DISPINFO, pMonitorFirst) == 0x10);
     static_assert(offsetof(USER_DISPINFO, rcScreen) == 0x18);
 
     struct USER_HANDLEENTRY
@@ -244,7 +245,9 @@ namespace sogen
     struct USER_MONITOR
     {
         EMULATOR_CAST(uint64_t, HMONITOR) hmon;
-        uint8_t unknown1[0x14];
+        uint8_t unknown_08[0x8];
+        EMULATOR_CAST(uint64_t, USER_MONITOR*) pNext;
+        uint32_t flags;
         RECT rcMonitor;
         RECT rcWork;
 

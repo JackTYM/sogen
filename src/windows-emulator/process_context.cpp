@@ -782,6 +782,7 @@ namespace sogen
         this->gdi_default_dc_handle = 0;
         this->gdi_default_bitmap_handle = 0;
         this->gdi_dc_states.clear();
+        this->gdi_fonts.clear();
         this->gdi_dc_save_states.clear();
         this->gdi_bitmap_surfaces.clear();
         this->gdi_window_surfaces.clear();
@@ -818,6 +819,7 @@ namespace sogen
         this->default_monitor_handle = mh;
         monitor_obj.access([&](USER_MONITOR& monitor) {
             monitor.hmon = mh.bits;
+            monitor.flags = 1;
             monitor.rcMonitor = {.left = 0, .top = 0, .right = 1920, .bottom = 1080};
             monitor.rcWork = monitor.rcMonitor;
             if (version.is_build_before(26040))
@@ -897,6 +899,7 @@ namespace sogen
         user_display_info.access([&](USER_DISPINFO& display_info) {
             display_info.dwMonitorCount = 1;
             display_info.pPrimaryMonitor = monitor_obj.value();
+            display_info.pMonitorFirst = monitor_obj.value();
             display_info.rcScreen = {.left = 0, .top = 0, .right = 1920, .bottom = 1080};
         });
     }
@@ -949,6 +952,7 @@ namespace sogen
         buffer.write(this->gdi_default_dc_handle);
         buffer.write(this->gdi_default_bitmap_handle);
         buffer.write_map(this->gdi_dc_states);
+        buffer.write_map(this->gdi_fonts);
         buffer.write_map(this->gdi_dc_save_states);
         buffer.write_map(this->gdi_bitmap_surfaces);
         buffer.write_map(this->gdi_window_surfaces);
@@ -1050,6 +1054,7 @@ namespace sogen
         buffer.read(this->gdi_default_dc_handle);
         buffer.read(this->gdi_default_bitmap_handle);
         buffer.read_map(this->gdi_dc_states);
+        buffer.read_map(this->gdi_fonts);
         buffer.read_map(this->gdi_dc_save_states);
         buffer.read_map(this->gdi_bitmap_surfaces);
         buffer.read_map(this->gdi_window_surfaces);

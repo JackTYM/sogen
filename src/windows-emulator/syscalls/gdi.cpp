@@ -2,6 +2,7 @@
 #include "../debug_font.hpp"
 #include "../menu_bar.hpp"
 #include "../font_renderer.hpp"
+#include "../font_manager.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "../devices/vulkan_host.hpp"
@@ -1136,15 +1137,81 @@ namespace sogen
                 }
             }
 
+            // The font a DC draws and measures text with. Without font files in the emulation root it falls back to the
+            // fixed 8x16 cell the emulator used before real fonts were supported.
+            struct text_font
+            {
+                std::shared_ptr<font_instance> instance{};
+
+                int32_t height() const
+                {
+                    return instance ? instance->metrics().height : static_cast<int32_t>(k_default_font_height);
+                }
+
+                int32_t ascent() const
+                {
+                    return instance ? instance->metrics().ascent : static_cast<int32_t>(k_default_font_ascent);
+                }
+
+                int32_t descent() const
+                {
+                    return instance ? instance->metrics().descent : static_cast<int32_t>(k_default_font_descent);
+                }
+
+                int32_t average_width() const
+                {
+                    return instance ? instance->metrics().average_width : static_cast<int32_t>(k_default_font_width);
+                }
+
+                int32_t advance(const char16_t character) const
+                {
+                    return instance ? instance->advance(character) : k_text_cell_width;
+                }
+
+                int32_t width(const std::u16string_view text) const
+                {
+                    return instance ? instance->text_width(text) : static_cast<int32_t>(text.size()) * k_text_cell_width;
+                }
+
+                void draw(gdi_bitmap_surface& surface, const int x, const int y, const char16_t character, const uint32_t color,
+                          const RECT* clip) const
+                {
+                    if (instance)
+                    {
+                        instance->draw_glyph(surface, x, y, character, color, clip);
+                        return;
+                    }
+
+                    draw_text_glyph(surface, x, y, static_cast<char32_t>(character), color, clip);
+                }
+            };
+
             void draw_text(gdi_bitmap_surface& surface, const int x, const int y, const std::u16string_view text, const uint32_t color,
-                           const RECT* clip = nullptr, const uint32_t* dx = nullptr)
+                           const RECT* clip = nullptr, const uint32_t* dx = nullptr, const text_font& font = {})
             {
                 int pen_x = x;
                 for (size_t i = 0; i < text.size(); ++i)
                 {
-                    draw_text_glyph(surface, pen_x, y, static_cast<char32_t>(text[i]), color, clip);
-                    pen_x += dx != nullptr ? static_cast<int32_t>(dx[i]) : k_text_cell_width;
+                    font.draw(surface, pen_x, y, text[i], color, clip);
+                    pen_x += dx != nullptr ? static_cast<int32_t>(dx[i]) : font.advance(text[i]);
                 }
+            }
+
+            text_font get_dc_text_font(const syscall_context& c, const hdc dc)
+            {
+                font_request request{.face = u"Segoe UI", .height = -12};
+                if (const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc)); dc_it != c.proc.gdi_dc_states.end())
+                {
+                    if (const auto font_it = c.proc.gdi_fonts.find(dc_it->second.selected_font); font_it != c.proc.gdi_fonts.end())
+                    {
+                        request = {.face = font_it->second.face,
+                                   .height = font_it->second.height,
+                                   .weight = font_it->second.weight,
+                                   .italic = font_it->second.italic};
+                    }
+                }
+
+                return {c.win_emu.fonts.resolve(request)};
             }
 
             void fill_rect(gdi_bitmap_surface& surface, const int left, const int top, const int right, const int bottom,
@@ -1165,8 +1232,10 @@ namespace sogen
                 int y{};
             };
 
-            text_origin_offset text_alignment_origin(const FLONG text_align, const UINT count, const uint32_t* dx)
+            text_origin_offset text_alignment_origin(const FLONG text_align, const std::u16string_view text, const uint32_t* dx,
+                                                     const text_font& font)
             {
+                const auto count = static_cast<UINT>(text.size());
                 constexpr FLONG ta_right = 0x02;
                 constexpr FLONG ta_center = 0x06;
                 constexpr FLONG ta_bottom = 0x08;
@@ -1175,14 +1244,14 @@ namespace sogen
                 text_origin_offset offset{};
                 if ((text_align & ta_baseline) == ta_baseline)
                 {
-                    offset.y = static_cast<int>(k_default_font_ascent);
+                    offset.y = font.ascent();
                 }
                 else if ((text_align & ta_baseline) == ta_bottom)
                 {
-                    offset.y = static_cast<int>(k_default_font_height);
+                    offset.y = font.height();
                 }
 
-                int width = static_cast<int>(count * k_default_font_width);
+                int width = font.width(text);
                 if (dx != nullptr)
                 {
                     width = 0;
@@ -1262,11 +1331,13 @@ namespace sogen
                             const auto* text =
                                 reinterpret_cast<const char16_t*>(text_out->string.data() + text_out->dx_size / sizeof(char16_t));
                             const auto* advances = text_out->dx_size >= text_out->count * sizeof(uint32_t) ? dx : nullptr;
-                            const auto alignment_origin = text_alignment_origin(text_out->text_align, text_out->count, advances);
+                            const std::u16string_view text_view(text, text_out->count);
+                            const auto font = get_dc_text_font(c, dc);
+                            const auto alignment_origin = text_alignment_origin(text_out->text_align, text_view, advances, font);
                             draw_text(*surface, text_out->x + text_out->viewport_org.x + origin_x - alignment_origin.x,
-                                      text_out->y + text_out->viewport_org.y + origin_y - alignment_origin.y,
-                                      std::u16string_view(text, text_out->count), colorref_to_bgra(text_out->foreground),
-                                      has_rect && (text_out->options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr, advances);
+                                      text_out->y + text_out->viewport_org.y + origin_y - alignment_origin.y, text_view,
+                                      colorref_to_bgra(text_out->foreground),
+                                      has_rect && (text_out->options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr, advances, font);
                         }
                     }
                     else if (header->cmd == k_gdi_batch_cmd_poly_pat_blt &&
@@ -2882,9 +2953,21 @@ namespace sogen
             return old;
         }
 
-        uint64_t handle_NtGdiSelectFont(const syscall_context&, const hdc dc, const uint64_t font)
+        uint64_t handle_NtGdiSelectFont(const syscall_context& c, const hdc dc, const uint64_t font)
         {
-            return dc != 0 ? font : 0;
+            const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (dc_it == c.proc.gdi_dc_states.end())
+            {
+                return dc != 0 ? font : 0;
+            }
+
+            // Text drawn so far is still queued in the client batch and must use the font that was current when it
+            // was recorded.
+            (void)handle_NtGdiFlush(c);
+
+            const auto previous = dc_it->second.selected_font;
+            dc_it->second.selected_font = static_cast<uint32_t>(font);
+            return previous;
         }
 
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, const handle bitmap)
@@ -2932,9 +3015,37 @@ namespace sogen
             return TRUE;
         }
 
-        uint64_t handle_NtGdiHfontCreate(const syscall_context& c, const emulator_pointer /*logfont*/, const uint32_t /*angle*/)
+        uint64_t handle_NtGdiHfontCreate(const syscall_context& c, const emulator_pointer logfont, const uint32_t /*angle*/)
         {
-            return allocate_gdi_object(c, k_gdi_font_type, k_gdi_font_attr_size);
+            const auto handle = allocate_gdi_object(c, k_gdi_font_type, k_gdi_font_attr_size);
+            if (handle == 0 || logfont == 0)
+            {
+                return handle;
+            }
+
+            constexpr uint32_t height_offset = 0x00;
+            constexpr uint32_t weight_offset = 0x10;
+            constexpr uint32_t italic_offset = 0x14;
+            constexpr uint32_t face_name_offset = 0x1C;
+            constexpr size_t face_name_length = 32;
+
+            gdi_font_info info{};
+            std::array<char16_t, face_name_length> face{};
+            uint8_t italic = 0;
+            c.win_emu.memory.try_read_memory(logfont + height_offset, &info.height, sizeof(info.height));
+            c.win_emu.memory.try_read_memory(logfont + weight_offset, &info.weight, sizeof(info.weight));
+            c.win_emu.memory.try_read_memory(logfont + italic_offset, &italic, sizeof(italic));
+            c.win_emu.memory.try_read_memory(logfont + face_name_offset, face.data(), face.size() * sizeof(char16_t));
+            face.back() = u'\0';
+            info.italic = italic != 0;
+            info.face = face.data();
+            if (info.weight == 0)
+            {
+                info.weight = FW_NORMAL;
+            }
+
+            c.proc.gdi_fonts[handle] = std::move(info);
+            return handle;
         }
 
         uint32_t handle_NtGdiExtGetObjectW(const syscall_context& c, const uint32_t handle_value, const uint32_t size,
@@ -3022,6 +3133,21 @@ namespace sogen
                             std::memcpy(object_data.data() + info_offset + sizeof(header), masks.data(), sizeof(masks));
                         }
                     }
+                }
+            }
+
+            if (entry.Type == k_gdi_font_type)
+            {
+                if (const auto font_it = c.proc.gdi_fonts.find(handle_value); font_it != c.proc.gdi_fonts.end())
+                {
+                    const auto& info = font_it->second;
+                    const utils::safe_buffer_accessor<uint8_t> logfont{object_data};
+                    logfont.as<int32_t>(0x00).set(info.height);
+                    logfont.as<int32_t>(0x10).set(info.weight);
+                    logfont.as<uint8_t>(0x14).set(info.italic ? 1 : 0);
+                    logfont.as<uint8_t>(0x17).set(1);
+                    const auto face_chars = std::min<size_t>(info.face.size(), 31);
+                    std::memcpy(object_data.data() + 0x1C, info.face.data(), face_chars * sizeof(char16_t));
                 }
             }
 
@@ -3196,16 +3322,25 @@ namespace sogen
                 }
             };
 
-            write_u32(0x00, k_default_font_height);
-            write_u32(0x04, k_default_font_ascent);
-            write_u32(0x08, k_default_font_descent);
-            write_u32(0x14, k_default_font_width);
-            write_u32(0x18, k_default_font_width);
-            write_u32(0x1C, k_default_font_weight);
+            const auto font = get_dc_text_font(c, dc);
+            const font_metrics* metrics = font.instance ? &font.instance->metrics() : nullptr;
+
+            write_u32(0x00, font.height());
+            write_u32(0x04, font.ascent());
+            write_u32(0x08, font.descent());
+            write_u32(0x0C, metrics != nullptr ? metrics->internal_leading : 0);
+            write_u32(0x10, metrics != nullptr ? metrics->external_leading : 0);
+            write_u32(0x14, font.average_width());
+            write_u32(0x18, metrics != nullptr ? metrics->max_width : k_default_font_width);
+            write_u32(0x1C, metrics != nullptr ? metrics->weight : k_default_font_weight);
+            write_u32(0x24, 96);
+            write_u32(0x28, 96);
             write_u16(0x2C, 0x20);
-            write_u16(0x2E, 0x7E);
+            write_u16(0x2E, metrics != nullptr ? 0xFF : 0x7E);
             write_u16(0x30, 0x3F);
             write_u16(0x32, 0x20);
+            write_u8(0x34, metrics != nullptr && metrics->italic ? 1 : 0);
+            write_u8(0x37, metrics != nullptr ? metrics->pitch_and_family : 0);
             write_u8(0x38, 0x01);
 
             return 1;
@@ -3219,7 +3354,16 @@ namespace sogen
                 return 0;
             }
 
-            static constexpr std::u16string_view k_default_font_name = u"Segoe UI";
+            std::u16string font_name = u"Segoe UI";
+            if (const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc)); dc_it != c.proc.gdi_dc_states.end())
+            {
+                if (const auto font_it = c.proc.gdi_fonts.find(dc_it->second.selected_font);
+                    font_it != c.proc.gdi_fonts.end() && !font_it->second.face.empty())
+                {
+                    font_name = font_it->second.face;
+                }
+            }
+            const std::u16string_view k_default_font_name = font_name;
             const auto required = static_cast<int32_t>(k_default_font_name.size() + 1);
 
             if (face_name == 0)
@@ -3243,7 +3387,17 @@ namespace sogen
             return required;
         }
 
-        BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const int32_t char_count,
+        std::u16string read_gdi_text(const syscall_context& c, const emulator_pointer text, const size_t count)
+        {
+            std::u16string result(count, u'\0');
+            if (text != 0 && count != 0)
+            {
+                c.win_emu.memory.try_read_memory(text, result.data(), count * sizeof(char16_t));
+            }
+            return result;
+        }
+
+        BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer text, const int32_t char_count,
                                        const emulator_pointer size, const ULONG /*flags*/)
         {
             if (dc == 0 || size == 0 || char_count < 0)
@@ -3251,15 +3405,16 @@ namespace sogen
                 return FALSE;
             }
 
+            const auto font = get_dc_text_font(c, dc);
             const SIZE text_size{
-                .cx = static_cast<LONG>(k_default_font_width * char_count),
-                .cy = static_cast<LONG>(k_default_font_height),
+                .cx = font.width(read_gdi_text(c, text, static_cast<size_t>(char_count))),
+                .cy = font.height(),
             };
             c.emu.write_memory(size, &text_size, sizeof(text_size));
             return TRUE;
         }
 
-        BOOL handle_NtGdiGetTextExtentExW(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const ULONG char_count,
+        BOOL handle_NtGdiGetTextExtentExW(const syscall_context& c, const hdc dc, const emulator_pointer text, const ULONG char_count,
                                           const ULONG max_extent, const emulator_pointer fit_count, const emulator_pointer partial_extents,
                                           const emulator_pointer size, const ULONG /*flags*/)
         {
@@ -3268,58 +3423,86 @@ namespace sogen
                 return FALSE;
             }
 
-            uint32_t fitting_chars = char_count;
+            const auto font = get_dc_text_font(c, dc);
+            const auto characters = read_gdi_text(c, text, char_count);
+
+            std::vector<int32_t> extents(char_count);
+            int32_t total = 0;
+            uint32_t fitting_chars = 0;
+            for (uint32_t i = 0; i < char_count; ++i)
+            {
+                total += font.advance(characters[i]);
+                extents[i] = total;
+                if (static_cast<uint32_t>(total) <= max_extent)
+                {
+                    fitting_chars = i + 1;
+                }
+            }
+
             if (fit_count != 0)
             {
-                fitting_chars = std::min<uint32_t>(char_count, max_extent / k_default_font_width);
                 c.emu.write_memory(fit_count, &fitting_chars, sizeof(fitting_chars));
             }
 
             if (partial_extents != 0)
             {
-                std::vector<int32_t> extents(fitting_chars);
-                for (uint32_t i = 0; i < fitting_chars; ++i)
-                {
-                    extents[i] = static_cast<int32_t>((i + 1) * k_default_font_width);
-                }
-                c.emu.write_memory(partial_extents, extents.data(), extents.size() * sizeof(int32_t));
+                c.emu.write_memory(partial_extents, extents.data(), std::min<size_t>(fitting_chars, extents.size()) * sizeof(int32_t));
             }
 
-            const SIZE text_size{
-                .cx = static_cast<LONG>(k_default_font_width * char_count),
-                .cy = static_cast<LONG>(k_default_font_height),
-            };
+            const SIZE text_size{.cx = total, .cy = font.height()};
             c.emu.write_memory(size, &text_size, sizeof(text_size));
             return TRUE;
         }
 
-        BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
-                                       const emulator_pointer /*chars*/, const UINT /*flags*/, const emulator_pointer buffer)
+        // NtGdiGetCharWidth/ABCWidths take either an explicit code unit array or a first character and a count.
+        std::u16string char_width_codes(const syscall_context& c, const UINT first_char, const UINT char_count,
+                                        const emulator_pointer chars)
+        {
+            if (chars != 0)
+            {
+                return read_gdi_text(c, chars, char_count);
+            }
+
+            std::u16string codes(char_count, u'\0');
+            for (UINT i = 0; i < char_count; ++i)
+            {
+                codes[i] = static_cast<char16_t>(first_char + i);
+            }
+            return codes;
+        }
+
+        BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, const hdc dc, const UINT first_char, const UINT char_count,
+                                       const emulator_pointer chars, const UINT /*flags*/, const emulator_pointer buffer)
         {
             if (dc == 0 || buffer == 0)
             {
                 return FALSE;
             }
 
-            const std::vector<int32_t> widths(char_count, static_cast<int32_t>(k_default_font_width));
+            const auto font = get_dc_text_font(c, dc);
+            std::vector<int32_t> widths{};
+            for (const auto code : char_width_codes(c, first_char, char_count, chars))
+            {
+                widths.push_back(font.advance(code));
+            }
             c.emu.write_memory(buffer, widths.data(), widths.size() * sizeof(int32_t));
             return TRUE;
         }
 
-        BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
-                                           const emulator_pointer /*chars*/, const UINT /*flags*/, const emulator_pointer buffer)
+        BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, const hdc dc, const UINT first_char, const UINT char_count,
+                                           const emulator_pointer chars, const UINT /*flags*/, const emulator_pointer buffer)
         {
             if (dc == 0 || buffer == 0)
             {
                 return FALSE;
             }
 
-            const ABC metrics{
-                .abcA = 0,
-                .abcB = k_default_font_width,
-                .abcC = 0,
-            };
-            const std::vector<ABC> widths(char_count, metrics);
+            const auto font = get_dc_text_font(c, dc);
+            std::vector<ABC> widths{};
+            for (const auto code : char_width_codes(c, first_char, char_count, chars))
+            {
+                widths.push_back({.abcA = 0, .abcB = static_cast<UINT>(font.advance(code)), .abcC = 0});
+            }
             c.emu.write_memory(buffer, widths.data(), widths.size() * sizeof(ABC));
             return TRUE;
         }
@@ -4535,10 +4718,11 @@ namespace sogen
             }
 
             const auto color = get_dc_text_color(c, dc);
+            const auto font = get_dc_text_font(c, dc);
             draw_text(*surface, x + origin_x, y + origin_y, glyphs, color, has_rect && (options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr,
-                      advances.empty() ? nullptr : advances.data());
+                      advances.empty() ? nullptr : advances.data(), font);
 
-            dc_state->current_x = x + static_cast<int32_t>(count * k_text_cell_width);
+            dc_state->current_x = x + font.width(glyphs);
             dc_state->current_y = y;
             return TRUE;
         }
