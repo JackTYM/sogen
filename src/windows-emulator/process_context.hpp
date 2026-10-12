@@ -648,8 +648,10 @@ namespace sogen
         // fabricated (0, 0). Games that drive their menu pointer from mouse deltas obtained by polling
         // GetCursorPos measure against the position read on their very first frame, so a cursor left at the
         // origin that no host mouse ever moves yields a permanently zero delta and their pointer handling
-        // never runs even once. Start centered on the same fixed virtual display the display-mode and
-        // metric syscalls report.
+        // never runs even once. Start centered on the virtual display the display-mode and metric syscalls
+        // report.
+        int32_t screen_width{1920};
+        int32_t screen_height{1080};
         int32_t cursor_x{1920 / 2};
         int32_t cursor_y{1080 / 2};
         hcursor current_cursor{};
@@ -784,8 +786,8 @@ namespace sogen
         handle default_monitor_handle{};
         handle default_desktop_window_handle{};
         // The mode last accepted via NtUserChangeDisplaySettings, reported back by
-        // NtUserEnumDisplaySettings(ENUM_CURRENT_SETTINGS). Defaults to the emulator's fixed virtual
-        // display size (1920x1080) so a caller that queries the current mode before ever changing it
+        // NtUserEnumDisplaySettings(ENUM_CURRENT_SETTINGS). Defaults to the emulator's virtual
+        // display size so a caller that queries the current mode before ever changing it
         // sees the same value NtUserGetDisplayConfigBufferSizes/GetSystemMetrics report.
         uint32_t current_display_width{1920};
         uint32_t current_display_height{1080};

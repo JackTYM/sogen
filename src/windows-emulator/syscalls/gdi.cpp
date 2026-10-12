@@ -1664,20 +1664,20 @@ namespace sogen
                 return handle_value;
             }
 
-            uint32_t get_device_caps_value(const uint32_t index)
+            uint32_t get_device_caps_value(const syscall_context& c, const uint32_t index)
             {
                 switch (index)
                 {
                 case 4: // HORZSIZE
-                    return (k_default_width * 254) / (k_default_dpi * 10);
+                    return (static_cast<uint32_t>(c.proc.screen_width) * 254) / (k_default_dpi * 10);
                 case 6: // VERTSIZE
-                    return (k_default_height * 254) / (k_default_dpi * 10);
+                    return (static_cast<uint32_t>(c.proc.screen_height) * 254) / (k_default_dpi * 10);
                 case 8:    // HORZRES
                 case 0x76: // DESKTOPHORZRES
-                    return k_default_width;
+                    return static_cast<uint32_t>(c.proc.screen_width);
                 case 0xA:  // VERTRES
                 case 0x75: // DESKTOPVERTRES
-                    return k_default_height;
+                    return static_cast<uint32_t>(c.proc.screen_height);
                 case 14:
                 case 0x28: // PLANES
                 case 0x2A: // NUMBRUSHES
@@ -1703,15 +1703,15 @@ namespace sogen
                     }
                 };
 
-                set_cap(4, get_device_caps_value(4));
-                set_cap(6, get_device_caps_value(6));
-                set_cap(8, get_device_caps_value(8));
-                set_cap(0xA, get_device_caps_value(0xA));
-                set_cap(0x28, get_device_caps_value(0x28));
-                set_cap(0x2A, get_device_caps_value(0x2A));
-                set_cap(0x2C, get_device_caps_value(0x2C));
-                set_cap(0x58, get_device_caps_value(0x58));
-                set_cap(0x5A, get_device_caps_value(0x5A));
+                set_cap(4, get_device_caps_value(c, 4));
+                set_cap(6, get_device_caps_value(c, 6));
+                set_cap(8, get_device_caps_value(c, 8));
+                set_cap(0xA, get_device_caps_value(c, 0xA));
+                set_cap(0x28, get_device_caps_value(c, 0x28));
+                set_cap(0x2A, get_device_caps_value(c, 0x2A));
+                set_cap(0x2C, get_device_caps_value(c, 0x2C));
+                set_cap(0x58, get_device_caps_value(c, 0x58));
+                set_cap(0x5A, get_device_caps_value(c, 0x5A));
 
                 if (caps_ptr != 0)
                 {
@@ -2104,9 +2104,9 @@ namespace sogen
             return handle_NtGdiInit(c);
         }
 
-        uint32_t handle_NtGdiGetDeviceCaps(const syscall_context&, const hdc /*dc*/, const uint32_t index)
+        uint32_t handle_NtGdiGetDeviceCaps(const syscall_context& c, const hdc /*dc*/, const uint32_t index)
         {
-            return get_device_caps_value(index);
+            return get_device_caps_value(c, index);
         }
 
         uint32_t handle_NtGdiGetDeviceCapsAll(const syscall_context& c, const hdc /*dc*/, const emulator_pointer caps)
@@ -5258,9 +5258,9 @@ namespace sogen
 
             case KMTQAITYPE::KMTQAITYPE_CURRENTDISPLAYMODE: {
                 const emulator_object<EMU_D3DKMT_CURRENTDISPLAYMODE> current_mode{c.emu, query.pPrivateDriverData};
-                current_mode.access([](EMU_D3DKMT_CURRENTDISPLAYMODE& m) {
-                    m.DisplayModeInfo.Width = k_default_width;
-                    m.DisplayModeInfo.Height = k_default_height;
+                current_mode.access([&](EMU_D3DKMT_CURRENTDISPLAYMODE& m) {
+                    m.DisplayModeInfo.Width = c.proc.screen_width;
+                    m.DisplayModeInfo.Height = c.proc.screen_height;
                     m.DisplayModeInfo.Format = 22;
                     m.DisplayModeInfo.IntegerRefreshRate = 60;
                     m.DisplayModeInfo.RefreshRate = {.Numerator = 60, .Denominator = 1};
@@ -6084,9 +6084,9 @@ namespace sogen
                 }
 
                 const emulator_object<EMU_D3DKMT_DISPLAYMODE> mode{c.emu, params.pModeList};
-                mode.access([](EMU_D3DKMT_DISPLAYMODE& current_mode) {
-                    current_mode.Width = k_default_width;
-                    current_mode.Height = k_default_height;
+                mode.access([&](EMU_D3DKMT_DISPLAYMODE& current_mode) {
+                    current_mode.Width = c.proc.screen_width;
+                    current_mode.Height = c.proc.screen_height;
                     current_mode.Format = 22;
                     current_mode.IntegerRefreshRate = 60;
                     current_mode.RefreshRate = {.Numerator = 60, .Denominator = 1};

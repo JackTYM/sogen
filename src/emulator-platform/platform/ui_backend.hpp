@@ -19,6 +19,12 @@ namespace sogen
         int32_t bottom{};
     };
 
+    struct ui_size
+    {
+        int32_t width{};
+        int32_t height{};
+    };
+
     struct ui_window_desc
     {
         hwnd handle{};
@@ -78,6 +84,11 @@ namespace sogen
         virtual bool draws_window_frames() const
         {
             return false;
+        }
+
+        virtual ui_size screen_size() const
+        {
+            return {.width = 1920, .height = 1080};
         }
 
         virtual void create_window(const ui_window_desc& /*desc*/)

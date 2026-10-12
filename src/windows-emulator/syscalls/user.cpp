@@ -2836,7 +2836,7 @@ namespace sogen
             }
 
             // TODO: This should return the clip cursor. For simplicity, we return a best effort derived from the screen size.
-            RECT rect{0, 0, 1920, 1080};
+            RECT rect{0, 0, c.proc.screen_width, c.proc.screen_height};
             const auto display_info = c.proc.user_handles.get_display_info().read();
             if (const emulator_object<USER_MONITOR> monitor_obj(c.emu, display_info.pPrimaryMonitor); monitor_obj)
             {
@@ -5153,7 +5153,7 @@ namespace sogen
                 return FALSE;
             }
 
-            constexpr RECT rc = {0, 0, 1920, 1080};
+            const RECT rc = {0, 0, c.proc.screen_width, c.proc.screen_height};
             constexpr uint32_t flags = 1;
 
             c.emu.write_memory(pmi + 4, &rc, sizeof(rc));
@@ -6238,14 +6238,15 @@ namespace sogen
                 internal_path.targetSignalInfo.pixelRate = 148500000;
                 internal_path.targetSignalInfo.hSyncFreq = {.Numerator = 67500, .Denominator = 1};
                 internal_path.targetSignalInfo.vSyncFreq = {.Numerator = 60, .Denominator = 1};
-                internal_path.targetSignalInfo.activeSize = {.cx = 1920, .cy = 1080};
+                internal_path.targetSignalInfo.activeSize = {.cx = static_cast<UINT32>(c.proc.screen_width),
+                                                             .cy = static_cast<UINT32>(c.proc.screen_height)};
                 internal_path.targetSignalInfo.totalSize = {.cx = 2200, .cy = 1125};
                 internal_path.targetSignalInfo.scanLineOrdering = 1; // PROGRESSIVE
                 internal_path.targetSignalInfo.u.videoStandard = 0;
                 internal_path.outputTechnology = 5; // HDMI
                 internal_path.padding2[17] = 1;
-                internal_path.sourceWidth = 1920;
-                internal_path.sourceHeight = 1080;
+                internal_path.sourceWidth = static_cast<UINT32>(c.proc.screen_width);
+                internal_path.sourceHeight = static_cast<UINT32>(c.proc.screen_height);
 
                 c.emu.write_memory(path_array, &internal_path, sizeof(internal_path));
             }
@@ -6378,7 +6379,7 @@ namespace sogen
 
                 const emulator_object<EMU_GET_DISPLAY_INFO_EX> display_info{c.emu, packet};
 
-                display_info.access([](EMU_GET_DISPLAY_INFO_EX& info) {
+                display_info.access([&](EMU_GET_DISPLAY_INFO_EX& info) {
                     const bool known_adapter =
                         info.adapterId.LowPart == 0x1000 && info.adapterId.HighPart == 0; // Must match k_dxgk_adapter_luid!
                     const bool known_source = info.sourceId == 0;
@@ -6401,8 +6402,8 @@ namespace sogen
 
                     info.DisplayLeft = 0;
                     info.DisplayTop = 0;
-                    info.DisplayWidth = 1920;
-                    info.DisplayHeight = 1080;
+                    info.DisplayWidth = c.proc.screen_width;
+                    info.DisplayHeight = c.proc.screen_height;
 
                     utils::string::copy(info.DeviceName, u"\\\\.\\DISPLAY1");
 

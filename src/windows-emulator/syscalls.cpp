@@ -1173,7 +1173,7 @@ namespace sogen
 
             if (action == spi_getworkarea)
             {
-                const std::array<int32_t, 4> work_area{0, 0, 1920, 1057};
+                const std::array<int32_t, 4> work_area{0, 0, c.proc.screen_width, c.proc.screen_height - 23};
                 return c.win_emu.memory.try_write_memory(buffer, work_area.data(), sizeof(work_area));
             }
 

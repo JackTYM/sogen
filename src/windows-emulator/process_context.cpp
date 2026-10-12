@@ -486,6 +486,14 @@ namespace sogen
 
         setup_gdt(emu, win_emu.memory);
 
+        const auto screen = win_emu.ui().screen_size();
+        this->screen_width = screen.width;
+        this->screen_height = screen.height;
+        this->cursor_x = screen.width / 2;
+        this->cursor_y = screen.height / 2;
+        this->current_display_width = static_cast<uint32_t>(screen.width);
+        this->current_display_height = static_cast<uint32_t>(screen.height);
+
         this->kusd.setup(version, fake_env, this->is_wow64_process);
 
         this->base_allocator = create_allocator(win_emu.memory, PEB_SEGMENT_SIZE, this->is_wow64_process);
@@ -813,14 +821,14 @@ namespace sogen
 
         this->default_register_set = emu.save_registers();
 
-        this->user_handles.setup(is_wow64_process);
+        this->user_handles.setup(is_wow64_process, this->screen_width, this->screen_height);
 
         auto [mh, monitor_obj] = this->user_handles.allocate_object<USER_MONITOR>(handle_types::monitor);
         this->default_monitor_handle = mh;
         monitor_obj.access([&](USER_MONITOR& monitor) {
             monitor.hmon = mh.bits;
             monitor.flags = 1;
-            monitor.rcMonitor = {.left = 0, .top = 0, .right = 1920, .bottom = 1080};
+            monitor.rcMonitor = {.left = 0, .top = 0, .right = this->screen_width, .bottom = this->screen_height};
             monitor.rcWork = monitor.rcMonitor;
             if (version.is_build_before(26040))
             {
@@ -841,8 +849,8 @@ namespace sogen
         desktop_win.handle = wh.bits;
         desktop_win.class_name = u"#32769";
         desktop_win.style = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-        desktop_win.width = 1920;
-        desktop_win.height = 1080;
+        desktop_win.width = this->screen_width;
+        desktop_win.height = this->screen_height;
         const auto desktop_class = allocate_user_class(win_emu.memory, desktop_win.class_name);
         desktop_win.guest.access([&](USER_WINDOW& window) {
             window.hWnd = wh.bits;
@@ -900,7 +908,7 @@ namespace sogen
             display_info.dwMonitorCount = 1;
             display_info.pPrimaryMonitor = monitor_obj.value();
             display_info.pMonitorFirst = monitor_obj.value();
-            display_info.rcScreen = {.left = 0, .top = 0, .right = 1920, .bottom = 1080};
+            display_info.rcScreen = {.left = 0, .top = 0, .right = this->screen_width, .bottom = this->screen_height};
         });
     }
 
