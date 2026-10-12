@@ -228,6 +228,74 @@ namespace sogen
             return static_cast<uint32_t>(table.value());
         }
 
+        struct sbcs_codepage
+        {
+            std::array<char16_t, 0x100> to_unicode{};
+            std::vector<uint8_t> from_unicode{};
+        };
+
+        // c_<cp>.nls layout: WORD header size (in WORDs), header, WORD offset to the Unicode-to-byte table,
+        // the 256-entry byte-to-Unicode table, ..., then the 64K-entry Unicode-to-byte table (single-byte
+        // codepages only).
+        std::optional<sbcs_codepage> load_sbcs_codepage(const file_system& file_sys, const uint16_t code_page)
+        {
+            const auto data = utils::io::read_file(file_sys.translate(R"(C:\Windows\System32\c_)" + std::to_string(code_page) + ".nls"));
+            const auto word = [&](const size_t index) {
+                return static_cast<uint16_t>(static_cast<uint16_t>(data.at(index * 2)) |
+                                             static_cast<uint16_t>(static_cast<uint16_t>(data.at((index * 2) + 1)) << 8));
+            };
+
+            constexpr size_t max_char_size_index = 2;
+            if (data.size() < 0x40 || word(max_char_size_index) != 1)
+            {
+                return std::nullopt;
+            }
+
+            const size_t header_size = word(0);
+            if ((header_size + 1) * 2 > data.size())
+            {
+                return std::nullopt;
+            }
+
+            const size_t to_unicode_index = header_size + 1;
+            const size_t from_unicode_offset = (header_size + 1 + word(header_size)) * 2;
+
+            sbcs_codepage codepage{};
+            if ((to_unicode_index + codepage.to_unicode.size()) * 2 > data.size() || from_unicode_offset + 0x10000 > data.size())
+            {
+                return std::nullopt;
+            }
+
+            for (size_t i = 0; i < codepage.to_unicode.size(); ++i)
+            {
+                codepage.to_unicode.at(i) = static_cast<char16_t>(word(to_unicode_index + i));
+            }
+
+            codepage.from_unicode.resize(0x10000);
+            for (size_t i = 0; i < codepage.from_unicode.size(); ++i)
+            {
+                codepage.from_unicode.at(i) = static_cast<uint8_t>(data.at(from_unicode_offset + i));
+            }
+
+            return codepage;
+        }
+
+        // win32k fills SERVERINFO.acOemToAnsi/acAnsiToOem at boot by translating every byte through both
+        // codepages; user32's OemToChar*/CharToOem* are plain lookups into them.
+        void fill_ansi_oem_tables(const file_system& file_sys, const uint16_t ansi_code_page, const uint16_t oem_code_page,
+                                  USER_SERVERINFO& server_info)
+        {
+            const auto ansi = load_sbcs_codepage(file_sys, ansi_code_page);
+            const auto oem = load_sbcs_codepage(file_sys, oem_code_page);
+
+            for (size_t i = 0; i < sizeof(server_info.acOemToAnsi); ++i)
+            {
+                const bool translatable = ansi && oem;
+                server_info.acOemToAnsi[i] = translatable ? ansi->from_unicode.at(oem->to_unicode.at(i)) : static_cast<uint8_t>(i);
+                server_info.acAnsiToOem[i] = translatable ? oem->from_unicode.at(ansi->to_unicode.at(i)) : static_cast<uint8_t>(i);
+            }
+        }
+
         void setup_gdt(x86_64_emulator& emu, memory_manager& memory)
         {
             const auto vcpu_count = emu.vcpu_count();
@@ -728,6 +796,8 @@ namespace sogen
 
         this->user_handles.share_indices(this->shared_arena);
         this->user_handles.setup(is_wow64_process, this->process_id >> 2);
+        this->user_handles.get_server_info().access(
+            [&](USER_SERVERINFO& server_info) { fill_ansi_oem_tables(win_emu.file_sys, 1252, 437, server_info); });
 
         auto [mh, monitor_obj] = this->user_handles.allocate_object<USER_MONITOR>(handle_types::monitor);
         this->default_monitor_handle = mh;

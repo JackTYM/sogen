@@ -46,7 +46,10 @@ namespace sogen
         uint64_t apfnClientA[FNID_ARRAY_SIZE];
         uint64_t apfnClientW[FNID_ARRAY_SIZE];
         uint64_t apfnClientWorker[FNID_ARRAY_SIZE];
-        uint8_t pad_3c8[0x3A0];
+        uint8_t pad_3c8[0x19C];
+        uint8_t acOemToAnsi[0x100];
+        uint8_t acAnsiToOem[0x100];
+        DWORD dwInstalledEventHooks;
         int32_t systemMetrics[0x61];
         uint8_t pad_8ec[0x96C];
         uint64_t ahbrSystem[USER_SERVERINFO_BRUSH_SLOT_COUNT];
@@ -60,6 +63,8 @@ namespace sogen
     };
 
     static_assert(offsetof(USER_SERVERINFO, apfnClientA) == 0x188);
+    static_assert(offsetof(USER_SERVERINFO, acOemToAnsi) == 0x564);
+    static_assert(offsetof(USER_SERVERINFO, acAnsiToOem) == 0x664);
     static_assert(offsetof(USER_SERVERINFO, systemMetrics) == 0x768);
     static_assert(offsetof(USER_SERVERINFO, ahbrSystem) == 0x1258);
     static_assert(offsetof(USER_SERVERINFO, defaultFontHeightScale) == 0x138C);

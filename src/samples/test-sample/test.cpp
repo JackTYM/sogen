@@ -1775,6 +1775,28 @@ namespace
         return true;
     }
 
+    bool test_oem_conversion()
+    {
+        const char oem[] = "Dir/M\x81nchen \xE1.txt";
+        const char ansi[] = "Dir/M\xFCnchen \xDF.txt";
+
+        char converted[sizeof(oem)]{};
+        if (!OemToCharA(oem, converted) || strcmp(converted, ansi) != 0)
+        {
+            return false;
+        }
+
+        char back[sizeof(ansi)]{};
+        if (!CharToOemBuffA(ansi, back, sizeof(ansi)) || strcmp(back, oem) != 0)
+        {
+            return false;
+        }
+
+        char in_place[sizeof(oem)]{};
+        memcpy(in_place, oem, sizeof(oem));
+        return OemToCharA(in_place, in_place) && strcmp(in_place, ansi) == 0;
+    }
+
     bool test_crypt_protect()
     {
         auto roundtrip = [](const std::vector<BYTE>& plain, const std::vector<BYTE>& entropy, const LPCWSTR descr) {
@@ -1920,6 +1942,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_mmio, "MMIO")
     RUN_TEST(test_self_modifying_code, "Self-Modifying Code")
     RUN_TEST(test_gdi, "GDI")
+    RUN_TEST(test_oem_conversion, "OEM Conversion")
     RUN_TEST(test_crypt_protect, "CryptProtect")
 
     return valid ? 0 : 1;
