@@ -2,6 +2,8 @@
 
 #include "process_control_channel.hpp"
 
+#include <platform/window.hpp>
+
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -46,6 +48,15 @@ namespace sogen
         uint64_t l_param{};
     };
 
+    struct window_surface_route
+    {
+        hwnd target{};
+        bool foreign{};
+        RECT destination{};
+        RECT clip{};
+        bool visible{};
+    };
+
     namespace syscalls
     {
         void execute_window_control(windows_emulator& target, const process_control_request& request, process_control_response& response);
@@ -58,5 +69,10 @@ namespace sogen
 
         bool is_foreign_window_handle(const syscall_context& c, uint64_t hwnd);
         bool is_foreign_window_handle(const process_context& proc, uint64_t hwnd);
+
+        // Carries a rect given in `window`'s client coordinates up this process's window tree: to the client
+        // coordinates of its top-level window, or of the first ancestor that belongs to another process (foreign).
+        std::optional<window_surface_route> route_window_surface(const process_context& proc, uint64_t window, const RECT& destination,
+                                                                 const RECT& clip);
     }
 }

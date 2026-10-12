@@ -5896,11 +5896,11 @@ namespace sogen
                 const auto pixels =
                     c.emu.read_memory(allocation->backing_memory, static_cast<size_t>(allocation->pitch) * allocation->height);
 
-                c.win_emu.ui().present_surface(*target_window, ui_surface_desc{.width = static_cast<int>(allocation->width),
-                                                                               .height = static_cast<int>(allocation->height),
-                                                                               .stride = static_cast<int>(allocation->pitch),
-                                                                               .format = ui_surface_format::bgra8,
-                                                                               .pixels = pixels.data()});
+                c.win_emu.present_window_surface(*target_window, ui_surface_desc{.width = static_cast<int>(allocation->width),
+                                                                                 .height = static_cast<int>(allocation->height),
+                                                                                 .stride = static_cast<int>(allocation->pitch),
+                                                                                 .format = ui_surface_format::bgra8,
+                                                                                 .pixels = pixels.data()});
 
                 dump_presented_frame(allocation->width, allocation->height, allocation->pitch, pixels);
 

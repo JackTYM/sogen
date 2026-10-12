@@ -391,6 +391,9 @@ namespace sogen
         // back the other way to this process's own named_pipe device instances.
         std::vector<std::unique_ptr<pipe_ipc_channel>> pipe_ipc_peers_{};
 
+        window_surface_exporter surface_exporter_{};
+        window_surface_importer surface_importer_{};
+
         // Live process_control_channel per child this process spawned, keyed by the same record_id
         // as process_context::child_processes - see register_child_control_channel. Deliberately not
         // serialized, same as pipe_ipc_peers_.
@@ -559,6 +562,11 @@ namespace sogen
         // handle table (see user_handle_table::mirror_foreign_window).
         void broadcast_window_created(hwnd window, uint32_t thread_id);
         void broadcast_window_destroyed(hwnd window);
+
+        // Shows a frame presented into `window`. A window embedded into a hierarchy of another process (e.g. a
+        // GPU process's swap-chain window reparented into a browser window) has no on-screen window here, so its
+        // frames travel to the process that owns the visible top-level (see relay_window_surface).
+        void present_window_surface(hwnd window, const ui_surface_desc& surface);
 
         // Applies whatever named-pipe traffic has arrived from registered peers since the last call.
         // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
@@ -841,6 +849,9 @@ namespace sogen
         void try_warm_kernelbase_nls_cache_for_thread(vcpu_context& vcpu);
 
       private:
+        void send_window_surface(hwnd window, const window_surface_update& update, const std::string& inline_pixels);
+        void relay_window_surface(const pipe_ipc_message& message);
+
         bool use_relative_time_{false}; // TODO: Get rid of that
         bool instruction_precision_{true};
         uint32_t vcpu_count_{1};

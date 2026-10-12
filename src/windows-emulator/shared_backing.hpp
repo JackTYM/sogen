@@ -33,6 +33,7 @@ namespace sogen
         // memory support.
         static std::shared_ptr<shared_backing> create_named(size_t size, std::string& shm_name);
         static std::shared_ptr<shared_backing> open_named(const std::string& shm_name, size_t size);
+        static void unlink_named(const std::string& shm_name);
 
         static bool supports_sharing();
 

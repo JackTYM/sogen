@@ -328,13 +328,13 @@ namespace sogen
                     return;
                 }
 
-                win_emu.ui().present_surface(static_cast<hwnd>(hwnd_value), ui_surface_desc{
-                                                                                .width = static_cast<int>(width),
-                                                                                .height = static_cast<int>(height),
-                                                                                .stride = static_cast<int>(width * 4),
-                                                                                .format = ui_surface_format::bgra8,
-                                                                                .pixels = pixels.data(),
-                                                                            });
+                win_emu.present_window_surface(static_cast<hwnd>(hwnd_value), ui_surface_desc{
+                                                                                  .width = static_cast<int>(width),
+                                                                                  .height = static_cast<int>(height),
+                                                                                  .stride = static_cast<int>(width * 4),
+                                                                                  .format = ui_surface_format::bgra8,
+                                                                                  .pixels = pixels.data(),
+                                                                              });
             }
 
             // Reads a fixed-size request struct from the guest input buffer.

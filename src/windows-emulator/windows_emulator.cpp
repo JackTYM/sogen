@@ -1328,6 +1328,75 @@ namespace sogen
         }
     }
 
+    void windows_emulator::present_window_surface(const hwnd window, const ui_surface_desc& surface)
+    {
+        const auto* win = this->process.windows.get(window);
+        if (!win)
+        {
+            this->ui().present_surface(window, surface);
+            return;
+        }
+
+        const auto width = win->client_width() > 0 ? win->client_width() : surface.width;
+        const auto height = win->client_height() > 0 ? win->client_height() : surface.height;
+        const RECT client{.left = 0, .top = 0, .right = width, .bottom = height};
+        const auto route = syscalls::route_window_surface(this->process, window, client, client);
+        if (!route || !route->foreign)
+        {
+            this->ui().present_surface(window, surface);
+            return;
+        }
+
+        window_surface_update update{.layer = window, .destination = route->destination, .clip = route->clip, .visible = route->visible};
+        const auto inline_pixels = this->surface_exporter_.publish(update, surface);
+        this->send_window_surface(route->target, update, inline_pixels.value_or(std::string{}));
+    }
+
+    void windows_emulator::send_window_surface(const hwnd window, const window_surface_update& update, const std::string& inline_pixels)
+    {
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::window_surface;
+        message.window = window;
+        message.data = inline_pixels;
+        message.surface = update;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
+    void windows_emulator::relay_window_surface(const pipe_ipc_message& message)
+    {
+        const auto& update = *message.surface;
+        const auto route = syscalls::route_window_surface(this->process, message.window, update.destination, update.clip);
+        if (!route)
+        {
+            return;
+        }
+
+        if (route->foreign)
+        {
+            auto next = update;
+            next.destination = route->destination;
+            next.clip = route->clip;
+            next.visible = update.visible && route->visible;
+            this->send_window_surface(route->target, next, message.data);
+            return;
+        }
+
+        if (!update.visible || !route->visible)
+        {
+            this->ui().remove_layer(update.layer);
+            return;
+        }
+
+        if (const auto surface = this->surface_importer_.resolve(update, message.data))
+        {
+            this->ui().present_layer(route->target, update.layer, route->destination, route->clip, *surface);
+        }
+    }
+
     void windows_emulator::broadcast_window_created(const hwnd window, const uint32_t thread_id)
     {
         const auto message = make_window_created_message(window, this->process.process_id, thread_id);
@@ -1409,6 +1478,11 @@ namespace sogen
                 {
                     this->process.foreign_windows.erase(message->window);
                     this->process.user_handles.unmirror_foreign_window(message->window);
+                }
+                else if (message->type == pipe_ipc_message_type::window_surface && message->surface &&
+                         this->process.windows.get(message->window))
+                {
+                    this->relay_window_surface(*message);
                 }
 
                 // pipe_ipc_peers_ mirrors the process spawn tree (one entry for this process's own

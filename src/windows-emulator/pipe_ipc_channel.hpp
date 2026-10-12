@@ -4,6 +4,8 @@
 #include <optional>
 #include <string>
 
+#include "window_surface_relay.hpp"
+
 namespace sogen
 {
     enum class pipe_ipc_message_type : uint8_t
@@ -15,6 +17,7 @@ namespace sogen
         focus_changed = 4,
         window_created = 5,
         window_destroyed = 6,
+        window_surface = 7,
     };
 
     // A single forwarded named-pipe event: bytes written on the sender's end (delivered verbatim
@@ -47,6 +50,9 @@ namespace sogen
 
         // For `window_created`: the thread owning `window` (client_process_id carries its process).
         uint32_t window_thread_id{};
+
+        // For `window_surface`: a frame for `window` (data carries the pixels when they are not in shared memory).
+        std::optional<window_surface_update> surface{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via

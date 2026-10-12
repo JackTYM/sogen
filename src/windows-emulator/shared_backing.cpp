@@ -208,6 +208,15 @@ namespace sogen
 #endif
     }
 
+    void shared_backing::unlink_named(const std::string& shm_name)
+    {
+#if defined(SOGEN_SHARED_BACKING_POSIX)
+        ::shm_unlink(shm_name.c_str());
+#else
+        (void)shm_name;
+#endif
+    }
+
     std::shared_ptr<shared_backing> shared_backing::adopt_fd(const int fd, const size_t size)
     {
 #if defined(SOGEN_SHARED_BACKING_POSIX)

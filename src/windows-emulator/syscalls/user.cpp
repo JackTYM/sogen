@@ -7592,6 +7592,55 @@ namespace sogen
             return is_foreign_window_handle(c.proc, hwnd);
         }
 
+        std::optional<window_surface_route> route_window_surface(const process_context& proc, const uint64_t window,
+                                                                 const RECT& destination, const RECT& clip)
+        {
+            const auto intersect = [](const RECT& a, const RECT& b) {
+                return RECT{.left = std::max(a.left, b.left),
+                            .top = std::max(a.top, b.top),
+                            .right = std::min(a.right, b.right),
+                            .bottom = std::min(a.bottom, b.bottom)};
+            };
+            const auto offset = [](const RECT& r, const int32_t dx, const int32_t dy) {
+                return RECT{.left = r.left + dx, .top = r.top + dy, .right = r.right + dx, .bottom = r.bottom + dy};
+            };
+
+            const auto desktop = proc.default_desktop_window_handle.bits;
+            window_surface_route route{.target = window, .destination = destination, .clip = clip, .visible = true};
+
+            for (size_t depth = 0; depth < 256; ++depth)
+            {
+                const auto* win = proc.windows.get(route.target);
+                if (!win)
+                {
+                    return std::nullopt;
+                }
+
+                route.visible = route.visible && (win->style & WS_VISIBLE) != 0;
+                route.clip = intersect(route.clip, get_client_rect(*win));
+
+                const auto parent = win->parent_handle;
+                const auto foreign_parent = parent != 0 && parent != desktop && is_foreign_window_handle(proc, parent);
+                if (!foreign_parent && (parent == 0 || parent == desktop || (win->style & WS_CHILD) == 0))
+                {
+                    return route;
+                }
+
+                const auto border = win->nonclient_border();
+                route.destination = offset(route.destination, win->x + border, win->y + border);
+                route.clip = offset(route.clip, win->x + border, win->y + border);
+                route.target = parent;
+
+                if (foreign_parent)
+                {
+                    route.foreign = true;
+                    return route;
+                }
+            }
+
+            return std::nullopt;
+        }
+
         std::optional<process_control_response> forward_window_control(windows_emulator& win_emu, const window_control_op op,
                                                                        const uint64_t hwnd, const uint64_t argument,
                                                                        const std::span<const std::byte> payload)
