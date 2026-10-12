@@ -4985,7 +4985,8 @@ namespace sogen::fex
 
         if ((declared & operation) == operation)
         {
-            if (operation == memory_operation::write && this->emulator_.untrap_code_writes_apple(guest_fault_addr))
+            // decode_arm64_store does not recognize every store form, but a trapped page only faults on writes.
+            if (this->emulator_.untrap_code_writes_apple(guest_fault_addr))
             {
                 return true;
             }
