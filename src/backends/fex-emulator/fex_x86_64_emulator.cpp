@@ -86,6 +86,7 @@
 // the CMake glue gates this whole target behind SOGEN_ENABLE_FEX so non-ARM builds never reach here.
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/Context.h>
+#include <FEXCore/Utils/ArchHelpers/Arm64.h>
 #include <FEXCore/Core/CoreState.h>
 #include <FEXCore/Core/HostFeatures.h>
 #include <FEXCore/Core/SignalDelegator.h>
@@ -4902,6 +4903,23 @@ namespace sogen::fex
     bool fex_vcpu::handle_misaligned_atomic_fault(ucontext_t* uctx, uint64_t fault_addr)
     {
         const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+
+        // FEXCore rewrites a faulting TSO access in its own JIT code into a plain access plus barrier, so
+        // the site stops faulting; emulating it here every time costs a signal per execution.
+        auto* const active = this->active_thread_.load();
+        if (this->active_context_ && this->active_context_->IsAddressInCodeBuffer(active, pc))
+        {
+            ::pthread_jit_write_protect_np(0);
+            const auto pc_adjustment = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
+                active, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc, &uctx->uc_mcontext->__ss.__x[0]);
+            ::pthread_jit_write_protect_np(1);
+            if (pc_adjustment)
+            {
+                arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + *pc_adjustment));
+                return true;
+            }
+        }
+
         const auto insn = *reinterpret_cast<const uint32_t*>(pc);
 
         const std::unique_lock lock(this->emulator_.tables_mutex_);
