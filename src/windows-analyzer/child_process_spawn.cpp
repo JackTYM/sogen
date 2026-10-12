@@ -400,6 +400,12 @@ namespace sogen
                 argv.emplace_back("--offline");
             }
 
+            for (const auto& host : config.reachable_hosts)
+            {
+                argv.emplace_back("--reachable-host");
+                argv.push_back(host);
+            }
+
             argv.emplace_back("--locale");
             argv.push_back(std::to_string(config.locale_id));
 

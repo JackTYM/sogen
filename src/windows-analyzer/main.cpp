@@ -82,6 +82,7 @@ namespace sogen
             std::optional<backend_type> backend{};
             bool disable_instruction_precision{false};
             bool offline{false};
+            std::vector<std::string> reachable_hosts{};
             uint32_t locale_id{fake_environment_config{}.locale_id};
             uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
@@ -574,8 +575,9 @@ namespace sogen
             emulator_interfaces interfaces{};
             if (options.offline)
             {
-                interfaces.dns_lookup = network::create_offline_dns_lookup();
-                interfaces.socket_factory = network::create_offline_socket_factory();
+                auto offline = network::create_offline_network(options.reachable_hosts);
+                interfaces.dns_lookup = std::move(offline.dns);
+                interfaces.socket_factory = std::move(offline.sockets);
             }
 
             return interfaces;
@@ -688,6 +690,7 @@ namespace sogen
             config.reproducible = options.reproducible;
             config.disable_instruction_precision = options.disable_instruction_precision;
             config.offline = options.offline;
+            config.reachable_hosts = options.reachable_hosts;
             config.locale_id = options.locale_id;
             config.whp_execution_hook_mode = options.whp_execution_hook_mode;
             config.trace_hooks_path = options.trace_hooks_path;
@@ -1160,8 +1163,14 @@ namespace sogen
             app.add_flag("--inst-summary", options.instruction_summary, "Print a summary of executed instructions of the analyzed modules");
             app.add_flag("--skip-syscalls", options.skip_syscalls, "Skip the logging of regular syscalls");
             app.add_flag("--reproducible", options.reproducible, "Stub clocks and other mechanisms to make executions reproducible");
-            app.add_flag("--offline", options.offline,
-                         "Emulate a host whose network is disconnected: only loopback names and addresses are reachable");
+            auto* offline_flag =
+                app.add_flag("--offline", options.offline,
+                             "Emulate a host whose network is disconnected: only loopback names and addresses are reachable");
+            app.add_option("--reachable-host", options.reachable_hosts,
+                           "With --offline, a host name (and its subdomains) that stays reachable, as if a firewall let it through; "
+                           "repeatable")
+                ->needs(offline_flag)
+                ->allow_extra_args(false);
             app.add_option_function<std::string>(
                 "--locale", [&](const std::string& value) { options.locale_id = parse_locale(value); },
                 "Default user/system locale, UI language and keyboard layout of the emulated host, as a name (en-US) or a "

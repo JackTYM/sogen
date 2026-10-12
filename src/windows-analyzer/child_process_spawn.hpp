@@ -28,6 +28,7 @@ namespace sogen
         bool reproducible{};
         bool disable_instruction_precision{};
         bool offline{};
+        std::vector<std::string> reachable_hosts{};
         uint32_t locale_id{};
         std::string whp_execution_hook_mode{"auto"};
         std::filesystem::path trace_hooks_path{};
