@@ -868,41 +868,48 @@ namespace sogen
             return switch_to_thread(win_emu, vcpu, *thread);
         }
 
-        bool switch_to_next_thread(windows_emulator& win_emu, vcpu_context& vcpu)
+        template <typename Predicate>
+        bool switch_to_next_thread_matching(windows_emulator& win_emu, vcpu_context& vcpu, const Predicate& predicate)
         {
-            perform_context_switch_work(win_emu, vcpu);
+            auto& threads = win_emu.process.threads;
 
-            auto& context = win_emu.process;
-
-            bool next_thread = false;
-
-            for (auto& t : context.threads | std::views::values)
+            bool after_active = false;
+            for (auto& t : threads | std::views::values)
             {
-                if (next_thread)
+                if (after_active && predicate(t) && switch_to_thread(win_emu, vcpu, t))
                 {
-                    if (switch_to_thread(win_emu, vcpu, t))
-                    {
-                        return true;
-                    }
-
-                    continue;
+                    return true;
                 }
 
-                if (&t == vcpu.active_thread)
-                {
-                    next_thread = true;
-                }
+                after_active |= &t == vcpu.active_thread;
             }
 
-            for (auto& t : context.threads | std::views::values)
+            for (auto& t : threads | std::views::values)
             {
-                if (switch_to_thread(win_emu, vcpu, t))
+                if (predicate(t) && switch_to_thread(win_emu, vcpu, t))
                 {
                     return true;
                 }
             }
 
             return false;
+        }
+
+        bool switch_to_next_thread(windows_emulator& win_emu, vcpu_context& vcpu)
+        {
+            perform_context_switch_work(win_emu, vcpu);
+
+            // Windows boosts a thread whose wait is satisfied, so on a uniprocessor it runs ahead of
+            // equal-priority threads that were merely preempted. Without that, every hand-off between
+            // waiting threads (posted messages, I/O completions) sits behind a CPU-bound thread's whole
+            // time slice.
+            if (vcpu.active_thread && vcpu.active_thread->is_waiting() &&
+                switch_to_next_thread_matching(win_emu, vcpu, [](const emulator_thread& t) { return t.is_waiting(); }))
+            {
+                return true;
+            }
+
+            return switch_to_next_thread_matching(win_emu, vcpu, [](const emulator_thread&) { return true; });
         }
 
         struct instruction_tick_clock : utils::tick_clock

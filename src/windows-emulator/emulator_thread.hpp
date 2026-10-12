@@ -422,6 +422,13 @@ namespace sogen
 
         bool is_terminated() const;
 
+        bool is_waiting() const
+        {
+            return this->waiting_for_alert || this->await_msg.has_value() || this->await_msg_mask.has_value() ||
+                   !this->await_objects.empty() || this->await_time.has_value() || this->await_io_completion.has_value() ||
+                   static_cast<bool>(this->await_host_condition);
+        }
+
         bool is_thread_ready(windows_emulator& win_emu);
 
         void save(x86_64_cpu& emu)
