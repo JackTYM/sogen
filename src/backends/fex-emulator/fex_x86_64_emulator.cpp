@@ -1229,6 +1229,9 @@ namespace sogen::fex
         FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* thread, uint64_t address) override;
         std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(FEXCore::Core::InternalThreadState* thread,
                                                                                       uint64_t guest_addr) override;
+#ifdef __APPLE__
+        void MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* thread, uint64_t start, uint64_t length) override;
+#endif
 
       private:
         fex_x86_64_emulator& emulator_;
@@ -1335,7 +1338,6 @@ namespace sogen::fex
         void ensure_callret_buffer(FEXCore::Core::CPUState& state);
         void ensure_callret_stack(FEXCore::Core::CPUState& state);
         void restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src);
-        void mark_executable_range(uint64_t address, size_t size, memory_permission permissions);
         void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
                                       size_t size) const;
         void invalidate_code_range(uint64_t address, size_t size, bool include_inactive_contexts = false) const;
@@ -1830,7 +1832,12 @@ namespace sogen::fex
                 // so such a write needs a temporary permission bump around the memcpy. Every page of
                 // the range must be checked, not just the first: a write straddling into a read-only
                 // region would otherwise fault mid-memmove on the host instead of taking the bump.
+#ifdef __APPLE__
+                const bool needs_temporary_write =
+                    !this->range_is_writable(address, size) || this->range_has_code_write_trap_apple(address, size);
+#else
                 const bool needs_temporary_write = !this->range_is_writable(address, size);
+#endif
 
                 if (needs_temporary_write)
                 {
@@ -2352,7 +2359,6 @@ namespace sogen::fex
 
                 this->erase_region_range(address, size);
                 this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = true};
-                this->mark_executable_range_locked(address, size, permissions);
 #ifdef __APPLE__
                 // A breakpoint address can be (re-)mapped after its hook was registered (e.g. a
                 // module reloaded over the same address range) - re-plant any of its 0xCC bytes that
@@ -2637,7 +2643,6 @@ namespace sogen::fex
                 ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
                 this->erase_region_range(address, size);
                 this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
-                this->mark_executable_range_locked(address, size, permissions);
 #ifdef __APPLE__
                 this->apply_patched_execution_breakpoints_in_range(address, size, breakpoints_applied);
 #endif
@@ -2717,7 +2722,7 @@ namespace sogen::fex
         void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) override
         {
             // See unmap_memory's doc comment: tables_mutex_ must be released before
-            // invalidate_code_range_locked/mark_executable_range_locked run.
+            // invalidate_code_range_locked runs.
             {
                 const std::unique_lock lock(this->tables_mutex_);
 
@@ -2734,7 +2739,6 @@ namespace sogen::fex
                 this->set_region_range_permissions(address, size, permissions);
             }
             this->invalidate_code_range_locked(address, size);
-            this->mark_executable_range_locked(address, size, permissions);
         }
 
         // --[ region bookkeeping - callers already hold tables_mutex_ ]------------------------------
@@ -3220,8 +3224,15 @@ namespace sogen::fex
             void* host_ptr = reinterpret_cast<void*>(host_page_addr + rebase);
             const bool currently_mapped = this->mapped_host_pages_apple_.contains(host_page_addr);
 
+            if (this->code_write_trapped_host_pages_apple_.contains(host_page_addr))
+            {
+                effective &= ~memory_permission::write;
+            }
+
             if (!any_slot_present)
             {
+                this->code_write_trapped_host_pages_apple_.erase(host_page_addr);
+
                 if (currently_mapped)
                 {
                     // The page being decommitted here already carries real backing (this is a plain
@@ -3296,6 +3307,100 @@ namespace sogen::fex
             {
                 this->sync_host_page_apple(host_page);
             }
+        }
+
+        bool host_page_has_writable_slot_apple(const uint64_t host_page_addr) const
+        {
+            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
+            {
+                const auto it = this->page_shadow_apple_.find(page);
+                if (it != this->page_shadow_apple_.end() && (it->second & memory_permission::write) != memory_permission::none)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool range_has_code_write_trap_apple(const uint64_t address, const size_t size) const
+        {
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                if (this->code_write_trapped_host_pages_apple_.contains(host_page))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // FEXCore's default SMC mode (MTrack) leaves detecting guest stores into translated code to the
+        // frontend: it reports every page it compiles code from, and the frontend has to write-protect
+        // writable ones and invalidate on the resulting write fault (see untrap_code_writes_apple).
+        void trap_code_writes_apple(const uint64_t address, const size_t size)
+        {
+            const std::unique_lock lock(this->tables_mutex_);
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                if (this->host_page_has_writable_slot_apple(host_page) &&
+                    this->code_write_trapped_host_pages_apple_.insert(host_page).second)
+                {
+                    this->sync_host_page_apple(host_page);
+                }
+            }
+        }
+
+        // Invalidation and unprotection happen under every context's code invalidation mutex, so no
+        // vCPU can translate the page's old bytes in between and keep a stale block for an untracked page.
+        bool untrap_code_writes_apple(const uint64_t guest_address)
+        {
+            const uint64_t host_page = host_page_align_down_apple(guest_address);
+
+            {
+                const std::shared_lock lock(this->tables_mutex_);
+                if (!this->code_write_trapped_host_pages_apple_.contains(host_page))
+                {
+                    return false;
+                }
+            }
+
+            std::unique_lock code_lock(this->context_->GetCodeInvalidationMutex());
+            std::unique_lock<std::remove_reference_t<decltype(this->context_->GetCodeInvalidationMutex())>> code_lock32{};
+            if (this->context32_)
+            {
+                code_lock32 = std::unique_lock(this->context32_->GetCodeInvalidationMutex());
+            }
+
+            {
+                const std::unique_lock lock(this->tables_mutex_);
+                if (this->code_write_trapped_host_pages_apple_.erase(host_page) == 0)
+                {
+                    return false;
+                }
+                this->sync_host_page_apple(host_page);
+            }
+
+            ::pthread_jit_write_protect_np(0);
+            this->context_->InvalidateCodeBuffersCodeRange(host_page, host_page_size_apple);
+            if (this->context32_)
+            {
+                this->context32_->InvalidateCodeBuffersCodeRange(host_page, host_page_size_apple);
+            }
+            for (const auto& vcpu : this->vcpus_)
+            {
+                if (vcpu->thread_ != nullptr)
+                {
+                    this->context_->InvalidateThreadCachedCodeRange(vcpu->thread_, host_page, host_page_size_apple);
+                }
+                if (this->context32_ && vcpu->thread32_ != nullptr)
+                {
+                    this->context32_->InvalidateThreadCachedCodeRange(vcpu->thread32_, host_page, host_page_size_apple);
+                }
+            }
+            ::pthread_jit_write_protect_np(1);
+            return true;
         }
 #endif
 
@@ -3493,24 +3598,12 @@ namespace sogen::fex
         }
 #endif
 
-        // mark_executable_range/invalidate_code_range need to run per-acting-vcpu (they touch a
-        // specific InternalThreadState), but are called from machine-wide, already-locked contexts
+        // invalidate_code_range needs to run per-acting-vcpu (it touches a specific
+        // InternalThreadState), but is called from machine-wide contexts
         // (map_memory/apply_memory_protection). Fan out to every vCPU's thread of the relevant
         // context (Task 5): with N threads sharing a context, invalidate the shared code buffer once,
         // then invalidate every vCPU's own cached-code view - otherwise other vCPUs keep executing
         // stale translations after a code-modifying event on one vCPU.
-        void mark_executable_range_locked(uint64_t address, size_t size, memory_permission permissions)
-        {
-            if ((permissions & memory_permission::exec) == memory_permission::none)
-            {
-                return;
-            }
-            for (auto& vcpu : this->vcpus_)
-            {
-                vcpu->mark_executable_range(address, size, permissions);
-            }
-        }
-
         // A WoW64 process's other FEXCore context may hold a translation of the same byte too.
         void invalidate_patched_breakpoint_code(const uint64_t address)
         {
@@ -3582,6 +3675,7 @@ namespace sogen::fex
         // Recording it here and folding it into reserved_host_ranges()/reserved_host_ranges_in()'s
         // own answers closes that gap.
         std::set<uint64_t> unusable_host_pages_apple_;
+        std::set<uint64_t> code_write_trapped_host_pages_apple_;
 #endif
 
         hook_entry* syscall_hook_ = nullptr;
@@ -4590,15 +4684,6 @@ namespace sogen::fex
         this->active_thread_.load()->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
     }
 
-    void fex_vcpu::mark_executable_range(uint64_t address, size_t size, memory_permission permissions)
-    {
-        auto* const active = this->active_thread_.load();
-        if (active != nullptr && (permissions & memory_permission::exec) != memory_permission::none)
-        {
-            this->emulator_.syscall_handler_->MarkGuestExecutableRange(active, address, size);
-        }
-    }
-
     void fex_vcpu::invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread,
                                             uint64_t address, size_t size) const
     {
@@ -4900,6 +4985,10 @@ namespace sogen::fex
 
         if ((declared & operation) == operation)
         {
+            if (operation == memory_operation::write && this->emulator_.untrap_code_writes_apple(guest_fault_addr))
+            {
+                return true;
+            }
             return this->handle_misaligned_atomic_fault(uctx, fault_addr);
         }
 
@@ -5609,6 +5698,14 @@ namespace sogen::fex
     {
         return std::nullopt;
     }
+
+#ifdef __APPLE__
+    void fex_syscall_handler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* /*thread*/, const uint64_t start,
+                                                       const uint64_t length)
+    {
+        this->emulator_.trap_code_writes_apple(start, length);
+    }
+#endif
 
     std::unique_ptr<x86_64_emulator> create_x86_64_emulator(size_t vcpu_count)
     {

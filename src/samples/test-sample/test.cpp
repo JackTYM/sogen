@@ -1645,6 +1645,26 @@ namespace
         return t1 != t0;
     }
 
+    bool test_self_modifying_code()
+    {
+        auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+        if (!code)
+        {
+            return false;
+        }
+
+        bool success = true;
+        for (int i = 0; i < 16; ++i)
+        {
+            const std::array<uint8_t, 6> mov_eax_imm32_ret{0xB8, static_cast<uint8_t>(i), 0, 0, 0, 0xC3};
+            memcpy(code, mov_eax_imm32_ret.data(), mov_eax_imm32_ret.size());
+            success &= reinterpret_cast<int (*)()>(code)() == i;
+        }
+
+        VirtualFree(code, 0, MEM_RELEASE);
+        return success;
+    }
+
     bool test_settimer()
     {
         MSG msg = {};
@@ -1875,6 +1895,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_private_namespace, "Private Namespace")
     RUN_TEST(test_actctx, "Activation Context")
     RUN_TEST(test_mmio, "MMIO")
+    RUN_TEST(test_self_modifying_code, "Self-Modifying Code")
     RUN_TEST(test_gdi, "GDI")
     RUN_TEST(test_crypt_protect, "CryptProtect")
 
