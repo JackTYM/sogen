@@ -2870,7 +2870,7 @@ namespace sogen
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*class_version*/,
                                                  const emulator_object<CLSMENUNAME<EmulatorTraits<Emu64>>> class_menu_name,
-                                                 const DWORD /*function_id*/, const DWORD /*flags*/, const emulator_pointer /*wow*/)
+                                                 const DWORD /*function_id*/, const DWORD flags, const emulator_pointer /*wow*/)
         {
             if (!wnd_class_ex)
             {
@@ -2884,7 +2884,8 @@ namespace sogen
             const auto cls_ptr = process_context::allocate_user_class(c.win_emu.memory, class_name_str);
 
             const auto wnd_class = read_wnd_class_ex(wnd_class_ex);
-            const auto entry = process_context::class_entry{cls_ptr, wnd_class, class_menu_name.read()};
+            constexpr DWORD csf_ansi_proc = 0x2;
+            const auto entry = process_context::class_entry{cls_ptr, wnd_class, class_menu_name.read(), (flags & csf_ansi_proc) != 0};
 
             if (c.win_emu.callbacks.on_generic_activity)
             {
@@ -3164,7 +3165,7 @@ namespace sogen
             const auto normalized_class = normalize_builtin_window_class_name(cls_name);
             // Builtin controls use the wide (apfnClientW) wndproc (expect UTF-16); app classes keep
             // their registered proc. Drives the WM_SETTEXT re-encoding so a wide proc never gets ANSI.
-            win.unicode_proc = is_builtin_window_class_name(normalized_class);
+            win.unicode_proc = is_builtin_window_class_name(normalized_class) || !cls_it->second.ansi_proc;
             const auto skip_create_messages = false;
             if (normalized_class == u"Button" || normalized_class == u"Static")
             {
@@ -3209,6 +3210,7 @@ namespace sogen
                 }
                 guest_win.spwndOwner = parent_win && has_owner ? parent_win->guest.value() : 0;
                 guest_win.lpfnWndProc = win.wnd_proc;
+                guest_win.bFlags = win.unicode_proc ? 0 : USER_WINDOW_ANSI_WINDOW_PROC;
                 guest_win.pcls = class_obj_addr;
                 guest_win.hrgnUpdate = !is_message_only ? 0x12345678 : 0;
                 guest_win.cbWndExtra = wnd_class->cbWndExtra;
@@ -5701,7 +5703,7 @@ namespace sogen
         }
 
         emulator_pointer handle_NtUserSetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
-                                                       BOOL /*Ansi*/)
+                                                       BOOL Ansi)
         {
             auto* win = c.proc.windows.get(hWnd);
             if (!win)
@@ -5768,6 +5770,9 @@ namespace sogen
                         oldValue = guest_win.lpfnWndProc;
                         guest_win.lpfnWndProc = dwNewLong;
                         win->wnd_proc = dwNewLong;
+                        win->unicode_proc = !Ansi;
+                        guest_win.bFlags = static_cast<uint8_t>((guest_win.bFlags & ~USER_WINDOW_ANSI_WINDOW_PROC) |
+                                                                (Ansi ? USER_WINDOW_ANSI_WINDOW_PROC : 0));
                         break;
 
                     default:

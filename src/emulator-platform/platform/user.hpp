@@ -279,6 +279,11 @@ namespace sogen
     static_assert(offsetof(USER_CLASS, lpszAnsiClassName) == 0x30);
     static_assert(sizeof(USER_CLASS) == 0x100);
 
+    // USER_WINDOW::bFlags is byte 2 of tagWND::state, so WNDS_ANSIWINDOWPROC (0x00080000) is bit 3 here.
+    // user32's DispatchMessageWorker drops a message whose A/W flavour differs from this bit unless the
+    // window is owned by the calling thread.
+    constexpr uint8_t USER_WINDOW_ANSI_WINDOW_PROC = 0x08;
+
     struct USER_WINDOW
     {
         uint64_t hWnd;
