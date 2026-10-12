@@ -80,6 +80,9 @@ namespace sogen
             double readback_ms;
             double copy_ms;
             double interval_ms;
+            double max_interval_ms;
+            uint64_t frames_over_25ms;
+            uint64_t frames_over_50ms;
             uint64_t frames;
             std::chrono::steady_clock::time_point last_present;
         };
@@ -4892,7 +4895,11 @@ namespace sogen
             totals.copy_ms += elapsed_ms(t0, now);
             if (totals.last_present.time_since_epoch().count() != 0)
             {
-                totals.interval_ms += elapsed_ms(totals.last_present, now);
+                const double interval = elapsed_ms(totals.last_present, now);
+                totals.interval_ms += interval;
+                totals.max_interval_ms = std::max(totals.max_interval_ms, interval);
+                totals.frames_over_25ms += interval > 25.0 ? 1 : 0;
+                totals.frames_over_50ms += interval > 50.0 ? 1 : 0;
             }
             totals.last_present = now;
 
@@ -4903,10 +4910,12 @@ namespace sogen
                 const auto n = static_cast<double>(totals.frames);
                 fprintf(stderr,
                         "[d3d9-present-timing] %ux%u over %llu presents: interval=%.2fms (%.1f FPS) | flush=%.2fms "
-                        "readback=%.2fms copy=%.2fms | blocking=%.1f%% of frame\n",
+                        "readback=%.2fms copy=%.2fms | blocking=%.1f%% of frame | max=%.1fms over25ms=%llu over50ms=%llu\n",
                         out_width, out_height, static_cast<unsigned long long>(totals.frames), totals.interval_ms / n,
                         1000.0 * n / std::max(totals.interval_ms, 1e-9), totals.flush_ms / n, totals.readback_ms / n, totals.copy_ms / n,
-                        100.0 * (totals.flush_ms + totals.readback_ms + totals.copy_ms) / std::max(totals.interval_ms, 1e-9));
+                        100.0 * (totals.flush_ms + totals.readback_ms + totals.copy_ms) / std::max(totals.interval_ms, 1e-9),
+                        totals.max_interval_ms, static_cast<unsigned long long>(totals.frames_over_25ms),
+                        static_cast<unsigned long long>(totals.frames_over_50ms));
                 const auto last = totals.last_present;
                 totals = {};
                 totals.last_present = last;
