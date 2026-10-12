@@ -305,6 +305,28 @@ namespace
         return text == buffer;
     }
 
+    bool test_write_visibility()
+    {
+        const auto* filename = "write_visibility.bin";
+        const auto file = CreateFileA(filename, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+
+        const std::string data(10000, 'x');
+        DWORD written{};
+        const auto write_ok = WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr);
+
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        const auto query_ok = GetFileAttributesExA(filename, GetFileExInfoStandard, &attributes);
+
+        CloseHandle(file);
+        DeleteFileA(filename);
+
+        return write_ok && query_ok && written == data.size() && attributes.nFileSizeHigh == 0 && attributes.nFileSizeLow == data.size();
+    }
+
     bool test_file_locking()
     {
         const auto filename = std::filesystem::absolute("a.txt");
@@ -1862,6 +1884,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_dns, "DNS")
 #endif
     RUN_TEST(test_io, "I/O")
+    RUN_TEST(test_write_visibility, "Write Visibility")
     RUN_TEST(test_file_locking, "File Locking")
     RUN_TEST(test_dir_io, "Dir I/O")
     RUN_TEST(test_apis, "APIs")

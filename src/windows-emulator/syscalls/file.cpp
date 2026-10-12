@@ -1676,6 +1676,7 @@ namespace sogen
             }
 
             const auto bytes_written = fwrite(temp_buffer.data(), 1, temp_buffer.size(), f->handle);
+            (void)fflush(f->handle);
 
             if (io_status_block)
             {
