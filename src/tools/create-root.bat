@@ -178,25 +178,37 @@ CALL :collect xinput9_1_0.dll
 REM The common item dialog (IFileDialog, which Notepad++ uses for Open/Save As) is created by comdlg32 only when
 REM ShellStyle.dll exists, and it loads its strings and dialog templates from the en-US MUI files and the
 REM SystemResources .mun files of the shell and user32.
+CALL :collect edputil.dll
+CALL :collect icu.dll
+CALL :collect iertutil.dll
+CALL :collect imageres.dll
 CALL :collect linkinfo.dll
+CALL :collect msftedit.dll
+CALL :collect networkexplorer.dll
+CALL :collect oleacc.dll
 CALL :collect samcli.dll
 CALL :collect samlib.dll
 CALL :collect shellstyle.dll
 CALL :collect structuredquery.dll
 CALL :collect thumbcache.dll
 CALL :collect wkscli.dll
+CALL :collect xmllite.dll
 
 CALL :collect_mui comdlg32.dll
 CALL :collect_mui explorerframe.dll
+CALL :collect_mui imageres.dll
+CALL :collect_mui networkexplorer.dll
 CALL :collect_mui ntshrui.dll
 CALL :collect_mui propsys.dll
 CALL :collect_mui shell32.dll
 CALL :collect_mui shellstyle.dll
+CALL :collect_mui urlmon.dll
 CALL :collect_mui user32.dll
 CALL :collect_mui windows.storage.dll
 
 CALL :collect_mun comdlg32.dll
 CALL :collect_mun explorerframe.dll
+CALL :collect_mun imageres.dll
 CALL :collect_mun shell32.dll
 CALL :collect_mun user32.dll
 CALL :collect_mun windows.storage.dll
