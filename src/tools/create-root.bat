@@ -53,6 +53,7 @@ CALL :collect coremessaging.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
 CALL :collect cryptsp.dll
+CALL :collect cscapi.dll
 CALL :collect d3d10.dll
 CALL :collect d3d10core.dll
 CALL :collect d3d10warp.dll
@@ -64,16 +65,20 @@ CALL :collect d3dcompiler_47.dll
 CALL :collect dbghelp.dll
 CALL :collect dbgcore.dll
 CALL :collect dciman32.dll
+CALL :collect davclnt.dll
 CALL :collect ddraw.dll
 CALL :collect devobj.dll
 CALL :collect diagnosticdatasettings.dll
 CALL :collect dinput8.dll
 CALL :collect dnsapi.dll
 CALL :collect dsound.dll
+CALL :collect dui70.dll
+CALL :collect duser.dll
 CALL :collect dwmapi.dll
 CALL :collect dxcore.dll
 CALL :collect dxgi.dll
 CALL :collect dxva2.dll
+CALL :collect explorerframe.dll
 CALL :collect fwpuclnt.dll
 CALL :collect gdi32.dll
 CALL :collect gdi32full.dll
@@ -116,6 +121,7 @@ CALL :collect ncrypt.dll
 CALL :collect netapi32.dll
 CALL :collect netmsg.dll
 CALL :collect netutils.dll
+CALL :collect ntshrui.dll
 CALL :collect nlsbres.dll
 CALL :collect normaliz.dll
 CALL :collect nsi.dll
@@ -188,6 +194,32 @@ CALL :collect xinput1_3.dll
 CALL :collect xinput1_4.dll
 CALL :collect xinput9_1_0.dll
 
+REM The common item dialog (IFileDialog, which Notepad++ uses for Open/Save As) is created by comdlg32 only when
+REM ShellStyle.dll exists, and it loads its strings and dialog templates from the en-US MUI files and the
+REM SystemResources .mun files of the shell and user32.
+CALL :collect linkinfo.dll
+CALL :collect samcli.dll
+CALL :collect samlib.dll
+CALL :collect shellstyle.dll
+CALL :collect structuredquery.dll
+CALL :collect thumbcache.dll
+CALL :collect wkscli.dll
+
+CALL :collect_mui comdlg32.dll
+CALL :collect_mui explorerframe.dll
+CALL :collect_mui ntshrui.dll
+CALL :collect_mui propsys.dll
+CALL :collect_mui shell32.dll
+CALL :collect_mui shellstyle.dll
+CALL :collect_mui user32.dll
+CALL :collect_mui windows.storage.dll
+
+CALL :collect_mun comdlg32.dll
+CALL :collect_mun explorerframe.dll
+CALL :collect_mun shell32.dll
+CALL :collect_mun user32.dll
+CALL :collect_mun windows.storage.dll
+
 CALL :collect locale.nls
 CALL :collect c_1252.nls
 CALL :collect c_437.nls
@@ -217,6 +249,16 @@ IF EXIST %SRC% (
 	ECHO %SRC% -^> %DST%
 	COPY /B /Y "%SRC%" "%DST%" >NUL
 )
+EXIT /B
+
+:collect_mui
+IF NOT EXIST %EMU_SYSDIR%\en-US MKDIR %EMU_SYSDIR%\en-US
+CALL :collect_file "%WINDIR%\System32\en-US", %~1.mui, %EMU_SYSDIR%\en-US
+EXIT /B
+
+:collect_mun
+IF NOT EXIST %EMU_WINDIR%\SystemResources MKDIR %EMU_WINDIR%\SystemResources
+CALL :collect_file "%WINDIR%\SystemResources", %~1.mun, %EMU_WINDIR%\SystemResources
 EXIT /B
 
 :collect
