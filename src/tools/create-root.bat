@@ -23,6 +23,7 @@ MKDIR %EMU_CURSORDIR%
 MKDIR %EMU_REGDIR%
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0collect-property-cache.ps1" "%EMU_FILESYS%"
 
 REG SAVE HKLM\HARDWARE %EMU_REGDIR%\HARDWARE /Y
 REG SAVE HKLM\SAM %EMU_REGDIR%\SAM /Y
