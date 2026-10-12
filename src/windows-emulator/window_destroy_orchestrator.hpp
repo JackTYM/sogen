@@ -11,6 +11,7 @@ namespace sogen
 
     struct syscall_context;
     class ui_backend;
+    class windows_emulator;
     struct process_context;
     class emulator_thread;
 
@@ -42,6 +43,7 @@ namespace sogen
         process_context& proc_;
         emulator_thread& thread_;
         ui_backend& ui_;
+        windows_emulator& win_emu_;
     };
 
 } // namespace sogen

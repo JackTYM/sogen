@@ -57,6 +57,8 @@ namespace sogen
         uint32_t allocate_process_index();
 
         std::optional<uint32_t> allocate();
+        // Claims a specific free slot, like allocate(). Fails if the slot is in use.
+        bool claim(uint32_t index);
         void add_reference(uint32_t index);
         void release(uint32_t index);
         std::atomic<uint64_t>* words(uint32_t index) const;

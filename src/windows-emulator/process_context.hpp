@@ -848,6 +848,16 @@ namespace sogen
         // Windows owned by a child host process that were reparented under one of this process's windows,
         // mapped to that parent. Pointer input hitting the parent is offered to them (see window_control).
         std::map<hwnd, hwnd> foreign_child_windows{};
+
+        struct foreign_window_owner
+        {
+            uint32_t process_id{};
+            uint32_t thread_id{};
+        };
+
+        // Windows of the other processes of the tree (announced via pipe_ipc_message_type::window_created), so
+        // queries about them can be answered here the way the shared win32k state answers them on Windows.
+        std::map<hwnd, foreign_window_owner> foreign_windows{};
         handle_store<handle_types::token, process_token> tokens{};
         user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         user_handle_store<handle_types::cursor_icon, cursor_icon> icons{user_handles};
@@ -892,6 +902,7 @@ namespace sogen
             if (!this->shared_arena)
             {
                 this->shared_arena = kernel_arena::create();
+                this->user_handles.share_indices(this->shared_arena);
             }
 
             return this->shared_arena.get();

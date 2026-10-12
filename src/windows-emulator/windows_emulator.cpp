@@ -968,6 +968,16 @@ namespace sogen
 #endif
         }
 
+        pipe_ipc_message make_window_created_message(const hwnd window, const uint32_t process_id, const uint32_t thread_id)
+        {
+            pipe_ipc_message message{};
+            message.type = pipe_ipc_message_type::window_created;
+            message.window = window;
+            message.client_process_id = process_id;
+            message.window_thread_id = thread_id;
+            return message;
+        }
+
         std::unique_ptr<ui_backend> get_ui_backend(emulator_interfaces& interfaces)
         {
             if (interfaces.ui)
@@ -1182,6 +1192,16 @@ namespace sogen
             peer->send(message);
         }
 
+        for (const auto& win : this->process.windows | std::views::values)
+        {
+            peer->send(make_window_created_message(win.handle, this->process.process_id, win.thread_id));
+        }
+
+        for (const auto& [window, owner] : this->process.foreign_windows)
+        {
+            peer->send(make_window_created_message(window, owner.process_id, owner.thread_id));
+        }
+
         this->pipe_ipc_peers_.push_back(std::move(peer));
     }
 
@@ -1308,6 +1328,27 @@ namespace sogen
         }
     }
 
+    void windows_emulator::broadcast_window_created(const hwnd window, const uint32_t thread_id)
+    {
+        const auto message = make_window_created_message(window, this->process.process_id, thread_id);
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
+    void windows_emulator::broadcast_window_destroyed(const hwnd window)
+    {
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::window_destroyed;
+        message.window = window;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
     bool windows_emulator::is_known_sibling_pid(const uint32_t pid) const
     {
         return this->known_sibling_pids_.contains(pid);
@@ -1355,6 +1396,19 @@ namespace sogen
                         thread->post_message(*this,
                                              msg{.window = previous, .message = WM_KILLFOCUS, .wParam = message->window, .lParam = 0});
                     }
+                }
+                else if (message->type == pipe_ipc_message_type::window_created && message->client_process_id &&
+                         syscalls::is_foreign_window_handle(this->process, message->window))
+                {
+                    this->process.foreign_windows[message->window] = {.process_id = *message->client_process_id,
+                                                                      .thread_id = message->window_thread_id};
+                    this->process.user_handles.mirror_foreign_window(message->window, message->window_thread_id);
+                }
+                else if (message->type == pipe_ipc_message_type::window_destroyed &&
+                         syscalls::is_foreign_window_handle(this->process, message->window))
+                {
+                    this->process.foreign_windows.erase(message->window);
+                    this->process.user_handles.unmirror_foreign_window(message->window);
                 }
 
                 // pipe_ipc_peers_ mirrors the process spawn tree (one entry for this process's own

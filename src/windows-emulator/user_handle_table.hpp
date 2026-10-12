@@ -1,6 +1,7 @@
 #pragma once
 #include "emulator_utils.hpp"
 #include "handles.hpp"
+#include "kernel_state.hpp"
 
 #include <array>
 
@@ -24,6 +25,7 @@ namespace sogen
 
         static constexpr uint32_t INDEX_BITS = 14;
         static constexpr uint32_t NAMESPACE_COUNT = 1u << 7;
+        static constexpr uint64_t foreign_owner_marker = 1ULL << 63;
 
         void setup(const bool is_wow64_process, const uint32_t handle_namespace)
         {
@@ -95,6 +97,88 @@ namespace sogen
         uint32_t handle_namespace() const
         {
             return this->handle_namespace_;
+        }
+
+        // Real Windows has one handle table for the whole session, so a handle's aheList slot (its low 16 bits)
+        // is unique system-wide and every process can validate another process's window client-side. Drawing
+        // indices from the arena shared by the process tree keeps slots unique across processes, which lets a
+        // process mirror another process's window into its own table (see mirror_foreign_window).
+        void share_indices(std::shared_ptr<kernel_arena> arena)
+        {
+            this->shared_indices_ = std::move(arena);
+            this->claim_shared_indices();
+        }
+
+        void claim_shared_indices()
+        {
+            if (!this->shared_indices_)
+            {
+                return;
+            }
+
+            for (const auto index : this->shared_index_slots_)
+            {
+                this->shared_indices_->release(index);
+            }
+            this->shared_index_slots_.clear();
+
+            for (uint32_t index = 1; index < (1u << INDEX_BITS) && index < used_indices_.size(); ++index)
+            {
+                if (used_indices_.at(index) && this->shared_indices_->claim(index))
+                {
+                    this->shared_index_slots_.insert(index);
+                }
+            }
+        }
+
+        // Publishes a window of another process in this process's table, enough for user32's client-side handle
+        // checks (GetWindowThreadProcessId resolves the owner through NtUserQueryWindow). pHead stays null, so
+        // anything that needs the window object itself still fails validation. The owner value can never equal a
+        // local thread id, which would make user32 answer with this process's own ids.
+        bool mirror_foreign_window(const uint64_t window, const uint32_t thread_id)
+        {
+            const auto slot = static_cast<size_t>(window & 0xFFFF);
+            if (slot == 0 || slot >= MAX_HANDLES)
+            {
+                return false;
+            }
+
+            bool mirrored = false;
+            this->get_handle_table().access(
+                [&](USER_HANDLEENTRY& entry) {
+                    if (entry.bType != 0 && entry.pHead != 0)
+                    {
+                        return;
+                    }
+
+                    entry = {};
+                    entry.pOwner = foreign_owner_marker | thread_id;
+                    entry.bType = TYPE_WINDOW;
+                    entry.wUniq = static_cast<uint16_t>((window >> 16) & 0x7FFF);
+                    mirrored = true;
+                },
+                slot);
+
+            return mirrored;
+        }
+
+        void unmirror_foreign_window(const uint64_t window)
+        {
+            const auto slot = static_cast<size_t>(window & 0xFFFF);
+            if (slot == 0 || slot >= MAX_HANDLES)
+            {
+                return;
+            }
+
+            this->get_handle_table().access(
+                [&](USER_HANDLEENTRY& entry) {
+                    if (entry.pHead == 0 && (entry.pOwner & foreign_owner_marker) != 0 &&
+                        entry.wUniq == static_cast<uint16_t>((window >> 16) & 0x7FFF))
+                    {
+                        entry = {};
+                    }
+                },
+                slot);
         }
 
         emulator_object<USER_SERVERINFO> get_server_info() const
@@ -192,6 +276,10 @@ namespace sogen
             }
 
             used_indices_.at(index) = false;
+            if (this->shared_indices_ && this->shared_index_slots_.erase(index) != 0)
+            {
+                this->shared_indices_->release(index);
+            }
 
             const emulator_object<USER_HANDLEENTRY> handle_table_obj(*memory_, handle_table_addr_);
             handle_table_obj.access(
@@ -230,6 +318,7 @@ namespace sogen
             buffer.read(next_free_index_);
             buffer.read(is_wow64_process_);
             buffer.read(handle_namespace_);
+            this->claim_shared_indices();
         }
 
       private:
@@ -328,6 +417,16 @@ namespace sogen
             return message;
         }
 
+        bool is_slot_free(const uint32_t index) const
+        {
+            if (index == 0 || (static_cast<uint64_t>(index) << 2) >= MAX_HANDLES || used_indices_.at(index))
+            {
+                return false;
+            }
+
+            return this->get_handle_table().read(handle_index_to_ahe_slot(index)).bType == 0;
+        }
+
         uint32_t find_free_index()
         {
             for (uint32_t attempts = 0; attempts < MAX_HANDLES - 1; ++attempts)
@@ -335,16 +434,24 @@ namespace sogen
                 const auto index = next_free_index_;
                 next_free_index_ = next_free_index_ + 1 < MAX_HANDLES ? next_free_index_ + 1 : 1;
 
-                if (!used_indices_.at(index))
+                // The aheList slot is id << 2; ids whose slot would fall outside the table are skipped (checked
+                // before the 16-bit mask so it can't wrap into a live slot), as are slots mirroring a foreign window.
+                if (!this->is_slot_free(index))
                 {
-                    // The aheList slot is id << 2; skip ids whose slot would fall outside the table
-                    // (checked before the 16-bit mask so it can't wrap into a live slot).
-                    if ((static_cast<uint64_t>(index) << 2) >= MAX_HANDLES)
+                    continue;
+                }
+
+                if (this->shared_indices_)
+                {
+                    if (!this->shared_indices_->claim(index))
                     {
                         continue;
                     }
-                    return index;
+
+                    this->shared_index_slots_.insert(index);
                 }
+
+                return index;
             }
             throw std::runtime_error("No more user handles available");
         }
@@ -385,6 +492,8 @@ namespace sogen
         std::vector<bool> used_indices_{};
         uint32_t next_free_index_{1};
         uint32_t handle_namespace_{0};
+        std::shared_ptr<kernel_arena> shared_indices_{};
+        std::set<uint32_t> shared_index_slots_{};
         memory_manager* memory_{};
         bool is_wow64_process_{};
     };

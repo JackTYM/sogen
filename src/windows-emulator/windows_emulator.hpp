@@ -555,6 +555,11 @@ namespace sogen
         // keyboard focus, so that process's input queue routes keyboard input to it (see pump_pipe_ipc).
         void broadcast_focus_change(hwnd window, hwnd parent_window);
 
+        // Announces window creation/destruction to the whole tree, which mirrors the window into every process's
+        // handle table (see user_handle_table::mirror_foreign_window).
+        void broadcast_window_created(hwnd window, uint32_t thread_id);
+        void broadcast_window_destroyed(hwnd window);
+
         // Applies whatever named-pipe traffic has arrived from registered peers since the last call.
         // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
         // own work() pump.

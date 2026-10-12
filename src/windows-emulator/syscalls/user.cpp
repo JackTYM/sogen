@@ -3156,6 +3156,7 @@ namespace sogen
             win.message_only = is_message_only;
             // Record the owning thread in the shared handle entry so client-side GetWindowThreadProcessId works.
             c.proc.user_handles.set_owner(static_cast<uint32_t>(handle.value.id), win.thread_id);
+            c.win_emu.broadcast_window_created(handle.bits, win.thread_id);
             if (!is_message_only)
             {
                 win.parent_handle = has_child_parent ? parent : c.proc.default_desktop_window_handle.bits;
@@ -6828,14 +6829,20 @@ namespace sogen
 
         uint64_t handle_NtUserQueryWindow(const syscall_context& c, const hwnd window_handle, const uint32_t query_type)
         {
+            // WINDOWINFOCLASS: WindowProcess (0) returns the owning process id. Everything else resolves to
+            // the thread.
             const auto* win = c.proc.windows.get(window_handle);
             if (!win)
             {
-                return 0;
+                const auto foreign = c.proc.foreign_windows.find(window_handle);
+                if (foreign == c.proc.foreign_windows.end())
+                {
+                    return 0;
+                }
+
+                return query_type == 0 ? foreign->second.process_id : foreign->second.thread_id;
             }
 
-            // WINDOWINFOCLASS: WindowProcess (0) returns the owning process id. Everything else resolves to
-            // the thread.
             if (query_type == 0)
             {
                 return c.proc.process_id;

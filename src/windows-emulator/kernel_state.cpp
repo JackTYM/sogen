@@ -146,25 +146,34 @@ namespace sogen
         for (uint32_t i = 0; i < slot_count; ++i)
         {
             const auto index = (start + i) % slot_count;
-            auto* const candidate = this->get_slot(index);
-
-            uint32_t expected = 0;
-            if (!candidate->reference_count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+            if (!this->claim(index))
             {
                 continue;
             }
-
-            for (auto& word : candidate->words)
-            {
-                word.store(0, std::memory_order_relaxed);
-            }
-            candidate->generation.fetch_add(1, std::memory_order_acq_rel);
 
             head->allocation_hint.store((index + 1) % slot_count, std::memory_order_relaxed);
             return index;
         }
 
         return std::nullopt;
+    }
+
+    bool kernel_arena::claim(const uint32_t index)
+    {
+        auto* const candidate = this->get_slot(index);
+
+        uint32_t expected = 0;
+        if (!candidate->reference_count.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+        {
+            return false;
+        }
+
+        for (auto& word : candidate->words)
+        {
+            word.store(0, std::memory_order_relaxed);
+        }
+        candidate->generation.fetch_add(1, std::memory_order_acq_rel);
+        return true;
     }
 
     void kernel_arena::add_reference(const uint32_t index)

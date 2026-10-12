@@ -507,6 +507,7 @@ namespace sogen
                 buffer.write(message.to_server);
                 buffer.write(message.window);
                 buffer.write(message.parent_window);
+                buffer.write(message.window_thread_id);
 
                 const auto framed = frame_message(buffer.get_buffer());
                 this->pending_send_.insert(this->pending_send_.end(), framed.begin(), framed.end());
@@ -560,6 +561,7 @@ namespace sogen
                 deserializer.read(message.to_server);
                 deserializer.read(message.window);
                 deserializer.read(message.parent_window);
+                deserializer.read(message.window_thread_id);
 
                 return message;
             }

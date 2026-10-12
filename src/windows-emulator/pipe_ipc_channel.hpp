@@ -13,6 +13,8 @@ namespace sogen
         server_created = 2,
         process_alive = 3,
         focus_changed = 4,
+        window_created = 5,
+        window_destroyed = 6,
     };
 
     // A single forwarded named-pipe event: bytes written on the sender's end (delivered verbatim
@@ -42,6 +44,9 @@ namespace sogen
         // hierarchy is attached to (whose owner treats it as the focus of the shared input queue).
         uint64_t window{};
         uint64_t parent_window{};
+
+        // For `window_created`: the thread owning `window` (client_process_id carries its process).
+        uint32_t window_thread_id{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via

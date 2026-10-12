@@ -10,7 +10,8 @@ namespace sogen
           emu_(c.emu),
           proc_(c.proc),
           thread_(c.thread()),
-          ui_(c.win_emu.ui())
+          ui_(c.win_emu.ui()),
+          win_emu_(c.win_emu)
     {
     }
 
@@ -317,6 +318,7 @@ namespace sogen
         });
 
         this->ui_.destroy_window(frame.handle);
+        this->win_emu_.broadcast_window_destroyed(frame.handle);
         this->proc_.gdi_window_surfaces.erase(static_cast<uint32_t>(frame.handle));
         if (this->proc_.focus_window == frame.handle)
         {
