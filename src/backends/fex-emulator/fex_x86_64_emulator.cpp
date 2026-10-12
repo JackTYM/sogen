@@ -3309,19 +3309,6 @@ namespace sogen::fex
             }
         }
 
-        bool host_page_has_writable_slot_apple(const uint64_t host_page_addr) const
-        {
-            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
-            {
-                const auto it = this->page_shadow_apple_.find(page);
-                if (it != this->page_shadow_apple_.end() && (it->second & memory_permission::write) != memory_permission::none)
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         bool range_has_code_write_trap_apple(const uint64_t address, const size_t size) const
         {
             const uint64_t end = host_page_align_up_apple(address + size);
@@ -3341,11 +3328,16 @@ namespace sogen::fex
         void trap_code_writes_apple(const uint64_t address, const size_t size)
         {
             const std::unique_lock lock(this->tables_mutex_);
-            const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            for (uint64_t page = address & ~(page_size - 1); page < address + size; page += page_size)
             {
-                if (this->host_page_has_writable_slot_apple(host_page) &&
-                    this->code_write_trapped_host_pages_apple_.insert(host_page).second)
+                const auto it = this->page_shadow_apple_.find(page);
+                if (it == this->page_shadow_apple_.end() || (it->second & memory_permission::write) == memory_permission::none)
+                {
+                    continue;
+                }
+
+                const uint64_t host_page = host_page_align_down_apple(page);
+                if (this->code_write_trapped_host_pages_apple_.insert(host_page).second)
                 {
                     this->sync_host_page_apple(host_page);
                 }
