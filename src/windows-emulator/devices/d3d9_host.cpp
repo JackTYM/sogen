@@ -2200,7 +2200,9 @@ namespace sogen
 
     size_t d3d9_host::grown_arena_capacity(const size_t capacity, const size_t needed)
     {
-        size_t target = std::max(needed, capacity * 2);
+        // A capacity that is not a power of two (an earlier growth landed on `needed`) must not double past the
+        // cap: it is also the largest host-coherent allocation Metal grants, so anything bigger never succeeds.
+        size_t target = std::max(needed, std::min(capacity * 2, max_batch_arena_bytes));
         if (target < arena_jump_to_cap_bytes)
         {
             return target;
