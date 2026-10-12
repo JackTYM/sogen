@@ -112,6 +112,11 @@ CALL :collect nsi.dll
 CALL :collect ntasn1.dll
 CALL :collect ntdll.dll
 CALL :collect ole32.dll
+CALL :collect oleaccrc.dll
+CALL :collect msctf.dll
+CALL :collect policymanager.dll
+CALL :collect apphelp.dll
+CALL :collect windows.system.launcher.dll
 CALL :collect oleaut32.dll
 CALL :collect opengl32.dll
 CALL :collect pdh.dll
