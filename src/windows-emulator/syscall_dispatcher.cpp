@@ -8,6 +8,10 @@
 
 namespace sogen
 {
+    namespace syscalls
+    {
+        void flush_pending_gdi_batch(const syscall_context& c);
+    }
 
     namespace
     {
@@ -287,6 +291,14 @@ namespace sogen
                 c.emu.reg<uint64_t>(x86_register::rax, STATUS_NOT_SUPPORTED);
                 win_emu.stop();
                 return;
+            }
+
+            // Like KiSystemServiceGdiTebFix, apply the thread's queued GDI batch before any other win32k service runs, so queued
+            // drawing keeps its order relative to the drawing that service performs.
+            const auto& handler_name = entry->second.name;
+            if (handler_name != "NtGdiFlush" && (handler_name.starts_with("NtGdi") || handler_name.starts_with("NtUser")))
+            {
+                syscalls::flush_pending_gdi_batch(c);
             }
 
             entry->second.handler(c);

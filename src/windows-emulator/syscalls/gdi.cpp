@@ -1390,6 +1390,7 @@ namespace sogen
                     offset += static_cast<size_t>(header->size);
                 }
 
+                sync_surface_to_guest_dib(c, *surface);
                 return true;
             }
 
@@ -2279,6 +2280,25 @@ namespace sogen
             }
 
             return TRUE;
+        }
+
+        void flush_pending_gdi_batch(const syscall_context& c)
+        {
+            auto& thread = c.thread();
+            uint32_t batch_offset = 0;
+            if (thread.teb64)
+            {
+                c.emu.read_memory(thread.teb64->value() + offsetof(TEB64, GdiTebBatch), &batch_offset, sizeof(batch_offset));
+            }
+            else if (thread.teb32)
+            {
+                c.emu.read_memory(thread.teb32->value() + offsetof(TEB32, GdiTebBatch), &batch_offset, sizeof(batch_offset));
+            }
+
+            if ((batch_offset & ~k_gdibs_no_rect) != 0)
+            {
+                (void)handle_NtGdiFlush(c);
+            }
         }
 
         uint64_t handle_NtGdiCreateSolidBrush(const syscall_context& c, const uint32_t color, const uint64_t /*unused*/)
