@@ -242,6 +242,7 @@ CALL :collect c_850.nls
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 CALL :collect_file "%WINDIR%\Fonts", segmdl2.ttf, %EMU_FONTDIR%
+CALL :collect_file "%WINDIR%\Fonts", marlett.ttf, %EMU_FONTDIR%
 CALL :collect_file "%WINDIR%\Fonts", SegoeIcons.ttf, %EMU_FONTDIR%
 CALL :collect_file "%WINDIR%\Fonts", segoeui.ttf, %EMU_FONTDIR%
 CALL :collect_file "%WINDIR%\Fonts", segoeuib.ttf, %EMU_FONTDIR%
