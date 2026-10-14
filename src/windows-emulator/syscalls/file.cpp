@@ -266,7 +266,7 @@ namespace sogen
                     return STATUS_BUFFER_OVERFLOW;
                 }
 
-                if (!(f->access_mask & DELETE))
+                if (!(f->granted_access & DELETE))
                 {
                     return STATUS_ACCESS_DENIED;
                 }
@@ -290,7 +290,7 @@ namespace sogen
                 const auto info = c.emu.read_memory<FILE_DISPOSITION_INFORMATION_EX>(file_information);
                 const bool wants_delete = (info.Flags & FILE_DISPOSITION_DELETE) != 0;
 
-                if (wants_delete && !(f->access_mask & DELETE))
+                if (wants_delete && !(f->granted_access & DELETE))
                 {
                     return STATUS_ACCESS_DENIED;
                 }
@@ -1106,7 +1106,7 @@ namespace sogen
                 const emulator_object<FILE_ACCESS_INFORMATION> info{c.emu, address};
                 FILE_ACCESS_INFORMATION i{};
 
-                i.AccessFlags = f->access_mask;
+                i.AccessFlags = f->granted_access;
 
                 info.write(i);
 
@@ -2070,7 +2070,7 @@ namespace sogen
             }
 
             file f{};
-            f.access_mask = desired_access;
+            f.granted_access = desired_access;
             f.file_mode = create_options & FILE_MODE_MASK;
             f.name = std::move(filename);
 

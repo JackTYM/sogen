@@ -112,7 +112,7 @@ namespace sogen
             utils::buffer_serializer buffer{};
             source->serialize_object(buffer);
             description.object_bytes = buffer.get_buffer();
-            description.granted_access = source->access_mask;
+            description.granted_access = source->granted_access;
             return STATUS_SUCCESS;
         }
 

@@ -846,13 +846,27 @@ namespace sogen
         std::u16string open_mode{};
         std::filesystem::path host_path{};
         std::optional<file_enumeration_state> enumeration_state{};
-        ACCESS_MASK access_mask{};
+        ACCESS_MASK granted_access{};
         uint32_t file_mode{}; // FileModeInformation
         uint8_t drive_number{'c' - 'a' + 1};
 
         bool is_file() const
         {
             return this->handle;
+        }
+
+        file duplicate_for_access(const ACCESS_MASK desired_access) const
+        {
+            file copy{};
+            copy.handle = this->handle.share();
+            copy.name = this->name;
+            copy.open_mode = this->open_mode;
+            copy.host_path = this->host_path;
+            copy.enumeration_state = this->enumeration_state;
+            copy.granted_access = desired_access;
+            copy.file_mode = this->file_mode;
+            copy.drive_number = this->drive_number;
+            return copy;
         }
 
         bool is_directory() const
@@ -866,7 +880,7 @@ namespace sogen
             buffer.write(this->open_mode);
             buffer.write(this->host_path.u16string());
             buffer.write_optional(this->enumeration_state);
-            buffer.write(this->access_mask);
+            buffer.write(this->granted_access);
             buffer.write(this->file_mode);
             buffer.write(this->drive_number);
 
@@ -885,7 +899,7 @@ namespace sogen
             buffer.read(this->open_mode);
             this->host_path = buffer.read<std::u16string>();
             buffer.read_optional(this->enumeration_state);
-            buffer.read(this->access_mask);
+            buffer.read(this->granted_access);
             buffer.read(this->file_mode);
             buffer.read(this->drive_number);
 

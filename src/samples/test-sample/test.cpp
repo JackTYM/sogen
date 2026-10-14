@@ -327,6 +327,45 @@ namespace
         return write_ok && query_ok && written == data.size() && attributes.nFileSizeHigh == 0 && attributes.nFileSizeLow == data.size();
     }
 
+    bool test_duplicated_file_handle()
+    {
+        const auto* filename = "duplicated_handle.bin";
+        const auto file =
+            CreateFileA(filename, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+
+        const std::string data = "0123456789";
+        DWORD written{};
+        WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr);
+
+        HANDLE duplicate{};
+        const auto duplicate_ok =
+            DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        if (!duplicate_ok)
+        {
+            CloseHandle(file);
+            DeleteFileA(filename);
+            return false;
+        }
+
+        SetFilePointer(duplicate, 4, nullptr, FILE_BEGIN);
+
+        char c{};
+        DWORD read{};
+        const auto read_ok = ReadFile(file, &c, 1, &read, nullptr);
+
+        CloseHandle(file);
+
+        const auto position_after_close = SetFilePointer(duplicate, 0, nullptr, FILE_CURRENT);
+        CloseHandle(duplicate);
+        DeleteFileA(filename);
+
+        return duplicate != file && read_ok && read == 1 && c == '4' && position_after_close == 5;
+    }
+
     bool test_file_locking()
     {
         const auto filename = std::filesystem::absolute("a.txt");
@@ -1924,6 +1963,7 @@ int main(const int argc, const char* argv[])
 #endif
     RUN_TEST(test_io, "I/O")
     RUN_TEST(test_write_visibility, "Write Visibility")
+    RUN_TEST(test_duplicated_file_handle, "Duplicated File Handle")
     RUN_TEST(test_file_locking, "File Locking")
     RUN_TEST(test_dir_io, "Dir I/O")
     RUN_TEST(test_apis, "APIs")

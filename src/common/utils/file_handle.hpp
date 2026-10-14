@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdio>
+#include <filesystem>
+#include <memory>
+#include <optional>
 #include <type_traits>
 
 #if defined(OS_WINDOWS) && !defined(__MINGW64__)
@@ -55,61 +58,48 @@ namespace sogen
             file_handle() = default;
 
             file_handle(FILE* file)
-                : file_(file)
             {
-            }
-
-            ~file_handle()
-            {
-                this->release();
+                this->operator=(file);
             }
 
             file_handle(const file_handle&) = delete;
             file_handle& operator=(const file_handle&) = delete;
 
-            file_handle(file_handle&& obj) noexcept
-                : file_handle()
-            {
-                this->operator=(std::move(obj));
-            }
+            file_handle(file_handle&&) noexcept = default;
+            file_handle& operator=(file_handle&&) noexcept = default;
 
-            file_handle& operator=(file_handle&& obj) noexcept
+            ~file_handle() = default;
+
+            file_handle& operator=(FILE* file)
             {
-                if (this != &obj)
-                {
-                    this->release();
-                    this->file_ = obj.file_;
-                    this->deferred_rename_ = obj.deferred_rename_;
-                    this->deferred_delete_ = obj.deferred_delete_;
-                    obj.file_ = {};
-                    obj.deferred_rename_ = {};
-                    obj.deferred_delete_ = {};
-                }
+                this->state_ = std::make_shared<open_file>();
+                this->state_->file = file;
 
                 return *this;
             }
 
-            file_handle& operator=(FILE* file) noexcept
+            // A duplicated NT handle refers to the same file object: position and pending rename/delete
+            // are shared, and the host file is closed with the last reference.
+            [[nodiscard]] file_handle share() const
             {
-                this->release();
-                this->file_ = file;
-
-                return *this;
+                file_handle shared{};
+                shared.state_ = this->state_;
+                return shared;
             }
 
             [[nodiscard]] explicit operator bool() const
             {
-                return this->file_;
+                return this->get() != nullptr;
             }
 
             [[nodiscard]] operator FILE*() const
             {
-                return this->file_;
+                return this->get();
             }
 
             [[nodiscard]] int file_descriptor() const
             {
-                return fileno(this->file_);
+                return fileno(this->get());
             }
 
             [[nodiscard]] int64_t size() const
@@ -125,12 +115,12 @@ namespace sogen
 
             bool seek_to(const int64_t position, const int origin = SEEK_SET) const
             {
-                return _fseeki64(this->file_, position, origin) == 0;
+                return _fseeki64(this->get(), position, origin) == 0;
             }
 
             [[nodiscard]] int64_t tell() const
             {
-                return _ftelli64(this->file_);
+                return _ftelli64(this->get());
             }
 
             bool resize(uint64_t size) const
@@ -151,29 +141,29 @@ namespace sogen
 
             void defer_rename(std::filesystem::path oldname, std::filesystem::path newname)
             {
-                deferred_rename_ = rename_information{.old_filepath = std::move(oldname), .new_filepath = std::move(newname)};
+                this->state().deferred_rename = rename_information{.old_filepath = std::move(oldname), .new_filepath = std::move(newname)};
             }
 
             void defer_delete(std::filesystem::path name)
             {
                 if (name == std::filesystem::path{})
                 {
-                    deferred_delete_ = {};
+                    this->state().deferred_delete = {};
                     return;
                 }
 
-                deferred_delete_ = delete_information{.filepath = std::move(name)};
+                this->state().deferred_delete = delete_information{.filepath = std::move(name)};
             }
 
             std::optional<std::filesystem::path> take_deferred_delete()
             {
-                if (!deferred_delete_)
+                if (!this->state_ || !this->state_->deferred_delete)
                 {
                     return std::nullopt;
                 }
 
-                auto path = std::move(deferred_delete_->filepath);
-                deferred_delete_ = {};
+                auto path = std::move(this->state_->deferred_delete->filepath);
+                this->state_->deferred_delete = {};
                 return path;
             }
 
@@ -230,8 +220,8 @@ namespace sogen
             void serialize(utils::buffer_serializer& buffer) const
             {
                 buffer.write(this->tell());
-                buffer.write_optional(this->deferred_rename_);
-                buffer.write_optional(this->deferred_delete_);
+                buffer.write_optional(this->state_ ? this->state_->deferred_rename : std::nullopt);
+                buffer.write_optional(this->state_ ? this->state_->deferred_delete : std::nullopt);
             }
 
             void deserialize(utils::buffer_deserializer& buffer)
@@ -244,14 +234,60 @@ namespace sogen
                     throw std::runtime_error("Failed to seek to serialized file position");
                 }
 
-                buffer.read_optional(this->deferred_rename_);
-                buffer.read_optional(this->deferred_delete_);
+                buffer.read_optional(this->state().deferred_rename);
+                buffer.read_optional(this->state().deferred_delete);
             }
 
           private:
-            FILE* file_{};
-            std::optional<rename_information> deferred_rename_;
-            std::optional<delete_information> deferred_delete_;
+            struct open_file
+            {
+                FILE* file{};
+                std::optional<rename_information> deferred_rename;
+                std::optional<delete_information> deferred_delete;
+
+                open_file() = default;
+                open_file(const open_file&) = delete;
+                open_file& operator=(const open_file&) = delete;
+                open_file(open_file&&) = delete;
+                open_file& operator=(open_file&&) = delete;
+
+                ~open_file()
+                {
+                    if (this->file)
+                    {
+                        (void)fclose(this->file);
+                    }
+
+                    if (this->deferred_rename && !this->deferred_delete)
+                    {
+                        std::error_code ec{};
+                        std::filesystem::rename(this->deferred_rename->old_filepath, this->deferred_rename->new_filepath, ec);
+                    }
+
+                    if (this->deferred_delete && !is_pinned_by_another_process(this->deferred_delete->filepath))
+                    {
+                        std::error_code ec{};
+                        std::filesystem::remove(this->deferred_delete->filepath, ec);
+                    }
+                }
+            };
+
+            std::shared_ptr<open_file> state_{};
+
+            FILE* get() const
+            {
+                return this->state_ ? this->state_->file : nullptr;
+            }
+
+            open_file& state()
+            {
+                if (!this->state_)
+                {
+                    this->state_ = std::make_shared<open_file>();
+                }
+
+                return *this->state_;
+            }
 
             static bool is_pinned_by_another_process(const std::filesystem::path& path)
             {
@@ -274,32 +310,6 @@ namespace sogen
                 (void)path;
                 return false;
 #endif
-            }
-
-            void release()
-            {
-                if (this->file_)
-                {
-                    (void)fclose(this->file_);
-                    this->file_ = {};
-                }
-
-                if (this->deferred_rename_ && !this->deferred_delete_)
-                {
-                    std::error_code ec{};
-                    std::filesystem::rename(this->deferred_rename_->old_filepath, this->deferred_rename_->new_filepath, ec);
-                    this->deferred_rename_ = {};
-                }
-
-                if (this->deferred_delete_)
-                {
-                    if (!is_pinned_by_another_process(this->deferred_delete_->filepath))
-                    {
-                        std::error_code ec{};
-                        std::filesystem::remove(this->deferred_delete_->filepath, ec);
-                    }
-                    this->deferred_delete_ = {};
-                }
             }
         };
     }
