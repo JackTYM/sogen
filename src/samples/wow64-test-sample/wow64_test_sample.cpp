@@ -13,6 +13,8 @@
 //     call site fixes (foreign host VA landing on a picked relocation base).
 //   - VirtualAlloc/VirtualFree churn: stresses the general host-aware allocation path (the size-only
 //     allocate_memory overload) the same fix touches.
+//   - Code rewritten between VirtualProtect calls: a 32-bit thread's protection change reaches the
+//     emulator through the 64-bit wow64 syscall path, and must still drop the 32-bit translations.
 // A full WoW64-under-FEX run (process init through wow64.dll, the 32-bit rebase window, the
 // heaven's-gate trampoline) already exercises the other fixed bug (the wow64-rebase-window blind
 // spot in handle_NtAllocateVirtualMemoryEx) just by getting this far at all.
@@ -84,6 +86,37 @@ namespace
         }
 
         return true;
+    }
+
+    bool rewrite_protected_code()
+    {
+        auto* const code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READ));
+        if (!code)
+        {
+            std::printf("wow64-test: VirtualAlloc(code) failed: %lu\n", GetLastError());
+            return false;
+        }
+
+        bool success = true;
+        for (int i = 0; i < 32 && success; ++i)
+        {
+            DWORD old_protection{};
+            const std::array<uint8_t, 6> mov_eax_imm32_ret{0xB8, static_cast<uint8_t>(i), 0, 0, 0, 0xC3};
+            success = VirtualProtect(code, 0x1000, PAGE_EXECUTE_READWRITE, &old_protection) != FALSE;
+            std::memcpy(code, mov_eax_imm32_ret.data(), mov_eax_imm32_ret.size());
+            success &= VirtualProtect(code, 0x1000, PAGE_EXECUTE_READ, &old_protection) != FALSE;
+            FlushInstructionCache(GetCurrentProcess(), code, mov_eax_imm32_ret.size());
+
+            const int result = reinterpret_cast<int (*)()>(code)();
+            if (result != i)
+            {
+                std::printf("wow64-test: rewritten code returned %d, expected %d\n", result, i);
+                success = false;
+            }
+        }
+
+        VirtualFree(code, 0, MEM_RELEASE);
+        return success;
     }
 
     bool basic_file_roundtrip()
@@ -186,6 +219,12 @@ int main()
         return 1;
     }
     std::printf("wow64-test-sample: VirtualAlloc/VirtualFree churn ok (%d cycles)\n", alloc_cycle_count);
+
+    if (!rewrite_protected_code())
+    {
+        return 1;
+    }
+    std::printf("wow64-test-sample: rewritten protected code ok\n");
 
     if (!basic_file_roundtrip())
     {

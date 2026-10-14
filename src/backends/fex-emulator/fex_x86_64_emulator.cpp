@@ -1341,7 +1341,7 @@ namespace sogen::fex
         void restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src);
         void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
                                       size_t size) const;
-        void invalidate_code_range(uint64_t address, size_t size, bool include_inactive_contexts = false) const;
+        void invalidate_code_range(uint64_t address, size_t size) const;
         uint16_t segment_selector(int index) const;
         void set_segment_selector(int index, const void* value, size_t size);
 
@@ -2717,7 +2717,7 @@ namespace sogen::fex
 #endif
                 this->erase_region_range(address, size);
             }
-            this->invalidate_code_range_locked(address, size, /*include_inactive_contexts=*/true);
+            this->invalidate_code_range_locked(address, size);
         }
 
         void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) override
@@ -3600,14 +3600,14 @@ namespace sogen::fex
         // A WoW64 process's other FEXCore context may hold a translation of the same byte too.
         void invalidate_patched_breakpoint_code(const uint64_t address)
         {
-            this->invalidate_code_range_locked(address, 1, true);
+            this->invalidate_code_range_locked(address, 1);
         }
 
-        void invalidate_code_range_locked(uint64_t address, size_t size, bool include_inactive_contexts = false)
+        void invalidate_code_range_locked(uint64_t address, size_t size)
         {
             for (auto& vcpu : this->vcpus_)
             {
-                vcpu->invalidate_code_range(address, size, include_inactive_contexts);
+                vcpu->invalidate_code_range(address, size);
             }
         }
 
@@ -4702,22 +4702,18 @@ namespace sogen::fex
 #endif
     }
 
-    void fex_vcpu::invalidate_code_range(uint64_t address, size_t size, bool include_inactive_contexts) const
+    void fex_vcpu::invalidate_code_range(uint64_t address, size_t size) const
     {
         if (!this->active_context_)
         {
             return;
         }
 
-        this->invalidate_code_range_in(this->active_context_, this->active_thread_.load(), address, size);
-
-        // A WoW64 process runs two independent FEXCore contexts - invalidating only active_context_
-        // leaves stale translations in the inactive one behind on an unmap.
-        if (include_inactive_contexts && this->emulator_.context32_.get() != nullptr &&
-            this->emulator_.context32_.get() != this->active_context_ && this->thread32_ != nullptr)
-        {
-            this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
-        }
+        // A WoW64 process runs two independent FEXCore contexts, and the one active here is usually not the
+        // one holding the stale code: a 32-bit thread's VirtualProtect/WriteProcessMemory reaches the emulator
+        // through the 64-bit wow64 syscall path.
+        this->invalidate_code_range_in(this->emulator_.context_.get(), this->thread_, address, size);
+        this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
     }
 
 #ifdef __APPLE__
