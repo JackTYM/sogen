@@ -366,6 +366,19 @@ namespace
         return duplicate != file && read_ok && read == 1 && c == '4' && position_after_close == 5;
     }
 
+    bool test_named_pipe_without_server()
+    {
+        const auto name = "\\\\.\\pipe\\sogen-test-no-server-" + std::to_string(GetCurrentProcessId());
+        const auto client = CreateFileA(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (client != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(client);
+            return false;
+        }
+
+        return GetLastError() == ERROR_FILE_NOT_FOUND;
+    }
+
     bool test_file_locking()
     {
         const auto filename = std::filesystem::absolute("a.txt");
@@ -1964,6 +1977,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_io, "I/O")
     RUN_TEST(test_write_visibility, "Write Visibility")
     RUN_TEST(test_duplicated_file_handle, "Duplicated File Handle")
+    RUN_TEST(test_named_pipe_without_server, "Named Pipe Without Server")
     RUN_TEST(test_file_locking, "File Locking")
     RUN_TEST(test_dir_io, "Dir I/O")
     RUN_TEST(test_apis, "APIs")
