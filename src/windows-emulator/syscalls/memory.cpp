@@ -853,6 +853,44 @@ namespace sogen
                                                     emulator_object<MEM_EXTENDED_PARAMETER64>{c.emu.memory()}, 0);
         }
 
+        // The kernel releases any page range inside one private allocation and splits it: the pages after the
+        // range become an allocation of their own. ntdll's heap relies on this to trim an over-sized reservation
+        // down to an aligned segment.
+        NTSTATUS release_part_of_allocation(const syscall_context& c, const emulator_object<uint64_t> base_address,
+                                            const emulator_object<uint64_t> region_size)
+        {
+            const auto requested_base = base_address.read();
+            const auto release_base = page_align_down(requested_base);
+            const auto release_end = page_align_up(requested_base + region_size.read());
+
+            const auto region_info = c.win_emu.memory.get_region_info(release_base);
+            if (!region_info.is_reserved)
+            {
+                return STATUS_MEMORY_NOT_ALLOCATED;
+            }
+
+            if (region_info.kind != memory_region_kind::private_allocation)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            if (release_end > region_info.allocation_base + region_info.allocation_length)
+            {
+                return STATUS_UNABLE_TO_FREE_VM;
+            }
+
+            const auto release_length = static_cast<size_t>(release_end - release_base);
+            if (!c.win_emu.memory.release_memory(release_base, release_length))
+            {
+                return STATUS_UNABLE_TO_FREE_VM;
+            }
+
+            base_address.write(release_base);
+            region_size.write(release_length);
+            trace_vm_accounting("NtFreeVirtualMemory(RELEASE range)", true, release_length);
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtFreeVirtualMemory(const syscall_context& c, const handle process_handle,
                                             const emulator_object<uint64_t> base_address, const emulator_object<uint64_t> bytes_to_allocate,
                                             const uint32_t free_type)
@@ -930,7 +968,7 @@ namespace sogen
             {
                 if (allocation_size)
                 {
-                    return STATUS_INVALID_PARAMETER;
+                    return release_part_of_allocation(c, base_address, bytes_to_allocate);
                 }
 
                 // The base is rounded down to a page; the rounded base must equal the region's base.

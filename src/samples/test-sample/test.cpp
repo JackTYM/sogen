@@ -1745,6 +1745,24 @@ namespace
         return module_path.find(L"\\winsxs\\") != std::wstring::npos;
     }
 
+    bool test_executable_heap_growth()
+    {
+        auto* const heap = HeapCreate(HEAP_CREATE_ENABLE_EXECUTE, 0, 0);
+        if (!heap)
+        {
+            return false;
+        }
+
+        bool success = true;
+        for (int i = 0; i < 1024 && success; ++i)
+        {
+            success = HeapAlloc(heap, 0, 0x1000) != nullptr;
+        }
+
+        HeapDestroy(heap);
+        return success;
+    }
+
     bool test_mmio()
     {
         const auto t0 = timeGetTime();
@@ -2103,6 +2121,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_settimer, "User Timer")
     RUN_TEST(test_private_namespace, "Private Namespace")
     RUN_TEST(test_actctx, "Activation Context")
+    RUN_TEST(test_executable_heap_growth, "Executable Heap Growth")
     RUN_TEST(test_mmio, "MMIO")
     RUN_TEST(test_self_modifying_code, "Self-Modifying Code")
     RUN_TEST(test_gdi, "GDI")
