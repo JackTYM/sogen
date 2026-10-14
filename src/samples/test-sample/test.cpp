@@ -1685,20 +1685,64 @@ namespace
 
     bool test_actctx()
     {
-        ACTCTXA actctx{};
-        actctx.cbSize = sizeof(actctx);
-        actctx.dwFlags = ACTCTX_FLAG_HMODULE_VALID | ACTCTX_FLAG_RESOURCE_NAME_VALID;
-        actctx.hModule = GetModuleHandleW(nullptr);
-        actctx.lpResourceName = CREATEPROCESS_MANIFEST_RESOURCE_ID;
+        constexpr std::string_view manifest =
+            R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+                        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>)";
 
-        auto* ctx = CreateActCtxA(&actctx);
+        const auto manifest_path = std::filesystem::temp_directory_path() / "sogen-test-actctx.manifest";
+        {
+            std::ofstream stream(manifest_path, std::ios::binary);
+            stream.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+        }
+
+        const auto remove_manifest = sogen::utils::finally([&] {
+            std::error_code ec{};
+            std::filesystem::remove(manifest_path, ec);
+        });
+
+        const auto source = manifest_path.wstring();
+        ACTCTXW actctx{};
+        actctx.cbSize = sizeof(actctx);
+        actctx.lpSource = source.c_str();
+
+        auto* ctx = CreateActCtxW(&actctx);
         if (ctx == INVALID_HANDLE_VALUE)
         {
             return false;
         }
 
+        ULONG_PTR cookie{};
+        if (!ActivateActCtx(ctx, &cookie))
+        {
+            ReleaseActCtx(ctx);
+            return false;
+        }
+
+        auto* const common_controls = LoadLibraryW(L"comctl32.dll");
+        std::array<wchar_t, MAX_PATH> path{};
+        const auto length = common_controls ? GetModuleFileNameW(common_controls, path.data(), static_cast<DWORD>(path.size())) : 0;
+
+        DeactivateActCtx(0, cookie);
         ReleaseActCtx(ctx);
-        return true;
+        if (common_controls)
+        {
+            FreeLibrary(common_controls);
+        }
+
+        std::wstring module_path(path.data(), length);
+        for (auto& c : module_path)
+        {
+            c = static_cast<wchar_t>(towlower(c));
+        }
+
+        return module_path.find(L"\\winsxs\\") != std::wstring::npos;
     }
 
     bool test_mmio()
