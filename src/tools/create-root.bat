@@ -234,6 +234,10 @@ CALL :collect_file "%WINDIR%\Globalization\Sorting", SortDefault.nls, %EMU_GLOBA
 
 FOR /D %%V IN ("%WV2_APPDIR%\*") DO CALL :collect_dir "%%V" "%EMU_WEBVIEW2DIR%\%%~nxV"
 
+REM The captured SOFTWARE hive registers .NET Framework 4.x (NDP\v4\Full, mscoree shims), so its
+REM files have to be present too: managed setup UIs (WiX managed bootstrapper hosts) fail without them.
+CALL :collect_dir "%WINDIR%\Microsoft.NET" "%EMU_WINDIR%\microsoft.net"
+
 EXIT /B 0
 
 :normpath
