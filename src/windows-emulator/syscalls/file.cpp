@@ -1949,18 +1949,6 @@ namespace sogen
             const auto connection_id = allocate_pipe_connection_id(c.proc);
             if (!connect_named_pipe_client(c.win_emu, c.proc, filename, connection_id, c.proc.process_id))
             {
-                const auto short_name = pipe_short_name(filename);
-                const auto is_pipe_root = short_name.empty();
-                if (!is_pipe_root && !c.win_emu.is_named_pipe_server_known(short_name))
-                {
-                    c.win_emu.pump_pipe_ipc();
-                }
-
-                if (!is_pipe_root && !c.win_emu.is_named_pipe_server_known(short_name))
-                {
-                    return STATUS_OBJECT_NAME_NOT_FOUND;
-                }
-
                 c.win_emu.broadcast_named_pipe_connect(filename, connection_id, c.proc.process_id);
             }
 
