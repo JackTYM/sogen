@@ -2,6 +2,7 @@
 #include "api_port.hpp"
 
 #include "../win32k_userconnect.hpp"
+#include "../sxs/csr_activation_context.hpp"
 #include "../windows_emulator.hpp"
 
 namespace sogen
@@ -128,6 +129,11 @@ namespace sogen
 
             lpc_request_result handle_request(windows_emulator& win_emu, const lpc_request_context& c) override
             {
+                if (auto result = try_handle_sxs_create_activation_context(win_emu, c))
+                {
+                    return std::move(*result);
+                }
+
                 wow64_userconnect_payload payload{};
                 if (try_read_wow64_payload(win_emu, c, payload))
                 {
