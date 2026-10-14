@@ -238,6 +238,9 @@ REM The captured SOFTWARE hive registers .NET Framework 4.x (NDP\v4\Full, mscore
 REM files have to be present too: managed setup UIs (WiX managed bootstrapper hosts) fail without them.
 CALL :collect_dir "%WINDIR%\Microsoft.NET" "%EMU_WINDIR%\microsoft.net"
 
+REM The .NET 2.0-3.5 runtime (CLR 2) binds framework assemblies from its own global assembly cache.
+FOR %%G IN (GAC GAC_32 GAC_64 GAC_MSIL) DO CALL :collect_dir "%WINDIR%\assembly\%%G" "%EMU_WINDIR%\assembly\%%G"
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0collect-winsxs.ps1" "%EMU_WINDIR%\winsxs"
 
 EXIT /B 0
