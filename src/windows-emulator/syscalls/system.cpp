@@ -826,6 +826,15 @@ namespace sogen
                         info.BootFlags = 0;
                     });
 
+            case SystemLeapSecondInformation:
+                // Leap second support is on by default since Windows 10 1809 / Server 2019
+                // (HKLM\SYSTEM\CurrentControlSet\Control\LeapSecondInformation Enabled=1).
+                return handle_query<SYSTEM_LEAP_SECOND_INFORMATION>(c.emu, system_information, system_information_length, return_length,
+                                                                    [&](SYSTEM_LEAP_SECOND_INFORMATION& info) {
+                                                                        info.Enabled = TRUE;
+                                                                        info.Flags = 0;
+                                                                    });
+
             default:
                 c.win_emu.log.error("Unsupported system info class: 0x%X\n", info_class);
                 c.emu.stop();

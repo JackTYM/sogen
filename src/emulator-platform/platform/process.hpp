@@ -820,6 +820,12 @@ namespace sogen
         ULONG CodeIntegrityOptions;
     } SYSTEM_CODEINTEGRITY_INFORMATION, *PSYSTEM_CODEINTEGRITY_INFORMATION;
 
+    typedef struct _SYSTEM_LEAP_SECOND_INFORMATION
+    {
+        BOOLEAN Enabled;
+        ULONG Flags;
+    } SYSTEM_LEAP_SECOND_INFORMATION, *PSYSTEM_LEAP_SECOND_INFORMATION;
+
     typedef struct _SYSTEM_BOOT_ENVIRONMENT_INFORMATION
     {
         GUID BootIdentifier;
