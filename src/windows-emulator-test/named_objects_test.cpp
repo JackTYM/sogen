@@ -112,6 +112,28 @@ namespace sogen::test
         ASSERT_EQ(first.current_count(), 1u);
     }
 
+    TEST(NamedObjectsTest, PipeServerIsVisibleToOtherProcessesWhileAnInstanceLives)
+    {
+        auto a = create_empty_emulator();
+        auto b = create_empty_emulator();
+        share_arena(a.process, b.process);
+
+        ASSERT_FALSE(named_objects::is_pipe_server_published(b.process, u"Pipe"));
+
+        auto first = named_objects::publish_pipe_server(a.process, u"Pipe");
+        ASSERT_NE(first, nullptr);
+        ASSERT_TRUE(named_objects::is_pipe_server_published(b.process, u"pipe"));
+
+        auto second = named_objects::publish_pipe_server(b.process, u"PIPE");
+        ASSERT_NE(second, nullptr);
+        ASSERT_EQ(second->index(), first->index());
+
+        first.reset();
+        ASSERT_TRUE(named_objects::is_pipe_server_published(a.process, u"Pipe"));
+
+        second.reset();
+        ASSERT_FALSE(named_objects::is_pipe_server_published(a.process, u"Pipe"));
+    }
 #if !defined(_WIN32) && !defined(OS_EMSCRIPTEN)
     TEST(NamedObjectsTest, NamedSectionSharesItsPagesByName)
     {

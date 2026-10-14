@@ -262,6 +262,7 @@ namespace sogen
             buffer.read(pipe->outbound_quota);
             buffer.read(pipe->default_timeout.QuadPart);
             buffer.read(pipe->client_connected);
+            pipe->publish_server_name(process);
 
             std::vector<std::string> queued{};
             buffer.read_vector(queued);

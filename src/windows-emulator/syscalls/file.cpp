@@ -1949,6 +1949,12 @@ namespace sogen
             const auto connection_id = allocate_pipe_connection_id(c.proc);
             if (!connect_named_pipe_client(c.win_emu, c.proc, filename, connection_id, c.proc.process_id))
             {
+                const auto short_name = pipe_short_name(filename);
+                if (!short_name.empty() && !c.win_emu.is_named_pipe_server_known(short_name))
+                {
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+
                 c.win_emu.broadcast_named_pipe_connect(filename, connection_id, c.proc.process_id);
             }
 
@@ -2508,6 +2514,7 @@ namespace sogen
                 pipe_device->outbound_quota = outbound_quota;
                 pipe_device->default_timeout = default_timeout.read();
                 pipe_device->is_synchronous_handle = (create_options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
+                pipe_device->publish_server_name(c.proc);
             }
             else
             {

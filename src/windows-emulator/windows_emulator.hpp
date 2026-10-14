@@ -610,7 +610,7 @@ namespace sogen
 
         // True once a named pipe server instance with this short name is known to exist, whether
         // created in this process or a sibling one (see register_named_pipe_server).
-        bool is_named_pipe_server_known(std::u16string_view short_name) const;
+        bool is_named_pipe_server_known(std::u16string_view short_name);
 
         // Registers event as a wake target for register_named_pipe_server(short_name), for a thread
         // parked in FSCTL_PIPE_WAIT that found no known server yet.

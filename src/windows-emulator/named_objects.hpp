@@ -34,5 +34,11 @@ namespace sogen
         static bool is_shareable_named_section(const section_object& section);
         static NTSTATUS publish_section(process_context& process, section_object& section);
         static NTSTATUS open_section(process_context& process, std::u16string_view name, section_object& section);
+
+        // A named pipe exists for as long as any of its server instances does, in whichever process of the
+        // tree. Each server instance holds the returned reference; a client open in any other process can
+        // then tell synchronously whether the pipe exists, before the server's announcement reaches it.
+        static std::unique_ptr<kernel_slot> publish_pipe_server(process_context& process, std::u16string_view short_name);
+        static bool is_pipe_server_published(process_context& process, std::u16string_view short_name);
     };
 }

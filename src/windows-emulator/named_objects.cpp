@@ -58,6 +58,11 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        std::u16string pipe_object_name(const std::u16string_view short_name)
+        {
+            return canonical_object_name(u"\\Device\\NamedPipe\\" + std::u16string(short_name));
+        }
+
         void bind_found_slot(const std::shared_ptr<kernel_arena>& arena, const uint32_t slot, kernel_state& state)
         {
             // find_named/register_named already took a reference for this caller; adopt() takes its own.
@@ -192,5 +197,52 @@ namespace sogen
             section.name = std::u16string(name);
         }
         return status;
+    }
+
+    std::unique_ptr<kernel_slot> named_objects::publish_pipe_server(process_context& process, const std::u16string_view short_name)
+    {
+        if (short_name.empty() || !process.ensure_shared_arena())
+        {
+            return nullptr;
+        }
+
+        const auto& arena = process.shared_arena;
+        const auto slot = arena->allocate();
+        if (!slot)
+        {
+            return nullptr;
+        }
+
+        const auto existing = arena->register_named(pipe_object_name(short_name), kind::named_pipe, *slot);
+        if (!existing)
+        {
+            return std::make_unique<kernel_slot>(arena, *slot);
+        }
+
+        arena->release(*slot);
+        if (existing->kind != kind::named_pipe)
+        {
+            arena->release(existing->slot);
+            return nullptr;
+        }
+
+        return std::make_unique<kernel_slot>(arena, existing->slot);
+    }
+
+    bool named_objects::is_pipe_server_published(process_context& process, const std::u16string_view short_name)
+    {
+        if (short_name.empty() || !process.shared_arena)
+        {
+            return false;
+        }
+
+        const auto found = process.shared_arena->find_named(pipe_object_name(short_name));
+        if (!found)
+        {
+            return false;
+        }
+
+        process.shared_arena->release(found->slot);
+        return found->kind == kind::named_pipe;
     }
 }

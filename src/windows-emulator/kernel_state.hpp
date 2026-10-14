@@ -32,6 +32,7 @@ namespace sogen
             mutant = 2,
             semaphore = 3,
             section = 4,
+            named_pipe = 5,
         };
 
         struct named_object

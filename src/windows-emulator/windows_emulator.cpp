@@ -1564,9 +1564,9 @@ namespace sogen
         this->pending_pipe_waits_.erase(begin, end);
     }
 
-    bool windows_emulator::is_named_pipe_server_known(const std::u16string_view short_name) const
+    bool windows_emulator::is_named_pipe_server_known(const std::u16string_view short_name)
     {
-        return this->known_named_pipe_servers_.contains(short_name);
+        return this->known_named_pipe_servers_.contains(short_name) || named_objects::is_pipe_server_published(this->process, short_name);
     }
 
     void windows_emulator::register_pipe_wait(const std::u16string_view short_name, const handle event)

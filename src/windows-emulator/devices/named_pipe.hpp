@@ -1,6 +1,7 @@
 #pragma once
 #include "../io_device.hpp"
 #include "../process_context.hpp"
+#include "../named_objects.hpp"
 #include <utils/string.hpp>
 
 namespace sogen
@@ -73,6 +74,7 @@ namespace sogen
         // NtCreateFile connect (handle_named_pipe_create) creates a named_pipe object too, but it isn't a
         // server instance -- see windows_emulator::register_named_pipe_server, which this flag gates.
         bool is_server_instance{false};
+        std::unique_ptr<kernel_slot> published_server_name{};
 
         // Identifies the client/server connection this end belongs to, the way real NPFS pairs one client
         // handle with one server instance. A client end gets a fresh id when it opens the pipe (copies made
@@ -443,6 +445,14 @@ namespace sogen
 
         void deserialize_object(utils::buffer_deserializer&) override
         {
+        }
+
+        void publish_server_name(process_context& process)
+        {
+            if (this->is_server_instance && !this->published_server_name)
+            {
+                this->published_server_name = named_objects::publish_pipe_server(process, pipe_short_name(this->name));
+            }
         }
 
       private:
