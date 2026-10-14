@@ -1797,6 +1797,23 @@ namespace
         return OemToCharA(in_place, in_place) && strcmp(in_place, ansi) == 0;
     }
 
+    bool test_critical_section_timeout()
+    {
+        constexpr int64_t thirty_days = -2592000LL * 10000000LL;
+
+#ifdef _WIN64
+        const auto* peb = reinterpret_cast<const uint8_t*>(__readgsqword(0x60));
+        constexpr size_t timeout_offset = 0xC0;
+#else
+        const auto* peb = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(__readfsdword(0x30)));
+        constexpr size_t timeout_offset = 0x70;
+#endif
+
+        int64_t timeout{};
+        memcpy(&timeout, peb + timeout_offset, sizeof(timeout));
+        return timeout == thirty_days;
+    }
+
     bool test_crypt_protect()
     {
         auto roundtrip = [](const std::vector<BYTE>& plain, const std::vector<BYTE>& entropy, const LPCWSTR descr) {
@@ -1944,6 +1961,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_gdi, "GDI")
     RUN_TEST(test_oem_conversion, "OEM Conversion")
     RUN_TEST(test_crypt_protect, "CryptProtect")
+    RUN_TEST(test_critical_section_timeout, "Critical Section Timeout")
 
     return valid ? 0 : 1;
 }

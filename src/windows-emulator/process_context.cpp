@@ -17,6 +17,9 @@ namespace sogen
 
     namespace
     {
+        // Session Manager\CriticalSectionTimeout defaults to 30 days and the kernel copies it into the PEB. ntdll turns any
+        // value above one hour into infinite contended critical section waits; zero makes every such wait time out at once.
+        constexpr uint64_t critical_section_timeout = static_cast<uint64_t>(-2592000LL * 10000000LL);
 
         std::vector<uint8_t> sid_string_to_bytes(const std::string& sid_string)
         {
@@ -598,6 +601,7 @@ namespace sogen
             p.NumberOfHeaps = 0x00000000;
             p.MaximumNumberOfHeaps = 0x00000010;
             p.NumberOfProcessors = fake_env.number_of_processors;
+            p.CriticalSectionTimeout.QuadPart = critical_section_timeout;
             p.ImageSubsystemMajorVersion = 6;
 
             // TODO: p.SessionId = 1;
@@ -709,6 +713,7 @@ namespace sogen
                 p32.NumberOfHeaps = 0;
                 p32.MaximumNumberOfHeaps = 0x10;
                 p32.NumberOfProcessors = fake_env.number_of_processors;
+                p32.CriticalSectionTimeout.QuadPart = critical_section_timeout;
                 p32.ImageSubsystemMajorVersion = 6;
 
                 // TODO: p32.SessionId = 1;
