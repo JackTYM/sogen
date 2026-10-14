@@ -57,8 +57,7 @@ namespace sogen
             constexpr uint32_t k_logfontw_size = 0x5C;
             constexpr uint32_t k_logbrush_size = 0x0C;
             constexpr uint32_t k_logpen_size = 0x10;
-            constexpr uint32_t k_bitmap_size = 0x20;
-            constexpr uint32_t k_dibsection_size = 0x68;
+            constexpr uint32_t k_bitmap_size = 0x18;
 
             constexpr uint32_t k_textmetric_size = 0x3C;
             constexpr uint32_t k_default_font_height = 16;
@@ -2243,36 +2242,6 @@ namespace sogen
             return static_cast<LONG>(to_copy);
         }
 
-        LONG handle_NtGdiSetBitmapBits(const syscall_context& c, const handle bitmap, const ULONG cb_buffer, const emulator_pointer bits)
-        {
-            if (bits == 0 || cb_buffer == 0)
-            {
-                return 0;
-            }
-
-            const auto it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(bitmap.bits));
-            if (it == c.proc.gdi_bitmap_surfaces.end())
-            {
-                return 0;
-            }
-
-            auto& surface = it->second;
-            if (surface.guest_bits != 0)
-            {
-                const auto total = static_cast<size_t>(surface.guest_stride) * surface.height;
-                const auto to_copy = std::min(static_cast<size_t>(cb_buffer), total);
-                std::vector<uint8_t> data(to_copy);
-                c.emu.read_memory(bits, data.data(), data.size());
-                c.emu.write_memory(surface.guest_bits, data.data(), data.size());
-                return static_cast<LONG>(to_copy);
-            }
-
-            const auto total = surface.pixels.size() * sizeof(uint32_t);
-            const auto to_copy = std::min(static_cast<size_t>(cb_buffer), total);
-            c.emu.read_memory(bits, surface.pixels.data(), to_copy);
-            return static_cast<LONG>(to_copy);
-        }
-
         int handle_NtGdiSetDIBitsToDeviceInternal(const syscall_context& c, const hdc dc, const int x_dest, const int y_dest,
                                                   const uint32_t width, const uint32_t height, const int x_src, const int y_src,
                                                   const uint32_t /*start_scan*/, const uint32_t scan_lines, const emulator_pointer bits,
@@ -2662,22 +2631,17 @@ namespace sogen
             return 0;
         }
 
-        BOOL handle_NtGdiGetDCDword(const syscall_context& c, const hdc dc, const uint32_t index, const emulator_pointer result)
+        BOOL handle_NtGdiGetDCDword(const syscall_context& c, const hdc dc, const uint32_t /*index*/, const emulator_pointer result)
         {
-            constexpr uint32_t gdi_get_is_mem_dc = 7; // GETDCDWORD::GdiGetIsMemDc
-
             if (dc == 0 || result == 0)
             {
                 return FALSE;
             }
 
+            // gdi32 only falls back to this syscall for DC dwords it does not cache client-side
+            // (e.g. GdiGetIsMemDc). 0 is the correct default for the control paint path: the paint
+            // DC is a real (non-memory) DC, so "is memory DC" is false.
             uint32_t value = 0;
-            if (index == gdi_get_is_mem_dc)
-            {
-                const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
-                value = it != c.proc.gdi_dc_states.end() && it->second.is_memory_dc ? 1 : 0;
-            }
-
             c.emu.write_memory(result, &value, sizeof(value));
             return TRUE;
         }
@@ -2780,12 +2744,7 @@ namespace sogen
                 return 0;
             }
 
-            const auto bitmap_it =
-                entry.Type == k_gdi_bitmap_type ? c.proc.gdi_bitmap_surfaces.find(handle_value) : c.proc.gdi_bitmap_surfaces.end();
-            const auto* surface = bitmap_it != c.proc.gdi_bitmap_surfaces.end() ? &bitmap_it->second : nullptr;
-            const bool is_dib_section = surface && surface->guest_bits != 0;
-
-            uint32_t object_size = get_gdi_object_size(entry.Type);
+            const uint32_t object_size = get_gdi_object_size(entry.Type);
             if (object_size == 0)
             {
                 return 0;
@@ -2796,11 +2755,6 @@ namespace sogen
                 return object_size;
             }
 
-            if (is_dib_section && size >= k_dibsection_size)
-            {
-                object_size = k_dibsection_size;
-            }
-
             if (size < object_size)
             {
                 return 0;
@@ -2808,35 +2762,29 @@ namespace sogen
 
             std::vector<uint8_t> object_data(object_size, 0);
 
-            if (surface)
+            if (entry.Type == k_gdi_bitmap_type)
             {
-                const auto bpp = static_cast<uint16_t>(surface->guest_bpp != 0 ? surface->guest_bpp : 32u);
-                const auto width_bytes = surface->guest_stride != 0
-                                             ? surface->guest_stride
-                                             : static_cast<uint32_t>(((static_cast<uint64_t>(surface->width) * bpp + 31u) / 32u) * 4u);
-
-                // The 64-bit BITMAP and DIBSECTION layouts: WoW64 callers get them converted by wow64win.
-                const utils::safe_buffer_accessor<uint8_t> bitmap{object_data};
-                bitmap.as<int32_t>(4).set(static_cast<int32_t>(surface->width));
-                bitmap.as<int32_t>(8).set(static_cast<int32_t>(surface->height));
-                bitmap.as<int32_t>(12).set(static_cast<int32_t>(width_bytes));
-                bitmap.as<uint16_t>(16).set(1);
-                bitmap.as<uint16_t>(18).set(bpp);
-                bitmap.as<uint64_t>(24).set(surface->guest_bits);
-
-                if (object_size == k_dibsection_size)
+                const auto bmp_it = c.proc.gdi_bitmap_surfaces.find(handle_value);
+                if (bmp_it != c.proc.gdi_bitmap_surfaces.end())
                 {
-                    const auto height = static_cast<int32_t>(surface->height);
-                    bitmap.as<uint32_t>(32).set(sizeof(EMU_BITMAPINFOHEADER));
-                    bitmap.as<int32_t>(36).set(static_cast<int32_t>(surface->width));
-                    bitmap.as<int32_t>(40).set(surface->guest_top_down ? -height : height);
-                    bitmap.as<uint16_t>(44).set(1);
-                    bitmap.as<uint16_t>(46).set(bpp);
-                    bitmap.as<uint32_t>(52).set(width_bytes * surface->height);
+                    const auto& surface = bmp_it->second;
+                    const auto bpp = static_cast<uint16_t>(surface.guest_bpp != 0 ? surface.guest_bpp : 32u);
+                    const auto width_bytes = surface.guest_stride != 0
+                                                 ? surface.guest_stride
+                                                 : static_cast<uint32_t>(((static_cast<uint64_t>(surface.width) * bpp + 31u) / 32u) * 4u);
+
+                    // BITMAP (32-bit layout): bmType@0, bmWidth@4, bmHeight@8, bmWidthBytes@12,
+                    // bmPlanes@16 (WORD), bmBitsPixel@18 (WORD), bmBits@20 (PVOID32).
+                    const utils::safe_buffer_accessor<uint8_t> bitmap{object_data};
+                    bitmap.as<int32_t>(4).set(static_cast<int32_t>(surface.width));
+                    bitmap.as<int32_t>(8).set(static_cast<int32_t>(surface.height));
+                    bitmap.as<int32_t>(12).set(static_cast<int32_t>(width_bytes));
+                    bitmap.as<uint16_t>(16).set(1);
+                    bitmap.as<uint16_t>(18).set(bpp);
+                    bitmap.as<uint32_t>(20).set(static_cast<uint32_t>(surface.guest_bits));
                 }
             }
-
-            if (entry.Type == k_gdi_font_type)
+            else if (entry.Type == k_gdi_font_type)
             {
                 const auto font_it = c.proc.gdi_font_descriptors.find(handle_value);
                 if (font_it != c.proc.gdi_font_descriptors.end() && font_it->second.logfont_bytes.size() == object_data.size())
@@ -4472,26 +4420,9 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, const hdc dc, const uint32_t object_type)
+        NTSTATUS handle_NtGdiGetDCObject()
         {
-            constexpr uint32_t lo_bitmap_type = 0x50000; // GDILoObjType_LO_BITMAP_TYPE
-            constexpr uint32_t lo_font_type = 0xA0000;   // GDILoObjType_LO_FONT_TYPE
-
-            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
-            if (it == c.proc.gdi_dc_states.end())
-            {
-                return 0;
-            }
-
-            switch (object_type)
-            {
-            case lo_bitmap_type:
-                return it->second.selected_bitmap;
-            case lo_font_type:
-                return it->second.selected_font;
-            default:
-                return 0;
-            }
+            return STATUS_SUCCESS;
         }
 
         BOOL handle_NtGdiUnrealizeObject(const syscall_context& c, const handle h)
