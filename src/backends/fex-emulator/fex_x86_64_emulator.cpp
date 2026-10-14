@@ -2347,8 +2347,10 @@ namespace sogen::fex
                 }
 
 #ifdef __APPLE__
+                const auto reused_host_pages = this->host_pages_shared_with_mapped_slots_apple(address, size);
                 this->set_shadow_range_apple(address, size, permissions);
                 this->sync_host_pages_covering_apple(address, size);
+                this->zero_guest_range_in_host_pages_apple(address, size, reused_host_pages);
 #else
                 void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
                                       MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -3297,6 +3299,44 @@ namespace sogen::fex
             if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
+            }
+        }
+
+        // Host pages covering [address, address + size) that also hold a mapped guest page outside that range.
+        std::vector<uint64_t> host_pages_shared_with_mapped_slots_apple(const uint64_t address, const size_t size) const
+        {
+            std::vector<uint64_t> host_pages{};
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                for (uint64_t page = host_page; page < host_page + host_page_size_apple; page += page_size)
+                {
+                    if ((page < address || page >= address + size) && this->page_shadow_apple_.contains(page))
+                    {
+                        host_pages.push_back(host_page);
+                        break;
+                    }
+                }
+            }
+            return host_pages;
+        }
+
+        // A host page outlives guest pages unmapped from it while its other guest pages stay mapped, so a guest
+        // page mapped into it again would still show its old contents. Windows hands out committed pages
+        // zero-filled (the CLR's loader heaps rely on it after decommitting and recommitting).
+        void zero_guest_range_in_host_pages_apple(const uint64_t address, const size_t size, const std::vector<uint64_t>& host_pages)
+        {
+            for (const auto host_page : host_pages)
+            {
+                const auto start = std::max(address, host_page);
+                const auto end = std::min(address + size, host_page + host_page_size_apple);
+                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
+                if (::mprotect(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple, PROT_READ | PROT_WRITE) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to make reused guest memory writable");
+                }
+                std::memset(reinterpret_cast<void*>(start + rebase), 0, static_cast<size_t>(end - start));
+                this->sync_host_page_apple(host_page);
             }
         }
 

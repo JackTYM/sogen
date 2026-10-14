@@ -1763,6 +1763,28 @@ namespace
         return success;
     }
 
+    bool test_recommitted_memory_is_zeroed()
+    {
+        constexpr size_t size = 0x10000;
+        auto* const memory = static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!memory)
+        {
+            return false;
+        }
+
+        memset(memory, 0xAB, size);
+
+        auto* const page = memory + 0x2000;
+        bool zeroed = VirtualFree(page, 0x1000, MEM_DECOMMIT) && VirtualAlloc(page, 0x1000, MEM_COMMIT, PAGE_READWRITE) == page;
+        for (size_t i = 0; zeroed && i < 0x1000; ++i)
+        {
+            zeroed = page[i] == 0;
+        }
+
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return zeroed;
+    }
+
     bool test_mmio()
     {
         const auto t0 = timeGetTime();
@@ -2122,6 +2144,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_private_namespace, "Private Namespace")
     RUN_TEST(test_actctx, "Activation Context")
     RUN_TEST(test_executable_heap_growth, "Executable Heap Growth")
+    RUN_TEST(test_recommitted_memory_is_zeroed, "Recommitted Memory Is Zeroed")
     RUN_TEST(test_mmio, "MMIO")
     RUN_TEST(test_self_modifying_code, "Self-Modifying Code")
     RUN_TEST(test_gdi, "GDI")
