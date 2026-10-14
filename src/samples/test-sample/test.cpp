@@ -1799,6 +1799,55 @@ namespace
         return true;
     }
 
+    bool test_dib_section()
+    {
+        const auto dc = CreateCompatibleDC(nullptr);
+        if (!dc)
+        {
+            return false;
+        }
+
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(info.bmiHeader);
+        info.bmiHeader.biWidth = 7;
+        info.bmiHeader.biHeight = -5;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+
+        void* bits{};
+        const auto dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib)
+        {
+            DeleteDC(dc);
+            return false;
+        }
+
+        const auto previous = SelectObject(dc, dib);
+
+        DIBSECTION section{};
+        const auto section_size = GetObjectW(dib, sizeof(section), &section);
+
+        BITMAP bitmap{};
+        const auto bitmap_size = GetObjectW(dib, sizeof(bitmap), &bitmap);
+
+        const bool is_memory_dc = GetObjectType(dc) == OBJ_MEMDC;
+        const bool selected = GetCurrentObject(dc, OBJ_BITMAP) == dib;
+
+        std::array<uint32_t, 35> pixels{};
+        pixels.fill(0x11223344);
+        const auto set_bytes = SetBitmapBits(dib, sizeof(pixels), pixels.data());
+        const bool bits_written = static_cast<const uint32_t*>(bits)[34] == 0x11223344;
+
+        SelectObject(dc, previous);
+        DeleteObject(dib);
+        DeleteDC(dc);
+
+        return section_size == sizeof(section) && section.dsBm.bmBits == bits && section.dsBm.bmWidth == 7 && section.dsBm.bmHeight == 5 &&
+               section.dsBm.bmBitsPixel == 32 && section.dsBmih.biWidth == 7 && section.dsBmih.biHeight == -5 &&
+               bitmap_size == sizeof(bitmap) && bitmap.bmBits == bits && is_memory_dc && selected && set_bytes == sizeof(pixels) &&
+               bits_written;
+    }
+
     bool test_gdi()
     {
         const wchar_t* cursor_path = L"C:\\Windows\\Cursors\\aero_arrow.cur";
@@ -2013,6 +2062,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_mmio, "MMIO")
     RUN_TEST(test_self_modifying_code, "Self-Modifying Code")
     RUN_TEST(test_gdi, "GDI")
+    RUN_TEST(test_dib_section, "DIB Section")
     RUN_TEST(test_oem_conversion, "OEM Conversion")
     RUN_TEST(test_crypt_protect, "CryptProtect")
     RUN_TEST(test_critical_section_timeout, "Critical Section Timeout")
