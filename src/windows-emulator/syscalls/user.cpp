@@ -6827,9 +6827,93 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtUserGetObjectInformation()
+        BOOL handle_NtUserGetObjectInformation(const syscall_context& c, const handle object, const int index, const uint64_t information,
+                                               const ULONG length, const emulator_object<ULONG> length_needed)
         {
-            return FALSE;
+            constexpr int uoi_flags = 1;
+            constexpr int uoi_name = 2;
+            constexpr int uoi_type = 3;
+            constexpr int uoi_user_sid = 4;
+            constexpr int uoi_heapsize = 5;
+            constexpr int uoi_io = 6;
+            constexpr uint32_t wsf_visible = 1;
+            constexpr uint32_t interactive_desktop_heap_kb = 20480;
+            constexpr uint32_t error_invalid_handle = 6;
+            constexpr uint32_t error_invalid_parameter = 87;
+            constexpr uint32_t error_insufficient_buffer = 122;
+
+            std::u16string name{};
+            bool is_window_station = false;
+            if (object.bits == handle_NtUserGetProcessWindowStation())
+            {
+                name = u"WinSta0";
+                is_window_station = true;
+            }
+            else if (const auto* station = c.proc.window_stations.get(object))
+            {
+                name = station->name;
+                is_window_station = true;
+            }
+            else if (const auto* desk = c.proc.desktops.get(object))
+            {
+                name = desk->name;
+            }
+            else
+            {
+                set_guest_last_error(c, error_invalid_handle);
+                return FALSE;
+            }
+
+            std::vector<std::byte> value{};
+            const auto append = [&](const auto& data) {
+                const auto* bytes = reinterpret_cast<const std::byte*>(&data);
+                value.insert(value.end(), bytes, bytes + sizeof(data));
+            };
+            const auto append_string = [&](const std::u16string_view text) {
+                const auto* bytes = reinterpret_cast<const std::byte*>(text.data());
+                value.insert(value.end(), bytes, bytes + text.size() * sizeof(char16_t));
+                append(char16_t{0});
+            };
+
+            switch (index)
+            {
+            case uoi_flags:
+                append(uint32_t{0});
+                append(uint32_t{0});
+                append(is_window_station ? wsf_visible : uint32_t{0});
+                break;
+            case uoi_name:
+                append_string(name);
+                break;
+            case uoi_type:
+                append_string(is_window_station ? u"WindowStation" : u"Desktop");
+                break;
+            case uoi_user_sid:
+                break;
+            case uoi_heapsize:
+                append(interactive_desktop_heap_kb);
+                break;
+            case uoi_io:
+                append(uint32_t{TRUE});
+                break;
+            default:
+                set_guest_last_error(c, error_invalid_parameter);
+                return FALSE;
+            }
+
+            length_needed.write_if_valid(static_cast<ULONG>(value.size()));
+            if (length < value.size())
+            {
+                set_guest_last_error(c, error_insufficient_buffer);
+                return FALSE;
+            }
+
+            if (!value.empty())
+            {
+                c.emu.write_memory(information, value.data(), value.size());
+            }
+
+            return TRUE;
         }
 
         uint64_t handle_NtUserQueryWindow(const syscall_context& c, const hwnd window_handle, const uint32_t query_type)
