@@ -31,6 +31,19 @@ namespace sogen
             constexpr ACCESS_MASK PROCESS_SET_INFORMATION = 0x0200;
         }
 
+        NTSTATUS handle_NtImpersonateAnonymousToken(const syscall_context& c, const handle thread_handle)
+        {
+            const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (!thread)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            // Thread impersonation is not modelled (see ThreadImpersonationToken below): the thread keeps acting
+            // with the process token, exactly as it does after SetThreadToken.
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, const handle thread_handle, const THREADINFOCLASS info_class,
                                                const uint64_t thread_information, const uint32_t thread_information_length)
         {

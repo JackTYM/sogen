@@ -404,6 +404,7 @@ namespace sogen
         NTSTATUS handle_NtVdmControl(const syscall_context& c, uint32_t service_class, uint64_t service_data);
 
         // syscalls/thread.cpp:
+        NTSTATUS handle_NtImpersonateAnonymousToken(const syscall_context& c, handle thread_handle);
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, handle thread_handle, THREADINFOCLASS info_class,
                                                uint64_t thread_information, uint32_t thread_information_length);
 
@@ -1514,6 +1515,7 @@ namespace sogen
     } while (0)
 
         add_handler(NtSetInformationThread);
+        add_handler(NtImpersonateAnonymousToken);
         add_handler(NtSetThreadExecutionState);
         add_handler(NtSetEvent);
         add_handler(NtPulseEvent);
