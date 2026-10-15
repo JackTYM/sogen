@@ -159,6 +159,8 @@ namespace sogen::alpc
             notify_completion_port(win_emu, p);
         }
 
+        void route(windows_emulator& win_emu, const addressed_transport& t);
+
         bool trace_enabled()
         {
             static const bool enabled = std::getenv("SOGEN_TRACE_ALPC") != nullptr;
@@ -177,7 +179,7 @@ namespace sogen::alpc
                                  static_cast<unsigned long long>(t.connection_id), t.to_server, payload.sender_message_id, payload.type,
                                  payload.data.size());
                 std::string hex{};
-                for (size_t i = 0; i < std::min<size_t>(payload.data.size(), 96); ++i)
+                for (size_t i = 0; i < std::min<size_t>(payload.data.size(), 200); ++i)
                 {
                     char b[4];
                     snprintf(b, sizeof(b), "%02x", payload.data[i]);
@@ -219,6 +221,30 @@ namespace sogen::alpc
                     return false;
                 }
 
+                if (const auto host = s.ports.at(*connection_port_id).host)
+                {
+                    port p{};
+                    p.kind = port_kind::server_communication;
+                    p.name = t.port_name;
+                    p.connection_id = t.connection_id;
+                    p.connection_port_id = *connection_port_id;
+
+                    const auto id = new_port_id(s);
+                    s.ports.emplace(id, std::move(p));
+                    s.server_ports[t.connection_id] = id;
+
+                    host->on_connect(win_emu, t.connection_id, payload.sender_process_id);
+
+                    transport reply{};
+                    reply.kind = transport_kind::connect_reply;
+                    reply.sender_message_id = payload.sender_message_id;
+                    reply.sender_process_id = win_emu.process.process_id;
+                    reply.status = STATUS_SUCCESS;
+                    reply.data = payload.data;
+                    route(win_emu, {.port_name = t.port_name, .connection_id = t.connection_id, .to_server = false, .payload = reply});
+                    return true;
+                }
+
                 const auto id = new_message_id(s);
                 s.pending[id] = pending_message{
                     .connection_id = t.connection_id,
@@ -257,6 +283,28 @@ namespace sogen::alpc
                 if (endpoint->disconnected)
                 {
                     return true;
+                }
+
+                if (t.to_server)
+                {
+                    const auto* listener = find_port(s, endpoint->connection_port_id);
+                    if (listener && listener->host)
+                    {
+                        const auto host = listener->host;
+                        host->on_message(win_emu, host_call{
+                                                      .port_name = t.port_name,
+                                                      .connection_id = t.connection_id,
+                                                      .sender_message_id = payload.sender_message_id,
+                                                      .sender_process_id = payload.sender_process_id,
+                                                      .sender_thread_id = payload.sender_thread_id,
+                                                      .type = payload.type,
+                                                      .callback_id = payload.callback_id,
+                                                      .expects_reply = payload.expects_reply,
+                                                      .data = payload.data,
+                                                      .view = payload.view,
+                                                  });
+                        return true;
+                    }
                 }
 
                 const auto id = new_message_id(s);
@@ -315,6 +363,16 @@ namespace sogen::alpc
 
                 if (t.to_server)
                 {
+                    const auto* listener = find_port(s, endpoint->connection_port_id);
+                    if (listener && listener->host)
+                    {
+                        const auto host = listener->host;
+                        s.server_ports.erase(t.connection_id);
+                        s.ports.erase(endpoint_id);
+                        host->on_disconnect(win_emu, t.connection_id);
+                        return true;
+                    }
+
                     if (auto* connection_port = find_port(s, endpoint->connection_port_id))
                     {
                         auto m = make_message(new_message_id(s), endpoint_id);
@@ -1002,6 +1060,7 @@ namespace sogen::alpc
 
         if (info_class != basic_information)
         {
+            c.win_emu.log.warn("NtAlpcQueryInformation: unsupported class %u\n", info_class);
             return STATUS_INVALID_INFO_CLASS;
         }
 
@@ -1181,5 +1240,60 @@ namespace sogen::alpc
                                               .to_server = message.to_server,
                                               .payload = transport::decode(message.data),
                                           });
+    }
+
+    bool create_host_port(windows_emulator& win_emu, std::u16string name, std::shared_ptr<host_server> server)
+    {
+        auto& proc = win_emu.process;
+        auto& s = proc.alpc;
+        if (find_connection_port(s, name))
+        {
+            return false;
+        }
+
+        auto* arena = proc.ensure_shared_arena();
+        if (!arena)
+        {
+            return false;
+        }
+
+        const auto slot = arena->allocate();
+        if (!slot)
+        {
+            return false;
+        }
+
+        const auto existing = arena->register_named(name, kernel_arena::named_object_kind::alpc_port, *slot);
+        if (existing)
+        {
+            arena->release(*slot);
+            arena->release(existing->slot);
+            return false;
+        }
+
+        arena->words(*slot)[0].store(proc.process_id);
+
+        port p{};
+        p.kind = port_kind::connection;
+        p.name = std::move(name);
+        p.max_message_length = default_max_message_length;
+        p.name_slot = std::make_shared<kernel_slot>(proc.shared_arena, *slot);
+        p.host = std::move(server);
+
+        s.ports.emplace(new_port_id(s), std::move(p));
+        return true;
+    }
+
+    void host_reply(windows_emulator& win_emu, const host_call& call, std::vector<uint8_t> data, std::optional<std::vector<uint8_t>> view)
+    {
+        transport payload{};
+        payload.kind = transport_kind::reply;
+        payload.sender_message_id = call.sender_message_id;
+        payload.sender_process_id = win_emu.process.process_id;
+        payload.callback_id = call.callback_id;
+        payload.data = std::move(data);
+        payload.view = std::move(view);
+
+        route(win_emu, {.port_name = call.port_name, .connection_id = call.connection_id, .to_server = false, .payload = payload});
     }
 }

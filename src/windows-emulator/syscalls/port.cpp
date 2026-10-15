@@ -440,6 +440,7 @@ namespace sogen
             const auto* port = c.proc.ports.get(port_handle);
             if (!port || port->alpc_port_id() == 0)
             {
+                c.win_emu.log.warn("NtAlpcQueryInformation: class %u on a non-ALPC port\n", information_class);
                 return STATUS_NOT_SUPPORTED;
             }
 

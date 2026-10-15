@@ -36,6 +36,32 @@ namespace sogen
             client_communication,
         };
 
+        struct host_call
+        {
+            std::u16string port_name{};
+            uint64_t connection_id{};
+            uint32_t sender_message_id{};
+            uint32_t sender_process_id{};
+            uint32_t sender_thread_id{};
+            uint16_t type{};
+            uint32_t callback_id{};
+            bool expects_reply{};
+            std::vector<uint8_t> data{};
+            std::optional<std::vector<uint8_t>> view{};
+        };
+
+        // A port served by the emulator itself rather than by a guest thread (a system service such as RPCSS). It
+        // lives in one process of the tree; clients anywhere reach it through the regular ALPC routing.
+        class host_server
+        {
+          public:
+            virtual ~host_server() = default;
+
+            virtual void on_connect(windows_emulator& win_emu, uint64_t connection_id, uint32_t client_process_id) = 0;
+            virtual void on_message(windows_emulator& win_emu, const host_call& call) = 0;
+            virtual void on_disconnect(windows_emulator& win_emu, uint64_t connection_id) = 0;
+        };
+
         struct message
         {
             uint16_t type{};
@@ -72,6 +98,7 @@ namespace sogen
             uint64_t completion_key{};
 
             std::shared_ptr<kernel_slot> name_slot{};
+            std::shared_ptr<host_server> host{};
         };
 
         struct pending_message
@@ -142,5 +169,9 @@ namespace sogen
         std::optional<NTSTATUS> try_complete_wait(windows_emulator& win_emu, emulator_thread& thread, const pending_wait& wait);
 
         bool deliver(windows_emulator& win_emu, const pipe_ipc_message& message);
+
+        bool create_host_port(windows_emulator& win_emu, std::u16string name, std::shared_ptr<host_server> server);
+        void host_reply(windows_emulator& win_emu, const host_call& call, std::vector<uint8_t> data,
+                        std::optional<std::vector<uint8_t>> view = std::nullopt);
     }
 }

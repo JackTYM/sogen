@@ -19,6 +19,7 @@
 #include "child_process_spawn.hpp"
 
 #include <devices/named_pipe.hpp>
+#include <services/rpcss.hpp>
 #include <network/offline_network.hpp>
 
 #include <utils/finally.hpp>
@@ -816,6 +817,10 @@ namespace sogen
                         win_emu->current_thread().suspended = 1;
                         win_emu->log.log("Child started suspended (THREAD_CREATE_FLAGS_CREATE_SUSPENDED)\n");
                     }
+                }
+                else
+                {
+                    start_rpcss(*win_emu);
                 }
             }
             catch (const std::exception& e)
