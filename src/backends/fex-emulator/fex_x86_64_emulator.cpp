@@ -80,6 +80,7 @@
 #include <utility>
 #include <vector>
 
+#include <utils/interval_set.hpp>
 #include <utils/object.hpp>
 
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
@@ -1508,7 +1509,7 @@ namespace sogen::fex
             // mapped_host_pages_apple_), including PROT_NONE reservation claims that no regions_
             // entry covers; map_host_memory aliases (owned=false) are never in this set. Darwin's
             // munmap also requires host-page alignment, which regions_ entries don't guarantee.
-            for (const auto host_page : this->mapped_host_pages_apple_)
+            for (const auto& [run_start, run_end] : this->mapped_host_pages_apple_.runs())
             {
                 // reserve_wow64_host_window() bulk-inserts every window-relative page (0-based, up
                 // to wow64_guest_address_space_size) unconditionally at construction time, before
@@ -1517,13 +1518,14 @@ namespace sogen::fex
                 // which would otherwise hand every one of those window-relative "pages" - starting
                 // at literal address 0 - straight to munmap() below as if it were a real host
                 // address, hitting the same fatal EXC_GUARD DEALLOC_GAP this loop exists to avoid).
-                if (this->wow64_host_window_reserved_ && host_page < wow64_guest_address_space_size)
-                {
-                    // Covered by the whole-window munmap below.
-                    continue;
-                }
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-                traced_munmap(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple, "dtor_per_page");
+                for_each_rebase_span(run_start, run_end, [&](const uint64_t span_start, const uint64_t span_end) {
+                    if (this->wow64_host_window_reserved_ && span_start < wow64_guest_address_space_size)
+                    {
+                        return;
+                    }
+                    const auto rebase = rebase_for(this->is_wow64_process_, span_start);
+                    traced_munmap(reinterpret_cast<void*>(span_start + rebase), span_end - span_start, "dtor_run");
+                });
             }
 
             // Deliberately not released: a single munmap/mach_vm_deallocate over the whole
@@ -2194,6 +2196,19 @@ namespace sogen::fex
             return (is_32bit_mode && address < wow64_guest_address_space_size) ? this->wow64_guest_rebase_ : 0ULL;
         }
 
+        template <typename Callback>
+        static void for_each_rebase_span(const uint64_t start, const uint64_t end, Callback&& callback)
+        {
+            if (start < wow64_guest_address_space_size && end > wow64_guest_address_space_size)
+            {
+                callback(start, wow64_guest_address_space_size);
+                callback(wow64_guest_address_space_size, end);
+                return;
+            }
+
+            callback(start, end);
+        }
+
         uint64_t unrebase_fault_addr(uint64_t fault_addr) const
         {
             if (this->is_wow64_process_ && fault_addr >= this->wow64_guest_rebase_ &&
@@ -2296,11 +2311,8 @@ namespace sogen::fex
                 // this real backing content. Registering it here routes a later co-resident
                 // allocation through the ordinary shared-page mprotect reconciliation path instead.
 #ifdef __APPLE__
-                for (uint64_t host_page = host_page_align_down_apple(address); host_page < address + host_backing_size;
-                     host_page += host_page_size_apple)
-                {
-                    this->mapped_host_pages_apple_.insert(host_page);
-                }
+                this->mapped_host_pages_apple_.insert(host_page_align_down_apple(address),
+                                                      host_page_align_up_apple(address + host_backing_size));
 #endif
             }
 
@@ -2388,14 +2400,14 @@ namespace sogen::fex
             uint64_t host_page = start;
             while (host_page < end)
             {
-                const auto next_mapped = this->mapped_host_pages_apple_.lower_bound(host_page);
-                if (next_mapped != this->mapped_host_pages_apple_.end() && *next_mapped == host_page)
+                if (const auto mapped_run = this->mapped_host_pages_apple_.run_containing(host_page))
                 {
-                    host_page += host_page_size_apple;
+                    host_page = std::min(end, mapped_run->second);
                     continue;
                 }
 
-                uint64_t run_end = next_mapped == this->mapped_host_pages_apple_.end() ? end : std::min(end, *next_mapped);
+                const auto next_mapped = this->mapped_host_pages_apple_.next_run_start(host_page);
+                uint64_t run_end = next_mapped ? std::min(end, *next_mapped) : end;
                 if (host_page < wow64_guest_address_space_size)
                 {
                     run_end = std::min(run_end, wow64_guest_address_space_size);
@@ -2439,11 +2451,7 @@ namespace sogen::fex
             const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, run_end - run_start, VM_FLAGS_FIXED);
             if (result == KERN_SUCCESS)
             {
-                auto hint = this->mapped_host_pages_apple_.lower_bound(run_start);
-                for (uint64_t host_page = run_start; host_page < run_end; host_page += host_page_size_apple)
-                {
-                    hint = std::next(this->mapped_host_pages_apple_.insert(hint, host_page));
-                }
+                this->mapped_host_pages_apple_.insert(run_start, run_end);
                 return true;
             }
 
@@ -2506,8 +2514,7 @@ namespace sogen::fex
 
             const auto rebase = rebase_for(this->is_wow64_process_, run_start);
             traced_munmap(reinterpret_cast<void*>(run_start + rebase), run_end - run_start, "rollback_page");
-            this->mapped_host_pages_apple_.erase(this->mapped_host_pages_apple_.lower_bound(run_start),
-                                                 this->mapped_host_pages_apple_.lower_bound(run_end));
+            this->mapped_host_pages_apple_.erase(run_start, run_end);
         }
 
         void release_guest_address_range(uint64_t address, size_t size) override
@@ -2517,8 +2524,14 @@ namespace sogen::fex
             const uint64_t start = host_page_align_up_apple(address);
             const uint64_t end = host_page_align_down_apple(address + size);
 
-            auto it = this->mapped_host_pages_apple_.lower_bound(start);
-            while (it != this->mapped_host_pages_apple_.end() && *it + host_page_size_apple <= end)
+            std::vector<std::pair<uint64_t, uint64_t>> spans;
+            this->mapped_host_pages_apple_.for_each_overlap(start, end, [&](const uint64_t span_start, const uint64_t span_end) {
+                for_each_rebase_span(span_start, span_end, [&](const uint64_t part_start, const uint64_t part_end) {
+                    spans.emplace_back(part_start, part_end); //
+                });
+            });
+
+            for (const auto& [span_start, span_end] : spans)
             {
                 // As in ~fex_x86_64_emulator(), a page inside the up-front-reserved wow64 window is
                 // recognized by falling within its 0-based relative span, not by rebase_for()'s
@@ -2527,7 +2540,7 @@ namespace sogen::fex
                 // 64-bit process's own address-0-based "pages" straight to munmap() below as if they
                 // were real host addresses, hitting the same fatal EXC_GUARD DEALLOC_GAP this branch
                 // exists to avoid.
-                const bool in_wow64_window = this->wow64_host_window_reserved_ && *it < wow64_guest_address_space_size;
+                const bool in_wow64_window = this->wow64_host_window_reserved_ && span_start < wow64_guest_address_space_size;
                 if (in_wow64_window)
                 {
                     // A page inside the up-front-reserved wow64 window is never actually released at
@@ -2549,33 +2562,22 @@ namespace sogen::fex
                     // and hits the exact same fatal EXC_GUARD DEALLOC_GAP that helper was built to
                     // avoid - confirmed live: this call site alone reproduced it 100% of the time
                     // against a real wow64 guest exercising KUSER_SHARED_DATA.
-                    void* const window_ptr = reinterpret_cast<void*>(*it + this->wow64_guest_rebase_);
-                    const kern_return_t rearm_result = traced_map_fixed_anonymous_apple_replace(
-                        window_ptr, host_page_size_apple, VM_PROT_NONE, VM_PROT_ALL, "release_range_rearm");
-                    if (rearm_result != KERN_SUCCESS)
+                    for (uint64_t page = span_start; page < span_end; page += host_page_size_apple)
                     {
-                        throw std::runtime_error("FEX backend failed to re-arm wow64 window placeholder");
+                        void* const window_ptr = reinterpret_cast<void*>(page + this->wow64_guest_rebase_);
+                        const kern_return_t rearm_result = traced_map_fixed_anonymous_apple_replace(
+                            window_ptr, host_page_size_apple, VM_PROT_NONE, VM_PROT_ALL, "release_range_rearm");
+                        if (rearm_result != KERN_SUCCESS)
+                        {
+                            throw std::runtime_error("FEX backend failed to re-arm wow64 window placeholder");
+                        }
                     }
-                    ++it;
                 }
                 else
                 {
-                    const auto run_start = *it;
-                    const auto rebase = rebase_for(this->is_wow64_process_, run_start);
-                    auto run_end = run_start + host_page_size_apple;
-                    auto run_last = std::next(it);
-                    while (run_last != this->mapped_host_pages_apple_.end() && *run_last == run_end &&
-                           *run_last + host_page_size_apple <= end &&
-                           !(this->wow64_host_window_reserved_ && *run_last < wow64_guest_address_space_size) &&
-                           rebase_for(this->is_wow64_process_, *run_last) == rebase)
-                    {
-                        run_end += host_page_size_apple;
-                        ++run_last;
-                    }
-
-                    void* const host_ptr = reinterpret_cast<void*>(run_start + rebase);
-                    traced_munmap(host_ptr, run_end - run_start, "host_ptr_cleanup");
-                    it = this->mapped_host_pages_apple_.erase(it, run_last);
+                    const auto rebase = rebase_for(this->is_wow64_process_, span_start);
+                    traced_munmap(reinterpret_cast<void*>(span_start + rebase), span_end - span_start, "host_ptr_cleanup");
+                    this->mapped_host_pages_apple_.erase(span_start, span_end);
                 }
             }
         }
@@ -2630,11 +2632,7 @@ namespace sogen::fex
                 // first-claim path from treating this live aliased range as free (same reasoning as
                 // map_mmio's KUSD-collision fix above).
                 this->set_shadow_range_apple(address, size, permissions);
-                for (uint64_t host_page = host_page_align_down_apple(address); host_page < address + size;
-                     host_page += host_page_size_apple)
-                {
-                    this->mapped_host_pages_apple_.insert(host_page);
-                }
+                this->mapped_host_pages_apple_.insert(host_page_align_down_apple(address), host_page_align_up_apple(address + size));
 #else
                 void* result = ::mremap(host_pointer, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(host_address));
                 if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
@@ -3292,7 +3290,7 @@ namespace sogen::fex
                 {
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
                 }
-                this->mapped_host_pages_apple_.insert(host_page_addr);
+                this->mapped_host_pages_apple_.insert(host_page_addr, host_page_addr + host_page_size_apple);
                 return;
             }
 
@@ -3616,10 +3614,7 @@ namespace sogen::fex
                 // the "already ours" -> mprotect-only path instead, which is always safe here: this
                 // whole window was reserved before any guest or FEXCore-internal code ever ran, so
                 // nothing could have raced to place a genuine foreign mapping inside it.
-                for (uint64_t guest_page = 0; guest_page < wow64_guest_address_space_size; guest_page += host_page_size_apple)
-                {
-                    this->mapped_host_pages_apple_.insert(guest_page);
-                }
+                this->mapped_host_pages_apple_.insert(0, wow64_guest_address_space_size);
                 return;
             }
 
@@ -3695,7 +3690,7 @@ namespace sogen::fex
 
 #ifdef __APPLE__
         std::map<uint64_t, memory_permission> page_shadow_apple_;
-        std::set<uint64_t> mapped_host_pages_apple_;
+        utils::interval_set mapped_host_pages_apple_;
         // Pages where a real mach_vm_allocate(VM_FLAGS_FIXED) claim has already failed once, keyed by
         // guest-relative address like mapped_host_pages_apple_ - not because anything is actually
         // mapped there (mach_vm_region enumeration - what reserved_host_ranges()/
