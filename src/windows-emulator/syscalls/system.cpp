@@ -461,7 +461,6 @@ namespace sogen
                 return handle_system_process_information(c, system_information, system_information_length, return_length);
 
             case SystemFlushInformation:
-            case SystemCodeIntegrityPolicyInformation:
             case SystemHypervisorSharedPageInformation:
             case SystemFeatureConfigurationInformation:
             case SystemSupportedProcessorArchitectures2:
@@ -803,6 +802,11 @@ namespace sogen
                 c.emu.write_memory(system_information, supported_arch);
                 return STATUS_SUCCESS;
             }
+
+            case SystemCodeIntegrityPolicyInformation:
+                // No Windows Defender Application Control policy is deployed: no lockdown/S-mode options.
+                return handle_query<SYSTEM_CODEINTEGRITYPOLICY_INFORMATION>(c.emu, system_information, system_information_length,
+                                                                            return_length, [](SYSTEM_CODEINTEGRITYPOLICY_INFORMATION&) {});
 
             case SystemCodeIntegrityInformation: {
                 // Report a normal retail configuration: code integrity (driver signature enforcement) enabled,
