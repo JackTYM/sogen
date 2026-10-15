@@ -121,6 +121,7 @@ namespace sogen
         bool is_guest_port_name(process_context& proc, std::u16string_view name);
 
         NTSTATUS create_port(const syscall_context& c, std::u16string name, uint64_t port_attributes, handle& out);
+        NTSTATUS create_port(const syscall_context& c, std::u16string name, uint32_t flags, uint64_t max_message_length, handle& out);
         NTSTATUS connect_port(const syscall_context& c, std::u16string_view name, uint64_t port_attributes, uint32_t flags,
                               uint64_t connection_message, uint64_t buffer_length, uint64_t out_message_attributes,
                               uint64_t in_message_attributes, uint64_t timeout, uint64_t port_handle_out);

@@ -631,6 +631,13 @@ namespace sogen::alpc
 
     NTSTATUS create_port(const syscall_context& c, std::u16string name, const uint64_t port_attributes, handle& out)
     {
+        const auto flags = port_attributes ? c.emu.read_memory<uint32_t>(port_attributes) : 0;
+        return create_port(c, std::move(name), flags, read_max_message_length(c, port_attributes), out);
+    }
+
+    NTSTATUS create_port(const syscall_context& c, std::u16string name, const uint32_t flags, const uint64_t max_message_length,
+                         handle& out)
+    {
         auto& s = c.proc.alpc;
 
         std::shared_ptr<kernel_slot> name_slot{};
@@ -665,8 +672,8 @@ namespace sogen::alpc
         port p{};
         p.kind = port_kind::connection;
         p.name = name;
-        p.flags = port_attributes ? c.emu.read_memory<uint32_t>(port_attributes) : 0;
-        p.max_message_length = read_max_message_length(c, port_attributes);
+        p.flags = flags;
+        p.max_message_length = max_message_length;
         p.name_slot = std::move(name_slot);
 
         const auto id = new_port_id(s);

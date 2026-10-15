@@ -237,6 +237,9 @@ namespace sogen
         NTSTATUS handle_NtAlpcCreatePort(const syscall_context& c, emulator_object<handle> port_handle,
                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                          emulator_pointer port_attributes);
+        NTSTATUS handle_NtCreatePort(const syscall_context& c, emulator_object<handle> port_handle,
+                                     emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                     ULONG max_connection_info_length, ULONG max_message_length, ULONG max_pool_usage);
         NTSTATUS handle_NtAlpcConnectPort(const syscall_context& c, emulator_object<handle> port_handle,
                                           emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> server_port_name,
                                           emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
@@ -1786,6 +1789,7 @@ namespace sogen
         add_handler(NtEnumerateKey);
         add_handler(NtEnumerateValueKey);
         add_handler(NtAlpcCreatePort);
+        add_handler(NtCreatePort);
         add_handler(NtAlpcConnectPortEx);
         add_handler(NtAlpcConnectPort);
         add_handler(NtAlpcDisconnectPort);

@@ -92,6 +92,41 @@ namespace sogen
             return status;
         }
 
+        NTSTATUS handle_NtCreatePort(const syscall_context& c, const emulator_object<handle> port_handle,
+                                     const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                     const ULONG /*max_connection_info_length*/, const ULONG max_message_length,
+                                     const ULONG /*max_pool_usage*/)
+        {
+            if (!port_handle)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            std::u16string port_name{};
+
+            if (object_attributes)
+            {
+                const auto attributes = object_attributes.read();
+
+                if (attributes.ObjectName)
+                {
+                    emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> name{c.emu, attributes.ObjectName};
+                    port_name = std::u16string(read_unicode_string(c.emu, name));
+                }
+            }
+
+            c.win_emu.callbacks.on_generic_access("Creating port", port_name);
+
+            handle new_handle{};
+            const auto status = alpc::create_port(c, std::move(port_name), 0, max_message_length, new_handle);
+            if (NT_SUCCESS(status))
+            {
+                port_handle.write(new_handle);
+            }
+
+            return status;
+        }
+
         NTSTATUS handle_NtAlpcConnectPort(const syscall_context& c, const emulator_object<handle> port_handle,
                                           const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> server_port_name,
                                           const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
