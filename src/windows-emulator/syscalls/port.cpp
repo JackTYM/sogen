@@ -21,12 +21,15 @@ namespace sogen
             c.win_emu.callbacks.on_generic_access("Connecting port", port_name);
 
             port_creation_data data{};
-            client_shared_memory.access([&](PORT_VIEW64& view) {
-                data.view_size = view.ViewSize;
-                data.view_base = c.win_emu.memory.allocate_memory(static_cast<size_t>(data.view_size), memory_permission::read_write);
-                view.ViewBase = data.view_base;
-                view.ViewRemoteBase = view.ViewBase;
-            });
+            if (client_shared_memory)
+            {
+                client_shared_memory.access([&](PORT_VIEW64& view) {
+                    data.view_size = view.ViewSize;
+                    data.view_base = c.win_emu.memory.allocate_memory(static_cast<size_t>(data.view_size), memory_permission::read_write);
+                    view.ViewBase = data.view_base;
+                    view.ViewRemoteBase = view.ViewBase;
+                });
+            }
 
             port_container container{std::u16string(port_name), c.win_emu, data};
 
