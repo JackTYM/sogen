@@ -621,10 +621,10 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtAccessCheck(const syscall_context& c, const uint64_t security_descriptor, const handle client_token,
-                                      const ACCESS_MASK desired_access, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
-                                      const uint64_t /*privilege_set*/, const emulator_object<ULONG> privilege_set_length,
-                                      const emulator_object<ACCESS_MASK> granted_access, const emulator_object<NTSTATUS> access_status)
+        NTSTATUS evaluate_access_check(const syscall_context& c, const uint64_t security_descriptor, const handle client_token,
+                                       const ACCESS_MASK desired_access, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                       const emulator_object<ULONG> privilege_set_length, const emulator_object<ACCESS_MASK> granted_access,
+                                       const emulator_object<NTSTATUS> access_status)
         {
             if (!is_recognized_token_handle(c.proc, client_token))
             {
@@ -693,6 +693,28 @@ namespace sogen
             granted_access.write(granted);
             access_status.write(!denied && remaining == 0 ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
             return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAccessCheck(const syscall_context& c, const uint64_t security_descriptor, const handle client_token,
+                                      const ACCESS_MASK desired_access, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                      const uint64_t /*privilege_set*/, const emulator_object<ULONG> privilege_set_length,
+                                      const emulator_object<ACCESS_MASK> granted_access, const emulator_object<NTSTATUS> access_status)
+        {
+            return evaluate_access_check(c, security_descriptor, client_token, desired_access, generic_mapping, privilege_set_length,
+                                         granted_access, access_status);
+        }
+
+        NTSTATUS handle_NtAccessCheckByType(const syscall_context& c, const uint64_t security_descriptor,
+                                            const uint64_t /*principal_self_sid*/, const handle client_token,
+                                            const ACCESS_MASK desired_access, const uint64_t /*object_type_list*/,
+                                            const ULONG /*object_type_list_length*/,
+                                            const emulator_object<EMU_GENERIC_MAPPING> generic_mapping, const uint64_t /*privilege_set*/,
+                                            const emulator_object<ULONG> privilege_set_length,
+                                            const emulator_object<ACCESS_MASK> granted_access,
+                                            const emulator_object<NTSTATUS> access_status)
+        {
+            return evaluate_access_check(c, security_descriptor, client_token, desired_access, generic_mapping, privilege_set_length,
+                                         granted_access, access_status);
         }
 
         NTSTATUS handle_NtQuerySecurityAttributesToken(const syscall_context& c, const handle token_handle,

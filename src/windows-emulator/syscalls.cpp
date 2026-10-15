@@ -498,6 +498,11 @@ namespace sogen
                                       ACCESS_MASK desired_access, emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
                                       uint64_t privilege_set, emulator_object<ULONG> privilege_set_length,
                                       emulator_object<ACCESS_MASK> granted_access, emulator_object<NTSTATUS> access_status);
+        NTSTATUS handle_NtAccessCheckByType(const syscall_context& c, uint64_t security_descriptor, uint64_t principal_self_sid,
+                                            handle client_token, ACCESS_MASK desired_access, uint64_t object_type_list,
+                                            ULONG object_type_list_length, emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                            uint64_t privilege_set, emulator_object<ULONG> privilege_set_length,
+                                            emulator_object<ACCESS_MASK> granted_access, emulator_object<NTSTATUS> access_status);
         NTSTATUS handle_NtSuspendProcess(const syscall_context& c, handle process_handle);
         NTSTATUS handle_NtResumeProcess(const syscall_context& c, handle process_handle);
         NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, handle token_handle, BOOLEAN disable_all_privileges,
@@ -1722,6 +1727,7 @@ namespace sogen
         add_handler(NtQueryKey);
         add_handler(NtGetNlsSectionPtr);
         add_handler(NtAccessCheck);
+        add_handler(NtAccessCheckByType);
         add_handler(NtCreateKey);
         add_handler(NtSetValueKey);
         add_handler(NtDeleteKey);
