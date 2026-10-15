@@ -395,18 +395,17 @@ namespace sogen
                 return;
             }
 
-            const auto index = static_cast<uint32_t>(h.value.id);
-            if (index == 0 || (static_cast<uint64_t>(index) << 2) >= user_handle_table::MAX_HANDLES)
-            {
-                return;
-            }
-
             // user32's client-side dispatch (e.g. DispatchMessageWorker's same-thread ownership check)
             // indexes the shared aheList by the HANDLE's low 16 bits, not by our internal handle id - see
             // user_handle_table::handle_index_to_ahe_slot's doc comment. Writing pOwner at the raw index
             // instead of that slot silently populates the wrong entry, leaving the real window's pOwner
-            // unset and making client-side same-thread dispatch fail its ownership check.
-            const auto ahe_slot = user_handle_table::handle_index_to_ahe_slot(index);
+            // unset and making client-side same-thread dispatch fail its ownership check. The id also
+            // carries the process's handle namespace above the slot bits, so only the slot is range-checked.
+            const auto ahe_slot = user_handle_table::handle_index_to_ahe_slot(static_cast<uint32_t>(h.value.id));
+            if (ahe_slot == 0)
+            {
+                return;
+            }
             c.proc.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; }, ahe_slot);
         }
 
