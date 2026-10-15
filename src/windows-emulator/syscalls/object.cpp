@@ -474,6 +474,10 @@ namespace sogen
                     {
                         device_path = u"\\RPC Control";
                     }
+                    else if (effective_handle == DRIVER_STORE_NODES_DIRECTORY)
+                    {
+                        device_path = u"\\DriverStore\\Nodes";
+                    }
                     else
                     {
                         // Unknown directory handle

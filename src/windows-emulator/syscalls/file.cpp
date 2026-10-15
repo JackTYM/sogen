@@ -2405,6 +2405,24 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (object_name == u"\\DriverStore\\Nodes")
+            {
+                directory_handle.write(DRIVER_STORE_NODES_DIRECTORY);
+                return STATUS_SUCCESS;
+            }
+
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        NTSTATUS handle_NtQueryDirectoryObject(const syscall_context& /*c*/, const handle directory_handle, uint64_t /*buffer*/,
+                                               ULONG /*length*/, BOOLEAN /*return_single_entry*/, BOOLEAN /*restart_scan*/,
+                                               const emulator_object<ULONG> /*context*/, const emulator_object<ULONG> /*return_length*/)
+        {
+            if (directory_handle == DRIVER_STORE_NODES_DIRECTORY)
+            {
+                return STATUS_NO_MORE_ENTRIES;
+            }
+
             return STATUS_NOT_SUPPORTED;
         }
 
