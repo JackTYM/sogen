@@ -173,6 +173,8 @@ CALL :collect rpcss.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect samlib.dll
+CALL :collect scecli.dll
+CALL :collect scesrv.dll
 CALL :collect sechost.dll
 CALL :collect services.exe
 CALL :collect Secur32.dll
@@ -203,6 +205,7 @@ CALL :collect vcruntime140d.dll
 CALL :collect version.dll
 CALL :collect wer.dll
 CALL :collect wevtapi.dll
+CALL :collect wmsgapi.dll
 CALL :collect win32u.dll
 CALL :collect windows.internal.graphics.display.displaycolormanagement.dll
 CALL :collect windows.storage.dll
