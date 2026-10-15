@@ -84,6 +84,7 @@ namespace sogen
             static constexpr ULONG k_ioctl_decrypt_cross_process = 0x39001A;
             static constexpr ULONG k_ioctl_encrypt_same_logon = 0x39001E;
             static constexpr ULONG k_ioctl_decrypt_same_logon = 0x390022;
+            static constexpr ULONG k_ioctl_get_queued_function_call = 0x39006A;
 
             static bool is_memory_crypt_ioctl(const ULONG code)
             {
@@ -139,6 +140,14 @@ namespace sogen
                 if (is_memory_crypt_ioctl(c.io_control_code))
                 {
                     return handle_memory_crypt(win_emu, c);
+                }
+
+                // lsass keeps one overlapped request queued here to receive kernel-queued function calls. KsecDD
+                // holds it until a call is queued, so an idle system leaves it pending. lsass treats any error
+                // other than ERROR_IO_PENDING as a failure and re-issues the request after a 125 ms sleep.
+                if (c.io_control_code == k_ioctl_get_queued_function_call)
+                {
+                    return STATUS_PENDING;
                 }
 
                 if (c.io_control_code != 0x390400)

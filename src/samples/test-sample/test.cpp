@@ -20,6 +20,7 @@
 #include <intrin.h>
 
 #include <windows.h>
+#include <winternl.h>
 #include <timeapi.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -377,6 +378,52 @@ namespace
         }
 
         return GetLastError() == ERROR_FILE_NOT_FOUND;
+    }
+
+    bool test_ksec_queued_function_call()
+    {
+        using nt_open_file_t = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
+        const auto nt_open_file = reinterpret_cast<nt_open_file_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtOpenFile"));
+        if (!nt_open_file)
+        {
+            return false;
+        }
+
+        std::wstring device_name = L"\\Device\\KsecDD";
+        UNICODE_STRING name{};
+        name.Length = static_cast<USHORT>(device_name.size() * sizeof(wchar_t));
+        name.MaximumLength = name.Length + sizeof(wchar_t);
+        name.Buffer = device_name.data();
+
+        OBJECT_ATTRIBUTES attributes{};
+        attributes.Length = sizeof(attributes);
+        attributes.ObjectName = &name;
+
+        IO_STATUS_BLOCK io_status{};
+        HANDLE device = nullptr;
+        if (nt_open_file(&device, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &attributes, &io_status, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         0) < 0)
+        {
+            return false;
+        }
+        const auto close_device = sogen::utils::finally([&] { CloseHandle(device); });
+
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!overlapped.hEvent)
+        {
+            return false;
+        }
+        const auto close_event = sogen::utils::finally([&] { CloseHandle(overlapped.hEvent); });
+
+        ULONG64 output = 0;
+        DWORD returned = 0;
+        if (DeviceIoControl(device, 0x39006A, nullptr, 0, &output, sizeof(output), &returned, &overlapped))
+        {
+            return false;
+        }
+
+        return GetLastError() == ERROR_IO_PENDING;
     }
 
     bool test_file_locking()
@@ -2369,6 +2416,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_oem_conversion, "OEM Conversion")
     RUN_TEST(test_crypt_protect, "CryptProtect")
     RUN_TEST(test_critical_section_timeout, "Critical Section Timeout")
+    RUN_TEST(test_ksec_queued_function_call, "KsecDD Queued Function Call")
     RUN_TEST(test_lpc_port, "LPC Port (Two Processes)")
 
     return valid ? 0 : 1;
