@@ -146,8 +146,44 @@ namespace sogen
 
             if (key_information_class == KeyFullInformation)
             {
-                c.win_emu.log.warn("Unsupported registry class: %X\n", key_information_class);
-                return STATUS_NOT_SUPPORTED;
+                ULONG sub_keys = 0;
+                size_t max_name_length = 0;
+                while (const auto subkey_name = c.win_emu.registry.get_sub_key_name(*key, sub_keys))
+                {
+                    max_name_length = std::max(max_name_length, subkey_name->size() * sizeof(char16_t));
+                    ++sub_keys;
+                }
+
+                ULONG values = 0;
+                size_t max_value_name_length = 0;
+                size_t max_value_data_length = 0;
+                while (const auto value = c.win_emu.registry.get_value(*key, values))
+                {
+                    max_value_name_length = std::max(max_value_name_length, value->name.size() * sizeof(char16_t));
+                    max_value_data_length = std::max(max_value_data_length, value->data.size());
+                    ++values;
+                }
+
+                constexpr auto required_size = offsetof(KEY_FULL_INFORMATION, Class);
+                result_length.write(static_cast<ULONG>(required_size));
+
+                if (required_size > length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                KEY_FULL_INFORMATION info{};
+                info.LastWriteTime.QuadPart = 0;
+                info.TitleIndex = 0;
+                info.ClassOffset = offsetof(KEY_FULL_INFORMATION, Class);
+                info.SubKeys = sub_keys;
+                info.MaxNameLength = static_cast<ULONG>(max_name_length);
+                info.Values = values;
+                info.MaxValueNameLength = static_cast<ULONG>(max_value_name_length);
+                info.MaxValueDataLength = static_cast<ULONG>(max_value_data_length);
+
+                c.emu.write_memory(key_information, &info, required_size);
+                return STATUS_SUCCESS;
             }
 
             if (key_information_class == KeyCachedInformation)
