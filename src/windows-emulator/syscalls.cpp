@@ -505,6 +505,8 @@ namespace sogen
         NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, handle token_handle, BOOLEAN disable_all_privileges,
                                                 emulator_object<TOKEN_PRIVILEGES64> new_state, ULONG buffer_length,
                                                 emulator_object<TOKEN_PRIVILEGES64> previous_state, emulator_object<ULONG> return_length);
+        NTSTATUS handle_NtPrivilegeCheck(const syscall_context& c, handle token_handle, uint64_t required_privileges,
+                                         emulator_object<BOOLEAN> result);
         NTSTATUS handle_NtQuerySecurityPolicy();
         NTSTATUS handle_NtFlushInstructionCache(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
                                                 uint64_t region_size);
@@ -1578,6 +1580,7 @@ namespace sogen
         add_handler(NtOpenProcessTokenEx);
         add_handler(NtQuerySecurityAttributesToken);
         add_handler(NtAdjustPrivilegesToken);
+        add_handler(NtPrivilegeCheck);
         add_handler(NtSuspendProcess);
         add_handler(NtResumeProcess);
         add_handler(NtQuerySecurityPolicy);
