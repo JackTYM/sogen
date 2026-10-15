@@ -14,11 +14,17 @@ namespace sogen
                                       const emulator_object<SECURITY_QUALITY_OF_SERVICE> /*security_qos*/,
                                       const emulator_object<PORT_VIEW64> client_shared_memory,
                                       const emulator_object<REMOTE_PORT_VIEW64> /*server_shared_memory*/,
-                                      const emulator_object<ULONG> /*maximum_message_length*/, const emulator_pointer connection_info,
+                                      const emulator_object<ULONG> maximum_message_length, const emulator_pointer connection_info,
                                       const emulator_object<ULONG> connection_info_length)
         {
             auto port_name = read_unicode_string(c.emu, server_port_name);
             c.win_emu.callbacks.on_generic_access("Connecting port", port_name);
+
+            if (alpc::is_guest_port_name(c.proc, port_name))
+            {
+                return alpc::connect_lpc_port(c, port_name, connection_info, connection_info_length.value(), maximum_message_length.value(),
+                                              client_port_handle.value());
+            }
 
             port_creation_data data{};
             if (client_shared_memory)
@@ -270,6 +276,85 @@ namespace sogen
             reply.native.u1.s1.DataLength = 0;
             reply.native.u1.s1.TotalLength = static_cast<CSHORT>(reply.wire_size());
             reply.write(receive_message);
+        }
+
+        NTSTATUS handle_NtListenPort(const syscall_context& c, const handle port_handle, const emulator_pointer connection_request)
+        {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port || port->alpc_port_id() == 0)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            return alpc::listen_port(c, port->alpc_port_id(), connection_request);
+        }
+
+        NTSTATUS handle_NtAcceptConnectPort(const syscall_context& c, const emulator_object<handle> server_port_handle,
+                                            const handle connection_port_handle, const emulator_pointer connection_request,
+                                            const BOOLEAN accept_connection, const emulator_pointer /*server_view*/,
+                                            const emulator_pointer /*client_view*/)
+        {
+            const auto flags = c.proc.is_wow64_process ? alpc::msgflg_wow64_call : 0;
+            return alpc::accept_connect_port(c, server_port_handle.value(), connection_port_handle, flags, 0, 0, connection_request,
+                                             accept_connection != 0);
+        }
+
+        NTSTATUS handle_NtCompleteConnectPort(const syscall_context& c, const handle port_handle)
+        {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port || port->alpc_port_id() == 0)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            return alpc::complete_connect_port(c, port->alpc_port_id());
+        }
+
+        NTSTATUS handle_NtReplyWaitReceivePort(const syscall_context& c, const handle port_handle, const emulator_pointer port_context,
+                                               const emulator_object<PORT_MESSAGE64> reply_message,
+                                               const emulator_object<PORT_MESSAGE64> receive_message)
+        {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port || port->alpc_port_id() == 0)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            const auto port_id = port->alpc_port_id();
+            if (port_context)
+            {
+                const auto context = c.proc.alpc.ports.at(port_id).context;
+                if (c.proc.is_wow64_process)
+                {
+                    c.emu.write_memory<uint32_t>(port_context, static_cast<uint32_t>(context));
+                }
+                else
+                {
+                    c.emu.write_memory<uint64_t>(port_context, context);
+                }
+            }
+
+            const auto flags = c.proc.is_wow64_process ? alpc::msgflg_wow64_call : 0;
+            return alpc::send_wait_receive(c, port_id, flags, reply_message.value(), 0, receive_message.value(), 0, 0, 0);
+        }
+
+        NTSTATUS handle_NtRequestWaitReplyPort(const syscall_context& c, const handle port_handle,
+                                               const emulator_object<PORT_MESSAGE64> request_message,
+                                               const emulator_object<PORT_MESSAGE64> reply_message)
+        {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (port->alpc_port_id() == 0)
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            const auto flags = alpc::msgflg_sync_request | (c.proc.is_wow64_process ? alpc::msgflg_wow64_call : 0);
+            return alpc::send_wait_receive(c, port->alpc_port_id(), flags, request_message.value(), 0, reply_message.value(), 0, 0, 0);
         }
 
         NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, const handle port_handle, const ULONG /*flags*/)

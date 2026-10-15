@@ -2020,6 +2020,196 @@ namespace
         return timeout == thirty_days;
     }
 
+    struct lpc_unicode_string
+    {
+        USHORT Length;
+        USHORT MaximumLength;
+        PWSTR Buffer;
+    };
+
+    struct lpc_object_attributes
+    {
+        ULONG Length;
+        HANDLE RootDirectory;
+        lpc_unicode_string* ObjectName;
+        ULONG Attributes;
+        PVOID SecurityDescriptor;
+        PVOID SecurityQualityOfService;
+    };
+
+    struct lpc_header
+    {
+        USHORT DataLength;
+        USHORT TotalLength;
+        USHORT Type;
+        USHORT DataInfoOffset;
+        ULONG_PTR UniqueProcess;
+        ULONG_PTR UniqueThread;
+        ULONG MessageId;
+        ULONG_PTR ClientViewSize;
+    };
+
+    struct lpc_packet
+    {
+        lpc_header header;
+        char data[64];
+    };
+
+    constexpr USHORT lpc_request = 1;
+    constexpr USHORT lpc_reply = 2;
+    constexpr USHORT lpc_connection_request = 10;
+    constexpr ULONG lpc_test_max_message_length = 0x100;
+    constexpr wchar_t lpc_test_port_name[] = L"\\RPC Control\\SogenLpcTest";
+
+    using nt_create_port_t = NTSTATUS(NTAPI*)(PHANDLE, lpc_object_attributes*, ULONG, ULONG, ULONG);
+    using nt_connect_port_t = NTSTATUS(NTAPI*)(PHANDLE, lpc_unicode_string*, PVOID, PVOID, PVOID, PULONG, PVOID, PULONG);
+    using nt_listen_port_t = NTSTATUS(NTAPI*)(HANDLE, lpc_packet*);
+    using nt_accept_connect_port_t = NTSTATUS(NTAPI*)(PHANDLE, HANDLE, lpc_packet*, BOOLEAN, PVOID, PVOID);
+    using nt_complete_connect_port_t = NTSTATUS(NTAPI*)(HANDLE);
+    using nt_reply_wait_receive_port_t = NTSTATUS(NTAPI*)(HANDLE, PVOID*, lpc_packet*, lpc_packet*);
+    using nt_request_wait_reply_port_t = NTSTATUS(NTAPI*)(HANDLE, lpc_packet*, lpc_packet*);
+
+    template <typename T>
+    T get_nt_function(const char* name)
+    {
+        return reinterpret_cast<T>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), name));
+    }
+
+    void set_lpc_payload(lpc_packet& packet, const char* payload)
+    {
+        const auto length = static_cast<USHORT>(strlen(payload));
+        memcpy(packet.data, payload, length);
+        packet.header.DataLength = length;
+        packet.header.TotalLength = static_cast<USHORT>(sizeof(lpc_header) + length);
+    }
+
+    bool lpc_payload_equals(const lpc_packet& packet, const char* payload)
+    {
+        return packet.header.DataLength == static_cast<USHORT>(strlen(payload)) &&
+               memcmp(packet.data, payload, packet.header.DataLength) == 0;
+    }
+
+    bool run_lpc_client()
+    {
+        const auto connect_port = get_nt_function<nt_connect_port_t>("NtConnectPort");
+        const auto request_wait_reply = get_nt_function<nt_request_wait_reply_port_t>("NtRequestWaitReplyPort");
+        if (!connect_port || !request_wait_reply)
+        {
+            return false;
+        }
+
+        std::wstring name_text = lpc_test_port_name;
+        lpc_unicode_string name{};
+        name.Length = static_cast<USHORT>(name_text.size() * sizeof(wchar_t));
+        name.MaximumLength = static_cast<USHORT>(name.Length + sizeof(wchar_t));
+        name.Buffer = name_text.data();
+
+        char connection_info[] = "hi";
+        ULONG connection_info_length = sizeof(connection_info) - 1;
+        HANDLE port{};
+        ULONG max_message_length{};
+        if (connect_port(&port, &name, nullptr, nullptr, nullptr, &max_message_length, connection_info, &connection_info_length) != 0)
+        {
+            return false;
+        }
+
+        if (max_message_length != lpc_test_max_message_length)
+        {
+            return false;
+        }
+
+        lpc_packet request{};
+        request.header.Type = lpc_request;
+        set_lpc_payload(request, "ping");
+
+        lpc_packet reply{};
+        reply.header.TotalLength = sizeof(reply);
+        return request_wait_reply(port, &request, &reply) == 0 && lpc_payload_equals(reply, "pong");
+    }
+
+    bool test_lpc_port()
+    {
+        const auto create_port = get_nt_function<nt_create_port_t>("NtCreatePort");
+        const auto listen_port = get_nt_function<nt_listen_port_t>("NtListenPort");
+        const auto accept_connect_port = get_nt_function<nt_accept_connect_port_t>("NtAcceptConnectPort");
+        const auto complete_connect_port = get_nt_function<nt_complete_connect_port_t>("NtCompleteConnectPort");
+        const auto reply_wait_receive_port = get_nt_function<nt_reply_wait_receive_port_t>("NtReplyWaitReceivePort");
+        if (!create_port || !listen_port || !accept_connect_port || !complete_connect_port || !reply_wait_receive_port)
+        {
+            return false;
+        }
+
+        std::wstring name_text = lpc_test_port_name;
+        lpc_unicode_string name{};
+        name.Length = static_cast<USHORT>(name_text.size() * sizeof(wchar_t));
+        name.MaximumLength = static_cast<USHORT>(name.Length + sizeof(wchar_t));
+        name.Buffer = name_text.data();
+
+        lpc_object_attributes attributes{};
+        attributes.Length = sizeof(attributes);
+        attributes.ObjectName = &name;
+
+        HANDLE port{};
+        if (create_port(&port, &attributes, 0, lpc_test_max_message_length, 0) != 0)
+        {
+            return false;
+        }
+
+        wchar_t self_path[MAX_PATH]{};
+        if (!GetModuleFileNameW(nullptr, self_path, MAX_PATH))
+        {
+            return false;
+        }
+
+        std::wstring command_line = std::wstring(L"\"") + self_path + L"\" -lpc-client";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION child{};
+        if (!CreateProcessW(self_path, command_line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &child))
+        {
+            return false;
+        }
+
+        const auto child_exit_code = [&]() -> std::optional<DWORD> {
+            if (WaitForSingleObject(child.hProcess, 60000) != WAIT_OBJECT_0)
+            {
+                return std::nullopt;
+            }
+
+            DWORD code{};
+            GetExitCodeProcess(child.hProcess, &code);
+            return code;
+        };
+
+        bool server_ok = false;
+        lpc_packet connection_request{};
+        connection_request.header.TotalLength = sizeof(connection_request);
+        HANDLE server_port{};
+        if (listen_port(port, &connection_request) == 0 && connection_request.header.Type == lpc_connection_request &&
+            accept_connect_port(&server_port, port, &connection_request, TRUE, nullptr, nullptr) == 0 &&
+            complete_connect_port(server_port) == 0)
+        {
+            lpc_packet incoming{};
+            incoming.header.TotalLength = sizeof(incoming);
+            if (reply_wait_receive_port(server_port, nullptr, nullptr, &incoming) == 0 && incoming.header.Type == lpc_request &&
+                lpc_payload_equals(incoming, "ping"))
+            {
+                lpc_packet reply{};
+                reply.header.Type = lpc_reply;
+                reply.header.MessageId = incoming.header.MessageId;
+                reply.header.UniqueProcess = incoming.header.UniqueProcess;
+                reply.header.UniqueThread = incoming.header.UniqueThread;
+                set_lpc_payload(reply, "pong");
+                server_ok = reply_wait_receive_port(server_port, nullptr, &reply, nullptr) == 0;
+            }
+        }
+
+        const auto child_code = child_exit_code();
+        CloseHandle(child.hThread);
+        CloseHandle(child.hProcess);
+        return server_ok && child_code && *child_code == 0;
+    }
+
     bool test_crypt_protect()
     {
         auto roundtrip = [](const std::vector<BYTE>& plain, const std::vector<BYTE>& entropy, const LPCWSTR descr) {
@@ -2123,6 +2313,11 @@ int main(const int argc, const char* argv[])
         return 0;
     }
 
+    if (argc == 2 && argv[1] == "-lpc-client"sv)
+    {
+        return run_lpc_client() ? 0 : 1;
+    }
+
     bool valid = true;
 
 #ifdef _WIN64
@@ -2174,6 +2369,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_oem_conversion, "OEM Conversion")
     RUN_TEST(test_crypt_protect, "CryptProtect")
     RUN_TEST(test_critical_section_timeout, "Critical Section Timeout")
+    RUN_TEST(test_lpc_port, "LPC Port (Two Processes)")
 
     return valid ? 0 : 1;
 }

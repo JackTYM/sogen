@@ -287,6 +287,17 @@ namespace sogen
                                              emulator_pointer information, uint32_t length);
         NTSTATUS handle_NtAlpcCreateSecurityContext();
         NTSTATUS handle_NtAlpcDeleteSecurityContext();
+        NTSTATUS handle_NtListenPort(const syscall_context& c, handle port_handle, emulator_pointer connection_request);
+        NTSTATUS handle_NtAcceptConnectPort(const syscall_context& c, emulator_object<handle> server_port_handle,
+                                            handle connection_port_handle, emulator_pointer connection_request, BOOLEAN accept_connection,
+                                            emulator_pointer server_view, emulator_pointer client_view);
+        NTSTATUS handle_NtCompleteConnectPort(const syscall_context& c, handle port_handle);
+        NTSTATUS handle_NtReplyWaitReceivePort(const syscall_context& c, handle port_handle, emulator_pointer port_context,
+                                               emulator_object<PORT_MESSAGE64> reply_message,
+                                               emulator_object<PORT_MESSAGE64> receive_message);
+        NTSTATUS handle_NtRequestWaitReplyPort(const syscall_context& c, handle port_handle,
+                                               emulator_object<PORT_MESSAGE64> request_message,
+                                               emulator_object<PORT_MESSAGE64> reply_message);
 
         // syscalls/process.cpp:
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, handle process_handle, uint32_t info_class,
@@ -1405,11 +1416,6 @@ namespace sogen
             return STATUS_DEBUGGER_INACTIVE;
         }
 
-        NTSTATUS handle_NtRequestWaitReplyPort()
-        {
-            return STATUS_NOT_SUPPORTED;
-        }
-
         NTSTATUS handle_NtUserGetProcessUIContextInformation(const syscall_context& /*c*/, const handle /*process_handle*/,
                                                              const emulator_object<std::array<ULONG, 2>> ui_context)
         {
@@ -1795,6 +1801,11 @@ namespace sogen
         add_handler(NtAlpcDisconnectPort);
         add_handler(NtAlpcQueryInformation);
         add_handler(NtAlpcAcceptConnectPort);
+        add_handler(NtListenPort);
+        add_handler(NtAcceptConnectPort);
+        add_handler(NtCompleteConnectPort);
+        add_handler(NtReplyWaitReceivePort);
+        add_handler(NtRequestWaitReplyPort);
         add_handler(NtAlpcCreatePortSection);
         add_handler(NtAlpcDeletePortSection);
         add_handler(NtAlpcCreateSectionView);
@@ -1828,7 +1839,6 @@ namespace sogen
         add_handler(NtUserFindWindowEx);
         add_handler(NtUserMoveWindow);
         add_handler(NtSystemDebugControl);
-        add_handler(NtRequestWaitReplyPort);
         add_handler(NtQueryDefaultLocale);
         add_handler(NtSetTimerResolution);
         add_handler(NtSuspendThread);

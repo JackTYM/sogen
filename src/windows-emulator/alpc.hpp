@@ -58,6 +58,7 @@ namespace sogen
             uint64_t context{};
             uint32_t flags{};
             uint64_t max_message_length{};
+            uint64_t connection_max_message_length{};
             bool disconnected{};
 
             std::deque<message> queue{};
@@ -103,6 +104,7 @@ namespace sogen
             receive,
             reply,
             connect,
+            lpc_connect,
         };
 
         struct pending_wait
@@ -114,6 +116,9 @@ namespace sogen
             uint64_t buffer_length{};
             uint64_t receive_attributes{};
             uint64_t port_handle_out{};
+            uint64_t connection_info{};
+            uint64_t connection_info_length{};
+            uint64_t maximum_message_length{};
             bool wow64_layout{};
             std::optional<std::chrono::steady_clock::time_point> timeout{};
         };
@@ -125,8 +130,12 @@ namespace sogen
         NTSTATUS connect_port(const syscall_context& c, std::u16string_view name, uint64_t port_attributes, uint32_t flags,
                               uint64_t connection_message, uint64_t buffer_length, uint64_t out_message_attributes,
                               uint64_t in_message_attributes, uint64_t timeout, uint64_t port_handle_out);
+        NTSTATUS connect_lpc_port(const syscall_context& c, std::u16string_view name, uint64_t connection_info,
+                                  uint64_t connection_info_length, uint64_t maximum_message_length, uint64_t port_handle_out);
+        NTSTATUS listen_port(const syscall_context& c, uint64_t port_id, uint64_t connection_request);
         NTSTATUS accept_connect_port(const syscall_context& c, uint64_t port_handle_out, handle connection_port, uint32_t flags,
                                      uint64_t port_attributes, uint64_t port_context, uint64_t connection_request, bool accept);
+        NTSTATUS complete_connect_port(const syscall_context& c, uint64_t port_id);
         NTSTATUS send_wait_receive(const syscall_context& c, uint64_t port_id, uint32_t flags, uint64_t send_message,
                                    uint64_t send_attributes, uint64_t receive_message, uint64_t buffer_length, uint64_t receive_attributes,
                                    uint64_t timeout);

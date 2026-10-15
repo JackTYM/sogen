@@ -45,6 +45,7 @@ namespace sogen::alpc
             uint16_t type{};
             uint32_t callback_id{};
             NTSTATUS status{};
+            uint64_t max_message_length{};
             bool expects_reply{};
             std::vector<uint8_t> data{};
             std::optional<std::vector<uint8_t>> view{};
@@ -59,6 +60,7 @@ namespace sogen::alpc
                 buffer.write(this->type);
                 buffer.write(this->callback_id);
                 buffer.write(this->status);
+                buffer.write(this->max_message_length);
                 buffer.write(this->expects_reply);
                 buffer.write_vector(this->data);
                 buffer.write(this->view.has_value());
@@ -84,6 +86,7 @@ namespace sogen::alpc
                 buffer.read(result.type);
                 buffer.read(result.callback_id);
                 buffer.read(result.status);
+                buffer.read(result.max_message_length);
                 buffer.read(result.expects_reply);
                 buffer.read_vector(result.data);
                 if (buffer.read<bool>())
@@ -242,6 +245,7 @@ namespace sogen::alpc
                 }
 
                 client->connection_status = payload.status;
+                client->connection_max_message_length = payload.max_message_length;
                 client->connection_reply = make_message(payload.sender_message_id, client_id);
                 client->connection_reply->type = LPC_REPLY;
                 return true;
@@ -519,6 +523,29 @@ namespace sogen::alpc
             return STATUS_SUCCESS;
         }
 
+        void write_lpc_connect_outputs(windows_emulator& win_emu, const port& p, const pending_wait& wait)
+        {
+            auto& emu = win_emu.emu();
+            const auto& reply_data = p.connection_reply ? p.connection_reply->data : std::vector<uint8_t>{};
+
+            if (wait.connection_info_length)
+            {
+                const auto capacity = emu.read_memory<ULONG>(wait.connection_info_length);
+                const auto count = std::min<size_t>(capacity, reply_data.size());
+                if (wait.connection_info && count)
+                {
+                    emu.write_memory(wait.connection_info, reply_data.data(), count);
+                }
+
+                emu.write_memory<ULONG>(wait.connection_info_length, static_cast<ULONG>(reply_data.size()));
+            }
+
+            if (wait.maximum_message_length)
+            {
+                emu.write_memory<ULONG>(wait.maximum_message_length, static_cast<ULONG>(p.connection_max_message_length));
+            }
+        }
+
         std::deque<message>* receive_queue(state& s, port& p)
         {
             if (p.kind == port_kind::server_communication)
@@ -758,6 +785,8 @@ namespace sogen::alpc
 
         if (accept)
         {
+            payload.max_message_length = listener->max_message_length;
+
             port p{};
             p.kind = port_kind::server_communication;
             p.name = listener->name;
@@ -778,6 +807,72 @@ namespace sogen::alpc
         }
 
         route(c.win_emu, {.port_name = listener->name, .connection_id = record.connection_id, .to_server = false, .payload = payload});
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS connect_lpc_port(const syscall_context& c, const std::u16string_view name, const uint64_t connection_info,
+                              const uint64_t connection_info_length, const uint64_t maximum_message_length, const uint64_t port_handle_out)
+    {
+        auto& s = c.proc.alpc;
+
+        port p{};
+        p.kind = port_kind::client_communication;
+        p.name = name;
+        p.max_message_length = default_max_message_length;
+        p.connection_id = (static_cast<uint64_t>(c.proc.process_id) << 32) | ++s.next_connection_serial;
+
+        const auto id = new_port_id(s);
+        const auto connection_id = p.connection_id;
+        s.ports.emplace(id, std::move(p));
+        s.client_ports[connection_id] = id;
+
+        transport payload{};
+        payload.kind = transport_kind::connect_request;
+        payload.sender_message_id = new_message_id(s);
+        payload.sender_process_id = c.proc.process_id;
+        payload.sender_thread_id = c.thread().id;
+        if (connection_info && connection_info_length)
+        {
+            payload.data.resize(c.emu.read_memory<ULONG>(connection_info_length));
+            c.emu.read_memory(connection_info, payload.data.data(), payload.data.size());
+        }
+
+        route(c.win_emu, {.port_name = std::u16string(name), .connection_id = connection_id, .to_server = true, .payload = payload});
+
+        return park(c, pending_wait{
+                           .kind = wait_kind::lpc_connect,
+                           .port_id = id,
+                           .port_handle_out = port_handle_out,
+                           .connection_info = connection_info,
+                           .connection_info_length = connection_info_length,
+                           .maximum_message_length = maximum_message_length,
+                       });
+    }
+
+    NTSTATUS listen_port(const syscall_context& c, const uint64_t port_id, const uint64_t connection_request)
+    {
+        const auto* listener = find_port(c.proc.alpc, port_id);
+        if (!listener || listener->kind != port_kind::connection)
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        return park(c, pending_wait{
+                           .kind = wait_kind::receive,
+                           .port_id = port_id,
+                           .receive_message = connection_request,
+                           .wow64_layout = c.proc.is_wow64_process,
+                       });
+    }
+
+    NTSTATUS complete_connect_port(const syscall_context& c, const uint64_t port_id)
+    {
+        const auto* server = find_port(c.proc.alpc, port_id);
+        if (!server || server->kind != port_kind::server_communication)
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
         return STATUS_SUCCESS;
     }
 
@@ -915,6 +1010,7 @@ namespace sogen::alpc
         switch (wait.kind)
         {
         case wait_kind::connect:
+        case wait_kind::lpc_connect:
             if (p->connection_status)
             {
                 const auto status = *p->connection_status;
@@ -925,7 +1021,11 @@ namespace sogen::alpc
                     return status;
                 }
 
-                if (wait.receive_message && p->connection_reply)
+                if (wait.kind == wait_kind::lpc_connect)
+                {
+                    write_lpc_connect_outputs(win_emu, *p, wait);
+                }
+                else if (wait.receive_message && p->connection_reply)
                 {
                     const auto write_status = write_received_message(win_emu, *p->connection_reply, wait.receive_message,
                                                                      wait.buffer_length, 0, wait.wow64_layout);
