@@ -1785,27 +1785,6 @@ namespace
         return zeroed;
     }
 
-    bool test_user_object_information()
-    {
-        std::array<wchar_t, 64> station{};
-        std::array<wchar_t, 64> desk{};
-        DWORD needed{};
-
-        if (!GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, station.data(), sizeof(station), &needed) ||
-            !GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, desk.data(), sizeof(desk), &needed))
-        {
-            return false;
-        }
-
-        if (GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, station.data(), 2, &needed) ||
-            GetLastError() != ERROR_INSUFFICIENT_BUFFER || needed != sizeof(L"WinSta0"))
-        {
-            return false;
-        }
-
-        return std::wstring_view(station.data()) == L"WinSta0" && std::wstring_view(desk.data()) == L"Default";
-    }
-
     bool test_mmio()
     {
         const auto t0 = timeGetTime();
@@ -2166,7 +2145,6 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_actctx, "Activation Context")
     RUN_TEST(test_executable_heap_growth, "Executable Heap Growth")
     RUN_TEST(test_recommitted_memory_is_zeroed, "Recommitted Memory Is Zeroed")
-    RUN_TEST(test_user_object_information, "User Object Information")
     RUN_TEST(test_mmio, "MMIO")
     RUN_TEST(test_self_modifying_code, "Self-Modifying Code")
     RUN_TEST(test_gdi, "GDI")

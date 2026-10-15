@@ -736,8 +736,7 @@ namespace sogen
         BOOL handle_NtUserGetCaretPos(const syscall_context& c, emulator_pointer point_ptr);
         BOOL handle_NtUserShowCaret();
         BOOL handle_NtUserHideCaret();
-        BOOL handle_NtUserGetObjectInformation(const syscall_context& c, handle object, int index, uint64_t information, ULONG length,
-                                               emulator_object<ULONG> length_needed);
+        BOOL handle_NtUserGetObjectInformation();
         uint64_t handle_NtUserQueryWindow(const syscall_context& c, hwnd window_handle, uint32_t query_type);
         int handle_NtUserSetScrollInfo();
         BOOL handle_NtUserIsTouchWindow();
