@@ -78,6 +78,7 @@ namespace sogen
         this->path_mapping_.clear();
         this->overlay_values_.clear();
         this->overlay_keys_.clear();
+        this->deleted_keys_.clear();
         this->hives_.clear();
 
         const std::filesystem::path root = R"(\registry)";
@@ -458,6 +459,11 @@ namespace sogen
     {
         const auto normal_key = this->normalize_path(key);
 
+        if (this->deleted_keys_.contains(normal_key) && !this->overlay_keys_.contains(normal_key))
+        {
+            return std::nullopt;
+        }
+
         static const utils::path_key machine_root{"\\registry\\machine"};
         static const utils::path_key user_root{"\\registry\\user"};
 
@@ -520,6 +526,11 @@ namespace sogen
             }
         }
 
+        if (this->deleted_keys_.contains(registry_manager::get_full_key_path(key)))
+        {
+            return std::nullopt;
+        }
+
         const auto iterator = this->hives_.find(key.hive);
         if (iterator == this->hives_.end())
         {
@@ -542,6 +553,11 @@ namespace sogen
 
     std::optional<registry_value> registry_manager::get_value(const registry_key& key, const size_t index)
     {
+        if (this->deleted_keys_.contains(registry_manager::get_full_key_path(key)))
+        {
+            return std::nullopt;
+        }
+
         const auto iterator = this->hives_.find(key.hive);
         if (iterator == this->hives_.end())
         {
@@ -573,20 +589,36 @@ namespace sogen
     registry_manager::delete_result registry_manager::delete_key(const registry_key& key)
     {
         const auto full_path = registry_manager::get_full_key_path(key);
-        if (!this->overlay_keys_.contains(full_path))
+        if (this->hives_.contains(full_path))
         {
             return delete_result::read_only;
         }
 
-        const auto has_sub_keys = std::ranges::any_of(
+        const auto in_overlay = this->overlay_keys_.contains(full_path);
+        const auto in_hive = this->get_hive_key(key).has_value();
+        if (!in_overlay && !in_hive)
+        {
+            return delete_result::not_found;
+        }
+
+        const auto has_overlay_sub_keys = std::ranges::any_of(
             this->overlay_keys_, [&](const utils::path_key& other) { return other != full_path && is_subpath(full_path, other); });
-        if (has_sub_keys)
+        if (has_overlay_sub_keys || this->get_sub_key_name(key, 0).has_value())
         {
             return delete_result::has_sub_keys;
         }
 
-        this->overlay_keys_.erase(full_path);
-        this->overlay_values_.erase(full_path);
+        if (in_overlay)
+        {
+            this->overlay_keys_.erase(full_path);
+            this->overlay_values_.erase(full_path);
+        }
+
+        if (in_hive)
+        {
+            this->deleted_keys_.insert(full_path);
+        }
+
         return delete_result::deleted;
     }
 
@@ -621,6 +653,8 @@ namespace sogen
         buffer.write_map(this->overlay_values_);
         const std::vector<utils::path_key> keys_vec(this->overlay_keys_.begin(), this->overlay_keys_.end());
         buffer.write_vector(keys_vec);
+        const std::vector<utils::path_key> deleted_vec(this->deleted_keys_.begin(), this->deleted_keys_.end());
+        buffer.write_vector(deleted_vec);
     }
 
     void registry_manager::deserialize_runtime_state(utils::buffer_deserializer& buffer)
@@ -628,6 +662,8 @@ namespace sogen
         buffer.read_map(this->overlay_values_);
         const auto keys_vec = buffer.read_vector<utils::path_key>();
         this->overlay_keys_.insert(keys_vec.begin(), keys_vec.end());
+        const auto deleted_vec = buffer.read_vector<utils::path_key>();
+        this->deleted_keys_.insert(deleted_vec.begin(), deleted_vec.end());
     }
 
     registry_manager::hive_map::iterator registry_manager::find_hive(const utils::path_key& key)
@@ -645,6 +681,11 @@ namespace sogen
 
     std::optional<exposed_hive_key> registry_manager::get_hive_key(const registry_key& key)
     {
+        if (this->deleted_keys_.contains(registry_manager::get_full_key_path(key)))
+        {
+            return std::nullopt;
+        }
+
         const auto iterator = this->hives_.find(key.hive);
         if (iterator == this->hives_.end())
         {
@@ -671,13 +712,57 @@ namespace sogen
             return std::nullopt;
         }
 
-        const auto* name = iterator->second->get_sub_key_name(key.path.get(), index);
-        if (!name)
+        if (this->deleted_keys_.empty())
         {
-            return std::nullopt;
+            const auto* name = iterator->second->get_sub_key_name(key.path.get(), index);
+            if (!name)
+            {
+                return std::nullopt;
+            }
+
+            return *name;
         }
 
-        return *name;
+        const auto parent_path = registry_manager::get_full_key_path(key);
+        size_t visible_index = 0;
+        for (size_t hive_index = 0;; ++hive_index)
+        {
+            const auto* name = iterator->second->get_sub_key_name(key.path.get(), hive_index);
+            if (!name)
+            {
+                return std::nullopt;
+            }
+
+            if (!this->deleted_keys_.empty() &&
+                this->deleted_keys_.contains(utils::path_key{parent_path.get() / std::filesystem::path(*name)}))
+            {
+                continue;
+            }
+
+            if (visible_index == index)
+            {
+                return *name;
+            }
+
+            ++visible_index;
+        }
+    }
+
+    size_t registry_manager::get_sub_key_count(const registry_key& key)
+    {
+        if (this->deleted_keys_.empty())
+        {
+            const auto hive_key = this->get_hive_key(key);
+            return hive_key ? hive_key->key.get_sub_key_count(hive_key->file) : 0;
+        }
+
+        size_t count = 0;
+        while (this->get_sub_key_name(key, count).has_value())
+        {
+            ++count;
+        }
+
+        return count;
     }
 
     std::optional<std::u16string> registry_manager::read_u16string(const registry_key& key, size_t index)

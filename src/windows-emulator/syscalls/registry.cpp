@@ -211,7 +211,7 @@ namespace sogen
                 }
 
                 KEY_CACHED_INFORMATION info{};
-                info.SubKeys = static_cast<ULONG>(hive_key->key.get_sub_key_count(hive_key->file));
+                info.SubKeys = static_cast<ULONG>(c.win_emu.registry.get_sub_key_count(*key));
                 info.Values = static_cast<ULONG>(hive_key->key.get_value_count(hive_key->file));
                 info.NameLength = static_cast<ULONG>(key_name.size() * 2);
                 info.MaxValueDataLen = 0x1000;
