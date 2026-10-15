@@ -552,7 +552,9 @@ namespace sogen
             static_cast<size_t>((required_gs_size > GS_SEGMENT_SIZE) ? page_align_up(required_gs_size) : GS_SEGMENT_SIZE);
 
         // Allocate GS segment to hold both TEB32 and TEB64 for WOW64 process
-        const auto gs_segment_base = memory.allocate_memory(actual_gs_size, memory_permission::read_write);
+        // The 32-bit TEB inside this segment and the 32-bit stack below are addressed through 32-bit registers.
+        const auto gs_segment_base = memory.allocate_memory(actual_gs_size, memory_permission::read_write, false, 0,
+                                                            memory_region_kind::private_allocation, MAX_ALLOCATION_ADDRESS_32BIT);
         if (!gs_segment_base)
         {
             throw thread_allocation_failure("Failed to allocate GS segment memory for a new WOW64 thread");
@@ -643,7 +645,8 @@ namespace sogen
         });
 
         // Allocate dynamic 32-bit stack for WOW64 thread
-        this->wow64_stack_base = memory.allocate_memory(static_cast<size_t>(this->wow64_stack_size.value()), memory_permission::read_write);
+        this->wow64_stack_base = memory.allocate_memory(static_cast<size_t>(this->wow64_stack_size.value()), memory_permission::read_write,
+                                                        false, 0, memory_region_kind::private_allocation, MAX_ALLOCATION_ADDRESS_32BIT);
         if (!this->wow64_stack_base.value())
         {
             throw thread_allocation_failure("Failed to allocate WOW64 32-bit stack memory");
