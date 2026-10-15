@@ -182,6 +182,9 @@ CALL :collect lsasrv.dll
 CALL :collect samsrv.dll
 CALL :collect msv1_0.dll
 CALL :collect kerberos.dll
+CALL :collect sspisrv.dll
+CALL :collect dpapisrv.dll
+CALL :collect efslsaext.dll
 CALL :collect cryptdll.dll
 CALL :collect keyiso.dll
 CALL :collect msprivs.dll
