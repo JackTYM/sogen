@@ -133,6 +133,8 @@ namespace sogen
         NTSTATUS delete_port_section(const syscall_context& c, uint64_t section);
         NTSTATUS create_section_view(const syscall_context& c, uint64_t view_attributes);
         NTSTATUS delete_section_view(const syscall_context& c, uint64_t view_base);
+        NTSTATUS query_emulated_port_information(const syscall_context& c, uint32_t info_class, uint64_t information, uint32_t length,
+                                                 uint64_t return_length);
         NTSTATUS query_information(const syscall_context& c, uint64_t port_id, uint32_t info_class, uint64_t information, uint32_t length,
                                    uint64_t return_length);
         NTSTATUS set_information(const syscall_context& c, uint64_t port_id, uint32_t info_class, uint64_t information, uint32_t length);

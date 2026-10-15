@@ -991,6 +991,31 @@ namespace sogen::alpc
         return std::nullopt;
     }
 
+    NTSTATUS query_emulated_port_information(const syscall_context& c, const uint32_t info_class, const uint64_t information,
+                                             const uint32_t length, const uint64_t return_length)
+    {
+        if (info_class != basic_information)
+        {
+            return STATUS_INVALID_INFO_CLASS;
+        }
+
+        constexpr uint32_t required = 16;
+        if (return_length)
+        {
+            c.emu.write_memory<uint32_t>(return_length, required);
+        }
+
+        if (length < required || !information)
+        {
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+
+        const std::array<uint8_t, required> zeroed{};
+        c.emu.write_memory(information, zeroed.data(), zeroed.size());
+
+        return STATUS_SUCCESS;
+    }
+
     NTSTATUS query_information(const syscall_context& c, const uint64_t port_id, const uint32_t info_class, const uint64_t information,
                                const uint32_t length, const uint64_t return_length)
     {

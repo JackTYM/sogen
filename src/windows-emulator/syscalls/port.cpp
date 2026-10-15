@@ -438,9 +438,14 @@ namespace sogen
                                                const emulator_pointer return_length)
         {
             const auto* port = c.proc.ports.get(port_handle);
-            if (!port || port->alpc_port_id() == 0)
+            if (!port)
             {
                 return STATUS_NOT_SUPPORTED;
+            }
+
+            if (port->alpc_port_id() == 0)
+            {
+                return alpc::query_emulated_port_information(c, information_class, information, length, return_length);
             }
 
             return alpc::query_information(c, port->alpc_port_id(), information_class, information, length, return_length);
