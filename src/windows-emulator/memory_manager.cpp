@@ -1053,7 +1053,7 @@ namespace sogen
     }
 
     uint64_t memory_manager::allocate_memory(const size_t size, const nt_memory_permission permissions, const bool reserve_only,
-                                             uint64_t start, const memory_region_kind kind)
+                                             uint64_t start, const memory_region_kind kind, const uint64_t highest_address)
     {
         // Backends sharing the guest address space with this process (e.g. FEX) can allocate their own
         // host-side memory (JIT code buffers, thread stacks, a framework's lazy vm_allocate, a GCD
@@ -1081,7 +1081,8 @@ namespace sogen
         // it in size-sized steps instead of skipping it in one go.
         for (int attempt = 0;; ++attempt)
         {
-            const uint64_t allocation_base = this->find_free_host_allocation_base(size, start);
+            const uint64_t allocation_base =
+                this->find_free_host_allocation_base(size, start, highest_address ? highest_address : MAX_ALLOCATION_END_EXCL - 1);
             if (!allocation_base)
             {
                 if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)

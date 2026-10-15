@@ -21,6 +21,7 @@ namespace sogen
     constexpr auto MAX_ALLOCATION_END_EXCL = MAX_ALLOCATION_ADDRESS + 1ULL;
     constexpr auto DEFAULT_ALLOCATION_ADDRESS_64BIT = 0x100000000ULL;
     constexpr auto DEFAULT_ALLOCATION_ADDRESS_32BIT = 0x10000ULL;
+    constexpr auto MAX_ALLOCATION_ADDRESS_32BIT = 0x7FFEFFFFULL;
 
     enum class memory_region_kind : uint8_t
     {
@@ -161,7 +162,7 @@ namespace sogen
         void unmap_all_memory();
 
         uint64_t allocate_memory(size_t size, nt_memory_permission permissions, bool reserve_only = false, uint64_t start = 0,
-                                 memory_region_kind kind = memory_region_kind::private_allocation);
+                                 memory_region_kind kind = memory_region_kind::private_allocation, uint64_t highest_address = 0);
 
         uint64_t find_free_allocation_base(size_t size, uint64_t start = 0) const;
         uint64_t find_free_allocation_base(size_t size, uint64_t start, uint64_t alignment, uint64_t lowest_address,
