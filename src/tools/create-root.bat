@@ -177,6 +177,16 @@ CALL :collect scecli.dll
 CALL :collect scesrv.dll
 CALL :collect sechost.dll
 CALL :collect services.exe
+CALL :collect lsass.exe
+CALL :collect lsasrv.dll
+CALL :collect samsrv.dll
+CALL :collect msv1_0.dll
+CALL :collect kerberos.dll
+CALL :collect cryptdll.dll
+CALL :collect keyiso.dll
+CALL :collect msprivs.dll
+CALL :collect schannel.dll
+CALL :collect wdigest.dll
 CALL :collect Secur32.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
