@@ -615,6 +615,8 @@ namespace sogen
         // WOW64 support flag - set during process setup based on executable architecture
         bool is_wow64_process{false};
 
+        bool break_on_termination{false};
+
         uint32_t default_locale_id{};
 
         callbacks* callbacks_{};

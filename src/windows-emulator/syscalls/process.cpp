@@ -525,6 +525,10 @@ namespace sogen
                     res = (info_class == ProcessDebugFlags ? 1 : 0); //
                 });
 
+            case ProcessBreakOnTermination:
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length,
+                                           [&](ULONG& res) { res = c.proc.break_on_termination; });
+
             case ProcessDebugPort:
                 c.win_emu.callbacks.on_suspicious_activity("Anti-debug check with ProcessDebugPort");
 
@@ -828,11 +832,23 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
+            if (info_class == ProcessBreakOnTermination)
+            {
+                if (process_information_length != sizeof(ULONG))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                c.proc.break_on_termination = c.emu.read_memory<ULONG>(process_information) != 0;
+                return STATUS_SUCCESS;
+            }
+
             if (info_class == ProcessSchedulerSharedData                     //
                 || info_class == ProcessConsoleHostProcess                   //
                 || info_class == ProcessFaultInformation                     //
                 || info_class == ProcessDefaultHardErrorMode                 //
                 || info_class == ProcessRaiseUMExceptionOnInvalidHandleClose //
+                || info_class == ProcessHandleCheckingMode                   //
                 || info_class == ProcessDynamicFunctionTableInformation      //
                 || info_class == ProcessPriorityBoost                        //
                 || info_class == ProcessPriorityClassEx                      //
