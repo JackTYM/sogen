@@ -9,6 +9,14 @@ namespace sogen
 
     namespace syscalls
     {
+        namespace
+        {
+            // The kernel's SRM command port: lsass connects here and the kernel connects back to LSA.
+            constexpr std::u16string_view srm_command_port_name = u"\\SeRmCommandPort";
+            constexpr std::u16string_view lsa_command_port_name = u"\\SeLsaCommandPort";
+            constexpr uint64_t srm_command_port_max_message_length = 0x200;
+        }
+
         NTSTATUS handle_NtConnectPort(const syscall_context& c, const emulator_object<handle> client_port_handle,
                                       const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> server_port_name,
                                       const emulator_object<SECURITY_QUALITY_OF_SERVICE> /*security_qos*/,
@@ -19,6 +27,11 @@ namespace sogen
         {
             auto port_name = read_unicode_string(c.emu, server_port_name);
             c.win_emu.callbacks.on_generic_access("Connecting port", port_name);
+
+            if (port_name == srm_command_port_name)
+            {
+                alpc::create_kernel_listener(c.proc, port_name, srm_command_port_max_message_length, lsa_command_port_name);
+            }
 
             if (alpc::is_guest_port_name(c.proc, port_name))
             {

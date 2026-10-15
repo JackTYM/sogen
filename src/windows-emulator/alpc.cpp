@@ -26,6 +26,7 @@ namespace sogen::alpc
         constexpr ULONG work_on_behalf_attribute = 0x02000000;
 
         constexpr uint64_t default_max_message_length = 0xFFEF;
+        constexpr uint32_t system_process_id = 4;
 
         enum class transport_kind : uint8_t
         {
@@ -168,6 +169,8 @@ namespace sogen::alpc
             return enabled;
         }
 
+        void accept_kernel_connection(windows_emulator& win_emu, uint64_t listener_id, const addressed_transport& t);
+
         bool deliver_transport(windows_emulator& win_emu, const addressed_transport& t)
         {
             auto& s = win_emu.process.alpc;
@@ -220,6 +223,12 @@ namespace sogen::alpc
                 if (!connection_port_id)
                 {
                     return false;
+                }
+
+                if (s.ports.at(*connection_port_id).kernel_peer)
+                {
+                    accept_kernel_connection(win_emu, *connection_port_id, t);
+                    return true;
                 }
 
                 const auto id = new_message_id(s);
@@ -276,6 +285,13 @@ namespace sogen::alpc
                 auto* target = t.to_server ? find_port(s, endpoint->connection_port_id) : endpoint;
                 if (!target)
                 {
+                    return true;
+                }
+
+                if (target->kernel_peer)
+                {
+                    win_emu.log.error("[srm] request on \"%s\" from pid %u: %zu bytes, no kernel handler\n",
+                                      u16_to_u8(target->name).c_str(), payload.sender_process_id, payload.data.size());
                     return true;
                 }
 
@@ -342,6 +358,65 @@ namespace sogen::alpc
             }
 
             win_emu.broadcast_alpc(t.port_name, t.connection_id, t.to_server, t.payload.encode());
+        }
+
+        void connect_kernel_client(windows_emulator& win_emu, const std::u16string& name)
+        {
+            auto& s = win_emu.process.alpc;
+
+            port p{};
+            p.kind = port_kind::client_communication;
+            p.name = name;
+            p.max_message_length = default_max_message_length;
+            p.connection_id = (static_cast<uint64_t>(system_process_id) << 32) | ++s.next_connection_serial;
+
+            const auto id = new_port_id(s);
+            const auto connection_id = p.connection_id;
+            s.ports.emplace(id, std::move(p));
+            s.client_ports[connection_id] = id;
+
+            transport payload{};
+            payload.kind = transport_kind::connect_request;
+            payload.sender_message_id = new_message_id(s);
+            payload.sender_process_id = system_process_id;
+
+            route(win_emu, {.port_name = name, .connection_id = connection_id, .to_server = true, .payload = payload});
+        }
+
+        // The kernel side of a listener accepts the connection itself: it creates the server endpoint, connects
+        // back to the peer port, and answers the client with the listener's own maximum message length.
+        void accept_kernel_connection(windows_emulator& win_emu, const uint64_t listener_id, const addressed_transport& t)
+        {
+            auto& s = win_emu.process.alpc;
+            const auto& listener = s.ports.at(listener_id);
+            const auto& peer_name = *listener.kernel_peer;
+
+            transport reply{};
+            reply.kind = transport_kind::connect_reply;
+            reply.sender_message_id = t.payload.sender_message_id;
+            reply.sender_process_id = system_process_id;
+            reply.status = STATUS_PORT_CONNECTION_REFUSED;
+
+            if (find_connection_port(s, peer_name))
+            {
+                port server{};
+                server.kind = port_kind::server_communication;
+                server.name = listener.name;
+                server.connection_id = t.connection_id;
+                server.connection_port_id = listener_id;
+                server.max_message_length = listener.max_message_length;
+
+                const auto server_id = new_port_id(s);
+                s.ports.emplace(server_id, std::move(server));
+                s.server_ports[t.connection_id] = server_id;
+
+                connect_kernel_client(win_emu, peer_name);
+
+                reply.status = STATUS_SUCCESS;
+                reply.max_message_length = listener.max_message_length;
+            }
+
+            route(win_emu, {.port_name = listener.name, .connection_id = t.connection_id, .to_server = false, .payload = reply});
         }
 
         uint64_t attribute_offset(const ULONG allocated, const ULONG attribute, const bool wow64)
@@ -629,6 +704,23 @@ namespace sogen::alpc
         }
     }
 
+    void create_kernel_listener(process_context& proc, const std::u16string_view name, const uint64_t max_message_length,
+                                const std::u16string_view peer_name)
+    {
+        auto& s = proc.alpc;
+        if (find_connection_port(s, name))
+        {
+            return;
+        }
+
+        port p{};
+        p.kind = port_kind::connection;
+        p.name = name;
+        p.max_message_length = max_message_length;
+        p.kernel_peer = std::u16string(peer_name);
+        s.ports.emplace(new_port_id(s), std::move(p));
+    }
+
     bool is_guest_port_name(process_context& proc, const std::u16string_view name)
     {
         if (name.empty())
@@ -758,9 +850,7 @@ namespace sogen::alpc
     {
         auto& s = c.proc.alpc;
 
-        const auto* container = c.proc.ports.get(connection_port);
-        auto* listener = container ? find_port(s, container->alpc_port_id()) : nullptr;
-        if (!listener || listener->kind != port_kind::connection || !connection_request)
+        if (!connection_request)
         {
             return STATUS_INVALID_PARAMETER;
         }
@@ -773,6 +863,14 @@ namespace sogen::alpc
         }
 
         const auto record = pending->second;
+        const auto* container = c.proc.ports.get(connection_port);
+        const auto listener_id = container ? container->alpc_port_id() : record.connection_port_id;
+        auto* listener = find_port(s, listener_id);
+        if (!listener || listener->kind != port_kind::connection)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
         s.pending.erase(pending);
 
         transport payload{};
@@ -791,7 +889,7 @@ namespace sogen::alpc
             p.kind = port_kind::server_communication;
             p.name = listener->name;
             p.connection_id = record.connection_id;
-            p.connection_port_id = container->alpc_port_id();
+            p.connection_port_id = listener_id;
             p.context = port_context;
             p.max_message_length = port_attributes ? read_max_message_length(c, port_attributes) : listener->max_message_length;
 

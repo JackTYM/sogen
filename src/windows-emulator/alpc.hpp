@@ -73,6 +73,7 @@ namespace sogen
             uint64_t completion_key{};
 
             std::shared_ptr<kernel_slot> name_slot{};
+            std::optional<std::u16string> kernel_peer{};
         };
 
         struct pending_message
@@ -124,6 +125,8 @@ namespace sogen
         };
 
         bool is_guest_port_name(process_context& proc, std::u16string_view name);
+        void create_kernel_listener(process_context& proc, std::u16string_view name, uint64_t max_message_length,
+                                    std::u16string_view peer_name);
 
         NTSTATUS create_port(const syscall_context& c, std::u16string name, uint64_t port_attributes, handle& out);
         NTSTATUS create_port(const syscall_context& c, std::u16string name, uint32_t flags, uint64_t max_message_length, handle& out);
