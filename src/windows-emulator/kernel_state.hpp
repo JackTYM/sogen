@@ -33,6 +33,7 @@ namespace sogen
             semaphore = 3,
             section = 4,
             named_pipe = 5,
+            alpc_port = 6,
         };
 
         struct named_object

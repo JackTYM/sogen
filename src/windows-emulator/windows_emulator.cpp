@@ -1253,6 +1253,22 @@ namespace sogen
         }
     }
 
+    void windows_emulator::broadcast_alpc(const std::u16string_view port_name, const uint64_t connection_id, const bool to_server,
+                                          std::string data)
+    {
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::alpc;
+        message.pipe_name = port_name;
+        message.data = std::move(data);
+        message.connection_id = connection_id;
+        message.to_server = to_server;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
     void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name, const uint64_t connection_id,
                                                         const std::optional<uint32_t> client_process_id)
     {
@@ -1445,6 +1461,10 @@ namespace sogen
                 else if (message->type == pipe_ipc_message_type::connect)
                 {
                     connect_named_pipe_client(*this, this->process, message->pipe_name, message->connection_id, message->client_process_id);
+                }
+                else if (message->type == pipe_ipc_message_type::alpc)
+                {
+                    alpc::deliver(*this, *message);
                 }
                 else if (message->type == pipe_ipc_message_type::server_created)
                 {

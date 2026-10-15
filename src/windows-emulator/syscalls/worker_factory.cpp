@@ -218,6 +218,14 @@ namespace sogen
 
     namespace syscalls
     {
+        NTSTATUS handle_NtAlpcSendWaitReceivePort(const syscall_context& c, handle port_handle, ULONG flags,
+                                                  emulator_object<PORT_MESSAGE64> send_message,
+                                                  emulator_object<ALPC_MESSAGE_ATTRIBUTES> send_message_attributes,
+                                                  emulator_object<PORT_MESSAGE64> receive_message,
+                                                  emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
+                                                  emulator_object<ALPC_MESSAGE_ATTRIBUTES> receive_message_attributes,
+                                                  emulator_object<LARGE_INTEGER> timeout);
+
         namespace
         {
             std::u16string read_object_name(const syscall_context& c,
@@ -559,11 +567,28 @@ namespace sogen
         NTSTATUS handle_NtWaitForWorkViaWorkerFactory(
             const syscall_context& c, const handle worker_factory_handle,
             const emulator_object<FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>>> mini_packets, const ULONG count,
-            const emulator_object<ULONG> packets_returned, const emulator_pointer /*deferred_work*/)
+            const emulator_object<ULONG> packets_returned, const emulator_pointer deferred_work)
         {
             if (count == 0 || !mini_packets)
             {
                 return STATUS_INVALID_PARAMETER;
+            }
+
+            if (deferred_work)
+            {
+                // WORKER_FACTORY_DEFERRED_WORK: a threadpool callback's reply (TpCallbackSendAlpcMessageOnCompletion)
+                // is handed to the kernel here and sent before the worker waits for its next packet.
+                const auto message = c.emu.read_memory<uint64_t>(deferred_work);
+                if (message)
+                {
+                    const auto port = make_handle(c.emu.read_memory<uint64_t>(deferred_work + 0x08));
+                    const auto flags = c.emu.read_memory<ULONG>(deferred_work + 0x10);
+                    const emulator_object<LARGE_INTEGER> no_timeout{c.emu, 0};
+                    handle_NtAlpcSendWaitReceivePort(
+                        c, port, flags, emulator_object<PORT_MESSAGE64>{c.emu, message}, emulator_object<ALPC_MESSAGE_ATTRIBUTES>{c.emu, 0},
+                        emulator_object<PORT_MESSAGE64>{c.emu, 0}, emulator_object<EmulatorTraits<Emu64>::SIZE_T>{c.emu, 0},
+                        emulator_object<ALPC_MESSAGE_ATTRIBUTES>{c.emu, 0}, no_timeout);
+                }
             }
 
             auto* factory = c.proc.worker_factories.get(worker_factory_handle);

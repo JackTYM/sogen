@@ -1,6 +1,7 @@
 #pragma once
 
 #include "handles.hpp"
+#include "alpc.hpp"
 #include "emulator_utils.hpp"
 #include "memory_manager.hpp"
 
@@ -334,6 +335,7 @@ namespace sogen
         std::optional<pending_msg> await_msg{};
         std::optional<DWORD> await_msg_mask{};
         std::optional<pending_io_completion_wait> await_io_completion{};
+        std::optional<alpc::pending_wait> await_alpc{};
 
         // When set, the thread is parked until this host-side predicate returns true. Used by the GPU
         // bridge to wait on a Vulkan semaphore cooperatively (other guest threads run while the GPU works)
@@ -426,7 +428,7 @@ namespace sogen
         {
             return this->waiting_for_alert || this->await_msg.has_value() || this->await_msg_mask.has_value() ||
                    !this->await_objects.empty() || this->await_time.has_value() || this->await_io_completion.has_value() ||
-                   static_cast<bool>(this->await_host_condition);
+                   this->await_alpc.has_value() || static_cast<bool>(this->await_host_condition);
         }
 
         bool is_thread_ready(windows_emulator& win_emu);

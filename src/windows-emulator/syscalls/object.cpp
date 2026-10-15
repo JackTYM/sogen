@@ -1,4 +1,5 @@
 #include "../std_include.hpp"
+#include "../alpc.hpp"
 #include "../emulator_utils.hpp"
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
@@ -166,6 +167,15 @@ namespace sogen
                 if (wait_packet && wait_packet->ref_count == 1)
                 {
                     io_completion_wait::cleanup_wait_packet_on_close(c.proc, h);
+                }
+            }
+
+            if (value.type == handle_types::port)
+            {
+                const auto* port = c.proc.ports.get(h);
+                if (port && port->ref_count == 1 && port->alpc_port_id() != 0)
+                {
+                    alpc::close_port(c.win_emu, port->alpc_port_id());
                 }
             }
 

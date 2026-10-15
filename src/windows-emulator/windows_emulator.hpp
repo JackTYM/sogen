@@ -546,6 +546,9 @@ namespace sogen
                                           std::optional<uint32_t> client_process_id = std::nullopt);
         void broadcast_named_pipe_server_created(std::u16string_view name);
 
+        // Hands an ALPC transport message to the rest of the process tree (see alpc::deliver).
+        void broadcast_alpc(std::u16string_view port_name, uint64_t connection_id, bool to_server, std::string data);
+
         // Announces a newly-spawned guest pid (handle_NtCreateUserProcess) to every peer, which relays
         // it on to the rest of the tree exactly like broadcast_named_pipe_server_created's own
         // known-server announcement (see pump_pipe_ipc's generic relay loop). is_known_sibling_pid then

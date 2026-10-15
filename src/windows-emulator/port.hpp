@@ -382,6 +382,19 @@ namespace sogen
             this->port_->create(win_emu, data);
         }
 
+        static port_container guest_alpc(std::u16string port, const uint64_t alpc_port_id)
+        {
+            port_container container{};
+            container.port_name_ = std::move(port);
+            container.alpc_port_id_ = alpc_port_id;
+            return container;
+        }
+
+        uint64_t alpc_port_id() const
+        {
+            return this->alpc_port_id_;
+        }
+
         lpc_request_result handle_request(windows_emulator& win_emu, const lpc_request_context& c) override
         {
             this->assert_validity();
@@ -392,9 +405,14 @@ namespace sogen
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
-            this->assert_validity();
-
             buffer.write_string(this->port_name_);
+            buffer.write(this->alpc_port_id_);
+            if (this->alpc_port_id_ != 0)
+            {
+                return;
+            }
+
+            this->assert_validity();
             buffer.write_vector(this->reply_queue_);
             this->port_->serialize(buffer);
         }
@@ -402,6 +420,12 @@ namespace sogen
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read_string(this->port_name_);
+            buffer.read(this->alpc_port_id_);
+            if (this->alpc_port_id_ != 0)
+            {
+                return;
+            }
+
             buffer.read_vector(this->reply_queue_);
             this->setup();
             this->port_->deserialize(buffer);
@@ -429,6 +453,7 @@ namespace sogen
 
       private:
         std::u16string port_name_{};
+        uint64_t alpc_port_id_{};
         std::unique_ptr<port> port_{};
         std::vector<lpc_message_result> reply_queue_;
 

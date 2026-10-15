@@ -191,7 +191,7 @@ namespace sogen
 
             case handle_types::port: {
                 const auto* p = c.ports.get(h);
-                if (p && p->has_pending_reply())
+                if (p && (p->has_pending_reply() || alpc::has_queued_message(c, p->alpc_port_id())))
                 {
                     return wait_state::signaled;
                 }
@@ -823,6 +823,7 @@ namespace sogen
         this->await_msg = {};
         this->await_msg_mask = {};
         this->await_io_completion = {};
+        this->await_alpc = {};
         this->await_host_condition = {};
 
         // TODO: Find out if this is correct
@@ -1224,6 +1225,18 @@ namespace sogen
             this->mark_as_ready(status);
             return true;
         };
+
+        if (this->await_alpc.has_value())
+        {
+            const auto wait = *this->await_alpc;
+            if (const auto status = alpc::try_complete_wait(win_emu, *this, wait))
+            {
+                this->mark_as_ready(*status);
+                return true;
+            }
+
+            return false;
+        }
 
         if (this->waiting_for_alert)
         {

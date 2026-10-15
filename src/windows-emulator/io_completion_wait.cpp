@@ -41,7 +41,7 @@ namespace sogen
 
                 case handle_types::port: {
                     const auto* port = process.ports.get(target_object_handle);
-                    return port != nullptr && port->has_pending_reply();
+                    return port != nullptr && (port->has_pending_reply() || alpc::has_queued_message(process, port->alpc_port_id()));
                 }
 
                 case handle_types::mutant: {

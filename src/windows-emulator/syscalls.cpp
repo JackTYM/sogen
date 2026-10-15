@@ -237,11 +237,10 @@ namespace sogen
         NTSTATUS handle_NtAlpcConnectPort(const syscall_context& c, emulator_object<handle> port_handle,
                                           emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> server_port_name,
                                           emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
-                                          emulator_pointer /*port_attributes*/, ULONG /*flags*/, emulator_pointer /*required_server_sid*/,
-                                          emulator_pointer /*connection_message*/,
-                                          emulator_object<EmulatorTraits<Emu64>::SIZE_T> /*buffer_length*/,
-                                          emulator_pointer /*out_message_attributes*/, emulator_pointer /*in_message_attributes*/,
-                                          emulator_object<LARGE_INTEGER> /*timeout*/);
+                                          emulator_pointer port_attributes, ULONG flags, emulator_pointer /*required_server_sid*/,
+                                          emulator_pointer connection_message, emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
+                                          emulator_pointer out_message_attributes, emulator_pointer in_message_attributes,
+                                          emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtAlpcConnectPortEx(const syscall_context& c, emulator_object<handle> port_handle,
                                             emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> connection_port_object_attributes,
                                             emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*client_port_object_attributes*/,
@@ -250,7 +249,7 @@ namespace sogen
                                             emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
                                             emulator_pointer out_message_attributes, emulator_pointer in_message_attributes,
                                             emulator_object<LARGE_INTEGER> timeout);
-        NTSTATUS handle_NtAlpcSendWaitReceivePort(const syscall_context& c, handle port_handle, ULONG /*flags*/,
+        NTSTATUS handle_NtAlpcSendWaitReceivePort(const syscall_context& c, handle port_handle, ULONG flags,
                                                   emulator_object<PORT_MESSAGE64> send_message,
                                                   emulator_object<ALPC_MESSAGE_ATTRIBUTES>
                                                   /*send_message_attributes*/,
@@ -258,14 +257,28 @@ namespace sogen
                                                   emulator_object<EmulatorTraits<Emu64>::SIZE_T> /*buffer_length*/,
                                                   emulator_object<ALPC_MESSAGE_ATTRIBUTES>
                                                   /*receive_message_attributes*/,
-                                                  emulator_object<LARGE_INTEGER> /*timeout*/);
+                                                  emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, handle port_handle, ULONG flags);
-        NTSTATUS handle_NtAlpcQueryInformation();
+        NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, handle port_handle, uint32_t information_class,
+                                               emulator_pointer information, uint32_t length, emulator_pointer return_length);
+        NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, handle port_handle, ULONG flags, handle section_handle,
+                                                EmulatorTraits<Emu64>::SIZE_T section_size, emulator_pointer alpc_section_handle,
+                                                emulator_pointer actual_section_size);
+        NTSTATUS handle_NtAlpcDeletePortSection(const syscall_context& c, handle port_handle, ULONG flags, uint64_t section_handle);
+        NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, handle port_handle, ULONG flags,
+                                                emulator_pointer view_attributes);
+        NTSTATUS handle_NtAlpcDeleteSectionView(const syscall_context& c, handle port_handle, ULONG flags, emulator_pointer view_base);
+        NTSTATUS handle_NtAlpcAcceptConnectPort(const syscall_context& c, emulator_object<handle> port_handle,
+                                                handle connection_port_handle, ULONG flags, emulator_pointer object_attributes,
+                                                emulator_pointer port_attributes, emulator_pointer port_context,
+                                                emulator_pointer connection_request, emulator_pointer connection_message_attributes,
+                                                BOOLEAN accept_connection);
         NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, handle port_handle,
                                                       emulator_object<PORT_MESSAGE64> port_message, uint32_t message_information_class,
                                                       emulator_pointer message_information, uint32_t length,
                                                       emulator_object<ULONG> return_length);
-        NTSTATUS handle_NtAlpcSetInformation();
+        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& c, handle port_handle, uint32_t information_class,
+                                             emulator_pointer information, uint32_t length);
         NTSTATUS handle_NtAlpcCreateSecurityContext();
         NTSTATUS handle_NtAlpcDeleteSecurityContext();
 
@@ -1770,6 +1783,11 @@ namespace sogen
         add_handler(NtAlpcConnectPort);
         add_handler(NtAlpcDisconnectPort);
         add_handler(NtAlpcQueryInformation);
+        add_handler(NtAlpcAcceptConnectPort);
+        add_handler(NtAlpcCreatePortSection);
+        add_handler(NtAlpcDeletePortSection);
+        add_handler(NtAlpcCreateSectionView);
+        add_handler(NtAlpcDeleteSectionView);
         add_handler(NtAlpcQueryInformationMessage);
         add_handler(NtGetNextThread);
         add_handler(NtSetInformationObject);
