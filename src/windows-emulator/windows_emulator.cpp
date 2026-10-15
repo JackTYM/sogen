@@ -156,6 +156,17 @@ namespace sogen
             }
         }
 
+        void publish_kernel_event(process_context& process, const std::u16string_view name)
+        {
+            event object{};
+            object.type = NotificationEvent;
+            object.name = std::u16string(name);
+            object.state.word(1).store(static_cast<uint64_t>(NotificationEvent));
+
+            const auto [handle, stored] = process.events.store_and_get(std::move(object));
+            (void)named_objects::publish(process, named_objects::kind::event, stored->name, stored->state);
+        }
+
         void adjust_working_directory(application_settings& app_settings)
         {
             if (!app_settings.working_directory.empty())
@@ -1133,6 +1144,7 @@ namespace sogen
 
         this->mod_manager.map_main_modules(this->emu(), this->application_settings_.application, this->version, context, this->log);
         this->install_section_first_execution_hooks();
+        publish_kernel_event(context, u"\\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
 
         const auto* executable = this->mod_manager.executable;
         const auto* ntdll = this->mod_manager.ntdll;

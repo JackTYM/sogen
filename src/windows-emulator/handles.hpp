@@ -651,7 +651,6 @@ namespace sogen
     constexpr auto DBWIN_DATA_READY = make_pseudo_handle(0x2, handle_types::event);
     constexpr auto DBWIN_BUFFER_READY = make_pseudo_handle(0x3, handle_types::event);
     constexpr auto SVCCTRL_START_EVENT = make_pseudo_handle(0x4, handle_types::event);
-    constexpr auto LSA_AUTHENTICATION_INITIALIZED = make_pseudo_handle(0x5, handle_types::event);
     constexpr auto MAXIMUM_COMMIT_CONDITION = make_pseudo_handle(0x6, handle_types::event);
 
     constexpr auto CONSOLE_HANDLE = make_pseudo_handle(0x1, handle_types::file);

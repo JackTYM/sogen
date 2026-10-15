@@ -125,9 +125,9 @@ namespace sogen
             {
                 // Matches observe_object_signal's own rule for a waited-on pseudo event
                 // (emulator_thread.cpp): these stand in for well-known system readiness latches
-                // (WER_PORT_READY, LSA_AUTHENTICATION_INITIALIZED, ...) that sogen never models the
-                // startup of, so they are permanently signaled rather than backed by a handle_store
-                // entry. NtQueryEvent was missing this case, so it reported them as never signaled.
+                // (WER_PORT_READY, ...) that sogen never models the startup of, so they are
+                // permanently signaled rather than backed by a handle_store entry. NtQueryEvent
+                // was missing this case, so it reported them as never signaled.
                 is_signaled = true;
             }
 
@@ -239,12 +239,6 @@ namespace sogen
             if (name == u"Global\\SvcctrlStartEvent_A3752DX")
             {
                 event_handle.write(SVCCTRL_START_EVENT.bits);
-                return STATUS_SUCCESS;
-            }
-
-            if (name == u"\\SECURITY\\LSA_AUTHENTICATION_INITIALIZED")
-            {
-                event_handle.write(LSA_AUTHENTICATION_INITIALIZED.bits);
                 return STATUS_SUCCESS;
             }
 
