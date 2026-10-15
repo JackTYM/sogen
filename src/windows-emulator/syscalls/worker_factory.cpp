@@ -477,6 +477,17 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            case WorkerFactoryStackInformation: {
+                if (worker_factory_information_length != 2 * sizeof(uint64_t))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                factory->stack_reserve = value_u64.read();
+                factory->stack_commit = emulator_object<uint64_t>{c.emu, worker_factory_information + sizeof(uint64_t)}.read();
+                return STATUS_SUCCESS;
+            }
+
             default: {
                 if (worker_factory_information_length == 0)
                 {
