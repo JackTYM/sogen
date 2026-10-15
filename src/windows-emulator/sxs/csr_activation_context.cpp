@@ -1,6 +1,6 @@
 #include "../std_include.hpp"
 #include "csr_activation_context.hpp"
-#include "emulated_sxs.hpp"
+#include "assembly_resolver.hpp"
 
 #include "../windows_emulator.hpp"
 
@@ -33,7 +33,85 @@ namespace sogen
 
         constexpr uint16_t processor_architecture_amd64 = 9;
         constexpr size_t maximum_manifest_size = 0x800000;
+
         constexpr NTSTATUS status_sxs_cant_gen_actctx = static_cast<NTSTATUS>(0xC0150002);
+
+        class emulated_assembly_store : public sxs::assembly_store
+        {
+          public:
+            explicit emulated_assembly_store(const file_system& file_sys)
+                : file_sys_(file_sys)
+            {
+            }
+
+            std::optional<std::vector<std::byte>> read_file(const std::u16string_view windows_path_text) override
+            {
+                const auto host_path = this->translate(windows_path_text);
+                if (!host_path)
+                {
+                    return std::nullopt;
+                }
+
+                return read_host_file(*host_path);
+            }
+
+            std::vector<std::u16string> list_files(const std::u16string_view windows_directory) override
+            {
+                std::vector<std::u16string> names{};
+                const auto host_path = this->translate(windows_directory);
+                if (!host_path)
+                {
+                    return names;
+                }
+
+                std::error_code ec{};
+                for (const auto& entry : std::filesystem::directory_iterator(*host_path, ec))
+                {
+                    if (entry.is_regular_file(ec))
+                    {
+                        names.push_back(entry.path().filename().u16string());
+                    }
+                }
+
+                return names;
+            }
+
+            static std::optional<std::vector<std::byte>> read_host_file(const std::filesystem::path& path)
+            {
+                std::ifstream stream(path, std::ios::binary);
+                if (!stream)
+                {
+                    return std::nullopt;
+                }
+
+                std::vector<std::byte> data{};
+                stream.seekg(0, std::ios::end);
+                const auto size = static_cast<size_t>(stream.tellg());
+                if (size > maximum_manifest_size)
+                {
+                    return std::nullopt;
+                }
+
+                stream.seekg(0, std::ios::beg);
+                data.resize(size);
+                stream.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
+                return stream ? std::optional(std::move(data)) : std::nullopt;
+            }
+
+          private:
+            const file_system& file_sys_;
+
+            std::optional<std::filesystem::path> translate(const std::u16string_view windows_path_text) const
+            {
+                const windows_path path{std::filesystem::path(std::u16string(windows_path_text))};
+                if (!path.is_absolute())
+                {
+                    return std::nullopt;
+                }
+
+                return this->file_sys_.translate(path);
+            }
+        };
 
         std::u16string strip_nt_prefix(std::u16string path)
         {
@@ -43,6 +121,12 @@ namespace sogen
             }
 
             return path;
+        }
+
+        std::u16string directory_of(const std::u16string_view path)
+        {
+            const auto separator = path.find_last_of(u'\\');
+            return separator == std::u16string_view::npos ? std::u16string{} : std::u16string(path.substr(0, separator));
         }
 
         std::u16string read_message_string(windows_emulator& win_emu, const uint64_t address)
@@ -86,7 +170,7 @@ namespace sogen
                     return std::nullopt;
                 }
 
-                return sxs::read_host_file(file->host_path);
+                return emulated_assembly_store::read_host_file(file->host_path);
             }
 
             return std::nullopt;
@@ -106,7 +190,7 @@ namespace sogen
             request.application_directory = strip_nt_prefix(read_message_string(win_emu, message + msg_assembly_directory));
             if (request.application_directory.empty())
             {
-                request.application_directory = sxs::directory_of(request.root_manifest_path);
+                request.application_directory = directory_of(request.root_manifest_path);
             }
 
             const auto architecture = win_emu.emu().read_memory<uint16_t>(message + msg_processor_architecture);
@@ -116,19 +200,25 @@ namespace sogen
 
             win_emu.callbacks.on_generic_access("Creating activation context", request.root_manifest_path);
 
-            sxs::emulated_assembly_store store{win_emu.file_sys};
+            emulated_assembly_store store{win_emu.file_sys};
             auto resolved = sxs::resolve_activation_context(request, store);
             if (const auto* status = std::get_if<uint32_t>(&resolved))
             {
                 return static_cast<NTSTATUS>(*status);
             }
 
-            const auto base = sxs::map_activation_context_data(
-                win_emu, sxs::build_activation_context_data(std::get<sxs::activation_context_input>(resolved)));
-            if (!base)
+            const auto data = sxs::build_activation_context_data(std::get<sxs::activation_context_input>(resolved));
+            const auto size = static_cast<size_t>(page_align_up(data.size()));
+            // wow64's NtWow64CsrClientCallServer thunk hands this pointer back to the 32-bit caller narrowed.
+            const auto highest = win_emu.process.is_wow64_process ? 0x7FFEFFFFULL : MAX_ALLOCATION_ADDRESS;
+            const auto base = win_emu.memory.find_free_host_allocation_base(size, MIN_ALLOCATION_ADDRESS, highest);
+            if (!base ||
+                !win_emu.memory.allocate_memory(base, size, memory_permission::read, false, memory_region_kind::pagefile_section_view))
             {
                 return STATUS_NO_MEMORY;
             }
+
+            win_emu.memory.write_memory(base, data.data(), data.size());
 
             const auto destination = win_emu.emu().read_memory<uint64_t>(message + msg_activation_context_data);
             if (!win_emu.memory.try_write_memory(destination, &base, sizeof(base)))

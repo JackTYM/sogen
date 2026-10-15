@@ -1,6 +1,5 @@
 #include "std_include.hpp"
 #include "process_context.hpp"
-#include "sxs/emulated_sxs.hpp"
 
 #include "emulator_utils.hpp"
 #include "registry/registry_utils.hpp"
@@ -797,8 +796,6 @@ namespace sogen
                 peb32.GdiDCAttributeList = 0;
             });
         }
-
-        sxs::create_process_default_activation_context(win_emu, executable);
 
         this->default_register_set = emu.save_registers();
 
