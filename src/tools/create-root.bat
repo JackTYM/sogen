@@ -126,6 +126,8 @@ CALL :collect mscoree.dll
 CALL :collect msctf.dll
 CALL :collect msdmo.dll
 CALL :collect msi.dll
+CALL :collect msiexec.exe
+CALL :collect msimsg.dll
 CALL :collect msvcp140.dll
 CALL :collect msvcp140_atomic_wait.dll
 CALL :collect msvcp140d.dll
