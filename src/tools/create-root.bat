@@ -93,7 +93,9 @@ CALL :collect dxcore.dll
 CALL :collect dxgi.dll
 CALL :collect dxva2.dll
 CALL :collect ESENT.dll
+CALL :collect EventAggregation.dll
 CALL :collect fwpuclnt.dll
+CALL :collect fsrvcli.dll
 CALL :collect gdi32.dll
 CALL :collect gdi32full.dll
 CALL :collect gdiplus.dll
@@ -109,14 +111,17 @@ CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
+CALL :collect logoncli.dll
 CALL :collect MF.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
 CALL :collect MFSENSORGROUP.dll
 CALL :collect mmdevapi.dll
+CALL :collect appxdeploymentclient.dll
 CALL :collect audioses.dll
 CALL :collect avrt.dll
 CALL :collect resourcepolicyclient.dll
+CALL :collect rmclient.dll
 CALL :collect mobilenetworking.dll
 CALL :collect mpr.dll
 CALL :collect msacm32.dll
