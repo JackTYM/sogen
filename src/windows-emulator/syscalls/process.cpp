@@ -851,6 +851,7 @@ namespace sogen
                 || info_class == ProcessHandleCheckingMode                   //
                 || info_class == ProcessDynamicFunctionTableInformation      //
                 || info_class == ProcessPriorityBoost                        //
+                || info_class == ProcessBasePriority                         //
                 || info_class == ProcessPriorityClassEx                      //
                 || info_class == ProcessQuotaLimits                          //
                 || info_class == ProcessPriorityClass                        //
