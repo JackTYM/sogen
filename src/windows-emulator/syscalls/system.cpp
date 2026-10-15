@@ -839,6 +839,18 @@ namespace sogen
                                                                         info.Flags = 0;
                                                                     });
 
+            case SystemManufacturingInformation:
+                // SYSTEM_MANUFACTURING_INFORMATION is { ULONG Options; UNICODE_STRING ProfileName; }: 24 bytes
+                // with a 64-bit UNICODE_STRING, 12 bytes with the 32-bit one. Retail reports no options and no profile.
+                if (c.proc.is_wow64_process)
+                {
+                    return handle_query<std::array<uint8_t, 12>>(c.emu, system_information, system_information_length, return_length,
+                                                                 [](std::array<uint8_t, 12>&) {});
+                }
+
+                return handle_query<std::array<uint8_t, 24>>(c.emu, system_information, system_information_length, return_length,
+                                                             [](std::array<uint8_t, 24>&) {});
+
             default:
                 c.win_emu.log.error("Unsupported system info class: 0x%X\n", info_class);
                 c.emu.stop();
