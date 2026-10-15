@@ -382,6 +382,20 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // The emulator has no per-thread impersonation context (see NtSetInformationThread's ThreadImpersonationToken
+        // case), so the calling thread keeps its own identity. Like FSCTL_PIPE_IMPERSONATE, success is what a server
+        // that impersonates its client to check the caller can observe.
+        NTSTATUS handle_NtAlpcImpersonateClientOfPort(const syscall_context& c, const handle port_handle,
+                                                      const emulator_pointer /*message*/, const ULONG /*flags*/)
+        {
+            if (!c.proc.ports.get(port_handle))
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            return STATUS_SUCCESS;
+        }
+
         // Locate the HANDLE attribute inside an ALPC attribute buffer: an 8-byte {Allocated; Valid} header
         // followed by the per-attribute structs, laid out highest-bit-first for the attributes the caller
         // allocated room for. Returns nothing when the caller reserved no room for a handle attribute.

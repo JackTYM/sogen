@@ -265,6 +265,7 @@ namespace sogen
                                                   /*receive_message_attributes*/,
                                                   emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, handle port_handle, ULONG flags);
+        NTSTATUS handle_NtAlpcImpersonateClientOfPort(const syscall_context& c, handle port_handle, emulator_pointer message, ULONG flags);
         NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, handle port_handle, uint32_t information_class,
                                                emulator_pointer information, uint32_t length, emulator_pointer return_length);
         NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, handle port_handle, ULONG flags, handle section_handle,
@@ -1799,6 +1800,7 @@ namespace sogen
         add_handler(NtAlpcConnectPortEx);
         add_handler(NtAlpcConnectPort);
         add_handler(NtAlpcDisconnectPort);
+        add_handler(NtAlpcImpersonateClientOfPort);
         add_handler(NtAlpcQueryInformation);
         add_handler(NtAlpcAcceptConnectPort);
         add_handler(NtListenPort);
