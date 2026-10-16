@@ -416,7 +416,7 @@ namespace sogen
             uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
             if (allocated_attributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
             {
-                offset += wow64 ? 0x0C : 0x20;
+                offset += wow64 ? sizeof(ALPC_SECURITY_ATTR<EmulatorTraits<Emu32>>) : sizeof(ALPC_SECURITY_ATTR<EmulatorTraits<Emu64>>);
             }
             if (allocated_attributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
             {
