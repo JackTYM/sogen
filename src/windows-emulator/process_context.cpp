@@ -74,6 +74,11 @@ namespace sogen
             return sid_string_to_bytes(sid_string);
         }
 
+        std::vector<uint8_t> local_system_sid()
+        {
+            return sid_string_to_bytes("S-1-5-18");
+        }
+
         bool visual_shows_surface(const dcomp_resource& visual, const uint64_t surface_handle)
         {
             constexpr uint32_t visual_content_property = 0xA;
@@ -495,7 +500,7 @@ namespace sogen
         io_device_container console{u"Console", win_emu, {}};
         this->console_handle = this->devices.store(std::move(console));
 
-        this->sid = get_sid(win_emu.registry);
+        this->sid = app_settings.local_system ? local_system_sid() : get_sid(win_emu.registry);
 
         setup_gdt(emu, win_emu.memory);
 

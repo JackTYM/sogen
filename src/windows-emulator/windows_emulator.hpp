@@ -281,6 +281,10 @@ namespace sogen
         // until the parent issues a resume_thread control request (see process_control_server.cpp).
         bool start_suspended{false};
 
+        // Runs the process under the LocalSystem account (S-1-5-18) instead of the emulated user, as services
+        // such as lsass do on Windows. Their own DACL checks (e.g. SYSTEM-only ACEs) depend on that identity.
+        bool local_system{false};
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->application);
@@ -291,6 +295,7 @@ namespace sogen
             buffer.write_optional(this->image_path);
             buffer.write_optional(this->process_id);
             buffer.write(this->start_suspended);
+            buffer.write(this->local_system);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -303,6 +308,7 @@ namespace sogen
             buffer.read_optional(this->image_path);
             buffer.read_optional(this->process_id);
             buffer.read(this->start_suspended);
+            buffer.read(this->local_system);
         }
     };
 

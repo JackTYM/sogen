@@ -1109,6 +1109,18 @@ namespace sogen
                 }
             }
 
+            std::unique_ptr<process_control_channel> lsass{};
+            if (!child_bootstrap && options.minidump_path.empty())
+            {
+                lsass = boot_lsass(spawn_config, *win_emu);
+            }
+            const auto stop_lsass = utils::finally([&] {
+                if (lsass)
+                {
+                    lsass->force_kill();
+                }
+            });
+
             return run_emulation(context, options);
         }
 

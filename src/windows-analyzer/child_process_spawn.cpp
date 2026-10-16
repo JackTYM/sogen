@@ -1,14 +1,18 @@
 #include "std_include.hpp"
 #include "child_process_spawn.hpp"
 
+#include <named_objects.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <span>
+#include <thread>
 
 #if !defined(_WIN32) && !defined(OS_EMSCRIPTEN)
 #define SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING 1
@@ -1256,6 +1260,88 @@ namespace sogen
         (void)fd;
         (void)host_pid;
         return nullptr;
+#endif
+    }
+
+    namespace
+    {
+        constexpr std::u16string_view lsa_authentication_initialized_name = u"\\SECURITY\\LSA_AUTHENTICATION_INITIALIZED";
+        constexpr auto lsass_signal_timeout = std::chrono::minutes(5);
+    }
+
+    std::unique_ptr<process_control_channel> boot_lsass(const child_process_spawn_config& config, windows_emulator& win_emu)
+    {
+#if !defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        (void)config;
+        (void)win_emu;
+        throw std::runtime_error("lsass.exe cannot be booted: this host cannot spawn child processes");
+#else
+        const windows_path image{"c:/windows/system32/lsass.exe"};
+        const auto host_image = win_emu.file_sys.translate(image);
+        if (!std::filesystem::exists(host_image))
+        {
+            throw std::runtime_error("lsass.exe is missing from the emulation root (" + host_image.string() +
+                                     "); the target was not started");
+        }
+
+        win_emu.setup_process_if_necessary();
+        auto* const arena = win_emu.process.ensure_shared_arena();
+        const auto lsass_pid = 0x1000 + 4 * arena->allocate_process_index();
+
+        application_settings settings{
+            .application = image,
+            .working_directory = windows_path{"c:/windows/system32"},
+            .process_id = lsass_pid,
+            .local_system = true,
+        };
+
+        auto outcome = spawn_child_process(config, std::move(settings), {}, {}, {}, arena->backing());
+        if (!outcome.success)
+        {
+            throw std::runtime_error("lsass.exe failed to start: " + outcome.failure_detail);
+        }
+
+        win_emu.register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
+        win_emu.broadcast_process_alive(lsass_pid);
+        auto control = create_fd_process_control_channel(outcome.control_fd, outcome.host_pid);
+
+        kernel_state lsa_initialized{};
+        if (named_objects::open(win_emu.process, named_objects::kind::event, lsa_authentication_initialized_name, lsa_initialized) !=
+            STATUS_SUCCESS)
+        {
+            control->force_kill();
+            throw std::runtime_error("lsass.exe did not publish \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
+        }
+
+        const auto boot_started = std::chrono::steady_clock::now();
+        try
+        {
+            const auto deadline = boot_started + lsass_signal_timeout;
+            while (lsa_initialized.word(0).load(std::memory_order_acquire) == 0)
+            {
+                if (::kill(outcome.host_pid, 0) != 0)
+                {
+                    throw std::runtime_error("lsass.exe exited before signalling \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
+                }
+
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    throw std::runtime_error("lsass.exe did not signal \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED in time");
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        catch (...)
+        {
+            control->force_kill();
+            throw;
+        }
+
+        const auto boot_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - boot_started).count();
+        win_emu.log.log("lsass.exe (pid %u) signalled \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED after %lld ms\n", lsass_pid,
+                        static_cast<long long>(boot_ms));
+        return control;
 #endif
     }
 
