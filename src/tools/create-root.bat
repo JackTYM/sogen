@@ -177,11 +177,14 @@ CALL :collect scecli.dll
 CALL :collect scesrv.dll
 CALL :collect sechost.dll
 CALL :collect services.exe
+CALL :collect lsaadt.dll
 CALL :collect lsass.exe
 CALL :collect lsasrv.dll
 CALL :collect samsrv.dll
 CALL :collect msv1_0.dll
+CALL :collect ntlmshared.dll
 CALL :collect kerberos.dll
+CALL :collect dsparse.dll
 CALL :collect sspisrv.dll
 CALL :collect dpapisrv.dll
 CALL :collect efslsaext.dll
