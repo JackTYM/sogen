@@ -27,6 +27,7 @@ namespace sogen::alpc
 
         constexpr uint64_t default_max_message_length = 0xFFEF;
         constexpr uint32_t system_process_id = 4;
+        constexpr uint32_t srm_apply_system_policy_update_command = 1;
         // The system pid is also the root process's pid, so a kernel-side connection id must not reuse it as its
         // high word: the root's own connection ids would collide with it in the shared lookup.
         constexpr uint32_t kernel_connection_tag = 0x80000000;
@@ -173,6 +174,7 @@ namespace sogen::alpc
         }
 
         void accept_kernel_connection(windows_emulator& win_emu, uint64_t listener_id, const addressed_transport& t);
+        void answer_kernel_request(windows_emulator& win_emu, port& listener, const addressed_transport& t);
 
         bool deliver_transport(windows_emulator& win_emu, const addressed_transport& t)
         {
@@ -293,8 +295,8 @@ namespace sogen::alpc
 
                 if (target->kernel_peer)
                 {
-                    win_emu.log.error("[srm] request on \"%s\" from pid %u: %zu bytes, no kernel handler\n",
-                                      u16_to_u8(target->name).c_str(), payload.sender_process_id, payload.data.size());
+                    s.pending.erase(id);
+                    answer_kernel_request(win_emu, *target, t);
                     return true;
                 }
 
@@ -421,6 +423,43 @@ namespace sogen::alpc
             }
 
             route(win_emu, {.port_name = listener.name, .connection_id = t.connection_id, .to_server = false, .payload = reply});
+        }
+
+        void reply_kernel_status(windows_emulator& win_emu, const port& listener, const addressed_transport& t, const NTSTATUS status)
+        {
+            transport reply{};
+            reply.kind = transport_kind::reply;
+            reply.sender_message_id = t.payload.sender_message_id;
+            reply.sender_process_id = system_process_id;
+            reply.data.resize(sizeof(status));
+            std::memcpy(reply.data.data(), &status, sizeof(status));
+
+            route(win_emu, {.port_name = listener.name, .connection_id = t.connection_id, .to_server = false, .payload = reply});
+        }
+
+        void answer_kernel_request(windows_emulator& win_emu, port& listener, const addressed_transport& t)
+        {
+            const auto& data = t.payload.data;
+
+            uint32_t command{};
+            if (data.size() < sizeof(command))
+            {
+                win_emu.log.error("[srm] request on \"%s\" from pid %u: %zu bytes, too short for a command\n",
+                                  u16_to_u8(listener.name).c_str(), t.payload.sender_process_id, data.size());
+                return;
+            }
+
+            std::memcpy(&command, data.data(), sizeof(command));
+
+            if (command != srm_apply_system_policy_update_command)
+            {
+                win_emu.log.error("[srm] request on \"%s\" from pid %u: command %u, %zu bytes, no kernel handler\n",
+                                  u16_to_u8(listener.name).c_str(), t.payload.sender_process_id, command, data.size());
+                return;
+            }
+
+            listener.srm_system_policy = data;
+            reply_kernel_status(win_emu, listener, t, STATUS_SUCCESS);
         }
 
         uint64_t attribute_offset(const ULONG allocated, const ULONG attribute, const bool wow64)

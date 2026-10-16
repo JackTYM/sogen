@@ -74,6 +74,7 @@ namespace sogen
 
             std::shared_ptr<kernel_slot> name_slot{};
             std::optional<std::u16string> kernel_peer{};
+            std::optional<std::vector<uint8_t>> srm_system_policy{};
         };
 
         struct pending_message
