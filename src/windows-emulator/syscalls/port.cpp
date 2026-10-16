@@ -647,7 +647,23 @@ namespace sogen
                                                       const uint32_t message_information_class, const emulator_pointer message_information,
                                                       const uint32_t length, const emulator_object<ULONG> return_length)
         {
+            constexpr uint32_t alpc_message_token_modified_id_information = 1;
             constexpr uint32_t alpc_message_handle_information = 3;
+
+            if (message_information_class == alpc_message_token_modified_id_information)
+            {
+                constexpr uint32_t luid_size = sizeof(LUID);
+                if (!message_information || length < luid_size)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                // Emulated tokens carry no modified id; NtQueryInformationToken(TokenStatistics) reports zero too.
+                emulator_object<LUID>{c.emu, message_information}.write(LUID{});
+                return_length.write_if_valid(luid_size);
+                return STATUS_SUCCESS;
+            }
+
             if (message_information_class != alpc_message_handle_information)
             {
                 return STATUS_NOT_SUPPORTED;
