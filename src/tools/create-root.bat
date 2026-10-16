@@ -23,6 +23,7 @@ SET EMU_WEBVIEW2DIR=%EMU_FILESYS%\c\program files (x86)\microsoft\edgewebview\ap
 
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
+MKDIR %EMU_SYSDIR%\en-US
 MKDIR %EMU_CURSORDIR%
 MKDIR %EMU_REGDIR%
 MKDIR %EMU_STEAMDIR%
@@ -262,6 +263,12 @@ CALL :collect wdmaud.drv
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 CALL :collect_file "%WINDIR%\Globalization\Sorting", SortDefault.nls, %EMU_GLOBALIZATION_SORTING%
+
+CALL :collect_file "%WINDIR%\System32\en-US", lsasrv.dll.mui, %EMU_SYSDIR%\en-US
+CALL :collect_file "%WINDIR%\System32\en-US", lsass.exe.mui, %EMU_SYSDIR%\en-US
+CALL :collect_file "%WINDIR%\System32\en-US", samsrv.dll.mui, %EMU_SYSDIR%\en-US
+CALL :collect_file "%WINDIR%\System32\en-US", msv1_0.dll.mui, %EMU_SYSDIR%\en-US
+CALL :collect_file "%WINDIR%\System32\en-US", kerberos.dll.mui, %EMU_SYSDIR%\en-US
 
 FOR /D %%V IN ("%WV2_APPDIR%\*") DO CALL :collect_dir "%%V" "%EMU_WEBVIEW2DIR%\%%~nxV"
 
