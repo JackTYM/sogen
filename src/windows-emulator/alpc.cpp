@@ -28,6 +28,7 @@ namespace sogen::alpc
         constexpr uint64_t default_max_message_length = 0xFFEF;
         constexpr uint32_t system_process_id = 4;
         constexpr uint32_t srm_apply_system_policy_update_command = 1;
+        constexpr uint32_t srm_apply_global_sacl_update_command = 5;
         // The system pid is also the root process's pid, so a kernel-side connection id must not reuse it as its
         // high word: the root's own connection ids would collide with it in the shared lookup.
         constexpr uint32_t kernel_connection_tag = 0x80000000;
@@ -437,6 +438,42 @@ namespace sogen::alpc
             route(win_emu, {.port_name = listener.name, .connection_id = t.connection_id, .to_server = false, .payload = reply});
         }
 
+        void answer_global_sacl_update(windows_emulator& win_emu, const port& listener, const addressed_transport& t)
+        {
+            constexpr size_t name_length_offset = sizeof(uint32_t);
+            constexpr size_t name_offset = name_length_offset + sizeof(uint16_t);
+            const auto& data = t.payload.data;
+
+            uint16_t name_length{};
+            if (data.size() < name_offset)
+            {
+                win_emu.log.error("[srm] global SACL request on \"%s\" from pid %u: %zu bytes, no name\n", u16_to_u8(listener.name).c_str(),
+                                  t.payload.sender_process_id, data.size());
+                return;
+            }
+
+            std::memcpy(&name_length, data.data() + name_length_offset, sizeof(name_length));
+            if (data.size() < name_offset + name_length)
+            {
+                win_emu.log.error("[srm] global SACL request on \"%s\" from pid %u: name length %u exceeds %zu bytes\n",
+                                  u16_to_u8(listener.name).c_str(), t.payload.sender_process_id, name_length, data.size());
+                return;
+            }
+
+            std::u16string name(name_length / sizeof(char16_t), u'\0');
+            std::memcpy(name.data(), data.data() + name_offset, name.size() * sizeof(char16_t));
+
+            const auto key = std::u16string(u"\\Registry\\Machine\\SECURITY\\Policy\\GlobalSaclName\\") + name;
+            if (win_emu.registry.get_key({key}))
+            {
+                win_emu.log.error("[srm] global SACL \"%s\" is present in the registry, its update is not modelled\n",
+                                  u16_to_u8(name).c_str());
+                return;
+            }
+
+            reply_kernel_status(win_emu, listener, t, STATUS_OBJECT_NAME_NOT_FOUND);
+        }
+
         void answer_kernel_request(windows_emulator& win_emu, port& listener, const addressed_transport& t)
         {
             const auto& data = t.payload.data;
@@ -451,15 +488,21 @@ namespace sogen::alpc
 
             std::memcpy(&command, data.data(), sizeof(command));
 
-            if (command != srm_apply_system_policy_update_command)
+            if (command == srm_apply_system_policy_update_command)
             {
-                win_emu.log.error("[srm] request on \"%s\" from pid %u: command %u, %zu bytes, no kernel handler\n",
-                                  u16_to_u8(listener.name).c_str(), t.payload.sender_process_id, command, data.size());
+                listener.srm_system_policy = data;
+                reply_kernel_status(win_emu, listener, t, STATUS_SUCCESS);
                 return;
             }
 
-            listener.srm_system_policy = data;
-            reply_kernel_status(win_emu, listener, t, STATUS_SUCCESS);
+            if (command == srm_apply_global_sacl_update_command)
+            {
+                answer_global_sacl_update(win_emu, listener, t);
+                return;
+            }
+
+            win_emu.log.error("[srm] request on \"%s\" from pid %u: command %u, %zu bytes, no kernel handler\n",
+                              u16_to_u8(listener.name).c_str(), t.payload.sender_process_id, command, data.size());
         }
 
         uint64_t attribute_offset(const ULONG allocated, const ULONG attribute, const bool wow64)
