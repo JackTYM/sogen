@@ -20,10 +20,13 @@ namespace sogen
     class hive_key
     {
       public:
-        hive_key(const int subkey_block_offset, const int value_count, const int value_offsets)
+        hive_key(const int subkey_block_offset, const int value_count, const int value_offsets, const int class_name_offset,
+                 const int class_name_length)
             : subkey_block_offset_(subkey_block_offset),
               value_count_(value_count),
-              value_offsets_(value_offsets)
+              value_offsets_(value_offsets),
+              class_name_offset_(class_name_offset),
+              class_name_length_(class_name_length)
         {
         }
 
@@ -66,6 +69,8 @@ namespace sogen
         const hive_value* get_value(std::ifstream& file, std::string_view name);
         const hive_value* get_value(std::ifstream& file, size_t index);
 
+        std::vector<std::byte> get_class_name(std::ifstream& file) const;
+
         size_t get_sub_key_count(std::ifstream& file)
         {
             this->parse(file);
@@ -95,6 +100,8 @@ namespace sogen
         const int subkey_block_offset_{};
         const int value_count_{};
         const int value_offsets_{};
+        const int class_name_offset_{};
+        const int class_name_length_{};
 
         void parse_subkey_list(std::ifstream& file, int32_t block_offset, bool allow_root_index);
         void parse(std::ifstream& file);
@@ -136,6 +143,17 @@ namespace sogen
             }
 
             return target_key->get_sub_key_name(this->file_, index);
+        }
+
+        [[nodiscard]] std::vector<std::byte> get_class_name(const std::filesystem::path& key)
+        {
+            auto* target_key = this->get_sub_key(key);
+            if (!target_key)
+            {
+                return {};
+            }
+
+            return target_key->get_class_name(this->file_);
         }
 
         [[nodiscard]] const hive_value* get_value(const std::filesystem::path& key, const std::string_view name)

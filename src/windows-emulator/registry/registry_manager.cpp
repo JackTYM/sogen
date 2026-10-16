@@ -704,6 +704,17 @@ namespace sogen
         };
     }
 
+    std::vector<std::byte> registry_manager::get_class_name(const registry_key& key)
+    {
+        auto exposed = this->get_hive_key(key);
+        if (!exposed)
+        {
+            return {};
+        }
+
+        return exposed->key.get_class_name(exposed->file);
+    }
+
     std::optional<std::string_view> registry_manager::get_sub_key_name(const registry_key& key, const size_t index)
     {
         const auto iterator = this->hives_.find(key.hive);

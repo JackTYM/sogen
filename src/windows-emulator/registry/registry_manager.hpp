@@ -140,6 +140,8 @@ namespace sogen
 
         std::optional<exposed_hive_key> get_hive_key(const registry_key& key);
 
+        std::vector<std::byte> get_class_name(const registry_key& key);
+
         std::optional<std::u16string> read_u16string(const registry_key& key, size_t index);
         void serialize_runtime_state(utils::buffer_serializer& buffer) const;
         void deserialize_runtime_state(utils::buffer_deserializer& buffer);

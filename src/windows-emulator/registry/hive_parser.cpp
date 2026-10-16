@@ -39,9 +39,11 @@ namespace sogen
             uint8_t dummyc[4];
             int32_t value_count;
             int32_t offsets;
-            uint8_t dummyd[28];
+            uint8_t dummyd[4];
+            int32_t class_name;
+            uint8_t dummye[20];
             int16_t len;
-            int16_t du;
+            int16_t class_len;
             char name[255];
         };
 
@@ -199,13 +201,24 @@ namespace sogen
 
                 const auto key_block = read_file_object<key_block_t>(file, MAIN_KEY_BLOCK_OFFSET);
 
-                return {key_block.subkeys, key_block.value_count, key_block.offsets};
+                return {key_block.subkeys, key_block.value_count, key_block.offsets, key_block.class_name, key_block.class_len};
             }
             catch (const std::exception& e)
             {
                 throw std::runtime_error("Bad hive file '" + file_path.string() + "': " + e.what());
             }
         }
+    }
+
+    std::vector<std::byte> hive_key::get_class_name(std::ifstream& file) const
+    {
+        if (this->class_name_offset_ == -1 || this->class_name_length_ <= 0)
+        {
+            return {};
+        }
+
+        return read_file_data(file, MAIN_ROOT_OFFSET + static_cast<uint64_t>(this->class_name_offset_) + 4,
+                              static_cast<size_t>(this->class_name_length_));
     }
 
     const hive_value* hive_key::get_value(std::ifstream& file, const std::string_view name)
@@ -264,7 +277,8 @@ namespace sogen
                 std::string subkey_name(subkey.name, subkey_name_len);
 
                 const auto [it, inserted] =
-                    this->sub_keys_.emplace(std::move(subkey_name), hive_key{subkey.subkeys, subkey.value_count, subkey.offsets});
+                    this->sub_keys_.emplace(std::move(subkey_name), hive_key{subkey.subkeys, subkey.value_count, subkey.offsets,
+                                                                             subkey.class_name, subkey.class_len});
                 if (inserted)
                 {
                     this->sub_keys_by_index_.emplace_back(it->first);

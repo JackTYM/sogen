@@ -164,7 +164,9 @@ namespace sogen
                     ++values;
                 }
 
-                constexpr auto required_size = offsetof(KEY_FULL_INFORMATION, Class);
+                const auto class_name = c.win_emu.registry.get_class_name(*key);
+                const auto header_size = offsetof(KEY_FULL_INFORMATION, Class);
+                const auto required_size = header_size + class_name.size();
                 result_length.write(static_cast<ULONG>(required_size));
 
                 if (required_size > length)
@@ -176,13 +178,20 @@ namespace sogen
                 info.LastWriteTime.QuadPart = 0;
                 info.TitleIndex = 0;
                 info.ClassOffset = offsetof(KEY_FULL_INFORMATION, Class);
+                info.ClassLength = static_cast<ULONG>(class_name.size());
                 info.SubKeys = sub_keys;
                 info.MaxNameLength = static_cast<ULONG>(max_name_length);
+                info.MaxClassLength = static_cast<ULONG>(class_name.size());
                 info.Values = values;
                 info.MaxValueNameLength = static_cast<ULONG>(max_value_name_length);
                 info.MaxValueDataLength = static_cast<ULONG>(max_value_data_length);
 
-                c.emu.write_memory(key_information, &info, required_size);
+                c.emu.write_memory(key_information, &info, header_size);
+                if (!class_name.empty())
+                {
+                    c.emu.write_memory(key_information + header_size, class_name.data(), class_name.size());
+                }
+
                 return STATUS_SUCCESS;
             }
 
