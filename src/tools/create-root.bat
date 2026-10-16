@@ -156,6 +156,7 @@ CALL :collect nsi.dll
 CALL :collect ntasn1.dll
 CALL :collect ntdll.dll
 CALL :collect ntmarta.dll
+CALL :collect ntoskrnl.exe
 CALL :collect ole32.dll
 CALL :collect OLEACC.dll
 CALL :collect oleaut32.dll
