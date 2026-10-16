@@ -645,14 +645,17 @@ namespace sogen
 
             const auto token_groups = get_token_groups(c.proc);
             const auto mapping = generic_mapping.read();
-            const auto requested = map_generic_access(desired_access, mapping);
-            ACCESS_MASK remaining = requested;
+            constexpr ACCESS_MASK maximum_allowed = 0x02000000;
+            constexpr ACCESS_MASK all_access = 0xFFFFFFFF;
+            const bool maximum = (desired_access & maximum_allowed) != 0;
+            const auto requested = map_generic_access(desired_access & ~maximum_allowed, mapping);
+            ACCESS_MASK remaining = maximum ? all_access : requested;
             ACCESS_MASK granted = 0;
             bool denied = false;
 
             if (!(control & SE_DACL_PRESENT) || dacl_address == 0)
             {
-                granted = requested;
+                granted = maximum ? map_generic_access(0x10000000, mapping) : requested;
                 remaining = 0;
             }
             else
@@ -674,7 +677,11 @@ namespace sogen
                                              return (group.attributes & se_group_enabled) == se_group_enabled &&
                                                     sid_matches(c.emu.memory(), ace_sid, group.sid);
                                          });
-                    if (applies && ace.Header.AceType == 1 && (ace_mask & remaining) != 0)
+                    if (applies && ace.Header.AceType == 1 && maximum)
+                    {
+                        remaining &= ~ace_mask;
+                    }
+                    else if (applies && ace.Header.AceType == 1 && (ace_mask & remaining) != 0)
                     {
                         denied = true;
                         break;
@@ -691,7 +698,8 @@ namespace sogen
 
             privilege_set_length.write(0);
             granted_access.write(granted);
-            access_status.write(!denied && remaining == 0 ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
+            const bool success = !denied && (maximum ? granted != 0 : remaining == 0);
+            access_status.write(success ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
             return STATUS_SUCCESS;
         }
 
