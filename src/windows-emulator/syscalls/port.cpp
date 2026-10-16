@@ -527,13 +527,14 @@ namespace sogen
                                                timeout.value());
             }
 
+            const bool wow64 = (flags & alpc::msgflg_wow64_call) != 0;
+
             if (capture_audio_render_event(c, send_message_attributes))
             {
                 write_empty_success_reply(send_message, receive_message);
                 if (buffer_length && receive_message)
                 {
-                    buffer_length.write(
-                        static_cast<typename EmulatorTraits<Emu64>::SIZE_T>(lpc_port_message::read(send_message).wire_size()));
+                    alpc::write_size_parameter(c.win_emu, buffer_length.value(), wow64, lpc_port_message::read(send_message).wire_size());
                 }
                 return STATUS_SUCCESS;
             }
@@ -541,7 +542,7 @@ namespace sogen
             lpc_message_context context{c.emu};
             context.send_message = send_message;
             context.receive_message = receive_message;
-            context.receive_buffer_length = buffer_length ? buffer_length.read() : 0;
+            context.receive_buffer_length = buffer_length ? alpc::read_size_parameter(c.win_emu, buffer_length.value(), wow64) : 0;
             context.send_handle = read_send_handle_attribute(c, send_message_attributes);
 
             const auto result = port->handle_message(c.win_emu, context);
@@ -577,7 +578,7 @@ namespace sogen
 
             if (receive_message && buffer_length)
             {
-                buffer_length.write(static_cast<typename EmulatorTraits<Emu64>::SIZE_T>(result.total_length()));
+                alpc::write_size_parameter(c.win_emu, buffer_length.value(), wow64, result.total_length());
             }
 
             return result.status;

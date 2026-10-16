@@ -562,10 +562,10 @@ namespace sogen::alpc
 
             if (buffer_length)
             {
-                const auto available = emu.read_memory<uint64_t>(buffer_length);
+                const auto available = read_size_parameter(win_emu, buffer_length, wow64);
                 if (available < required)
                 {
-                    emu.write_memory<uint64_t>(buffer_length, required);
+                    write_size_parameter(win_emu, buffer_length, wow64, required);
                     return STATUS_BUFFER_TOO_SMALL;
                 }
             }
@@ -595,7 +595,7 @@ namespace sogen::alpc
 
             if (buffer_length)
             {
-                emu.write_memory<uint64_t>(buffer_length, required);
+                write_size_parameter(win_emu, buffer_length, wow64, required);
             }
 
             write_receive_attributes(win_emu, receive_attributes, m, wow64);
@@ -705,6 +705,25 @@ namespace sogen::alpc
             thread.await_alpc = wait;
             c.win_emu.yield_thread(c.vcpu, false);
             return STATUS_SUCCESS;
+        }
+    }
+
+    uint64_t read_size_parameter(windows_emulator& win_emu, const uint64_t address, const bool wow64)
+    {
+        auto& emu = win_emu.emu();
+        return wow64 ? emu.read_memory<uint32_t>(address) : emu.read_memory<uint64_t>(address);
+    }
+
+    void write_size_parameter(windows_emulator& win_emu, const uint64_t address, const bool wow64, const uint64_t value)
+    {
+        auto& emu = win_emu.emu();
+        if (wow64)
+        {
+            emu.write_memory<uint32_t>(address, static_cast<uint32_t>(value));
+        }
+        else
+        {
+            emu.write_memory<uint64_t>(address, value);
         }
     }
 

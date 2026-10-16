@@ -128,6 +128,10 @@ namespace sogen
         void create_kernel_listener(process_context& proc, std::u16string_view name, uint64_t max_message_length,
                                     std::u16string_view peer_name);
 
+        // SIZE_T out-parameters are 4 bytes wide for WOW64 callers and 8 bytes otherwise.
+        uint64_t read_size_parameter(windows_emulator& win_emu, uint64_t address, bool wow64);
+        void write_size_parameter(windows_emulator& win_emu, uint64_t address, bool wow64, uint64_t value);
+
         NTSTATUS create_port(const syscall_context& c, std::u16string name, uint64_t port_attributes, handle& out);
         NTSTATUS create_port(const syscall_context& c, std::u16string name, uint32_t flags, uint64_t max_message_length, handle& out);
         NTSTATUS connect_port(const syscall_context& c, std::u16string_view name, uint64_t port_attributes, uint32_t flags,
