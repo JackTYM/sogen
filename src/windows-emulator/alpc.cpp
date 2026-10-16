@@ -27,6 +27,9 @@ namespace sogen::alpc
 
         constexpr uint64_t default_max_message_length = 0xFFEF;
         constexpr uint32_t system_process_id = 4;
+        // The system pid is also the root process's pid, so a kernel-side connection id must not reuse it as its
+        // high word: the root's own connection ids would collide with it in the shared lookup.
+        constexpr uint32_t kernel_connection_tag = 0x80000000;
 
         enum class transport_kind : uint8_t
         {
@@ -368,7 +371,8 @@ namespace sogen::alpc
             p.kind = port_kind::client_communication;
             p.name = name;
             p.max_message_length = default_max_message_length;
-            p.connection_id = (static_cast<uint64_t>(system_process_id) << 32) | ++s.next_connection_serial;
+            p.connection_id =
+                (static_cast<uint64_t>(win_emu.process.process_id | kernel_connection_tag) << 32) | ++s.next_connection_serial;
 
             const auto id = new_port_id(s);
             const auto connection_id = p.connection_id;
