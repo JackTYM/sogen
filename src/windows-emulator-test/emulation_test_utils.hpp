@@ -133,6 +133,9 @@ namespace sogen::test
 
         settings.path_mappings["C:\\a.txt"] =
             std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt");
+        const auto rename_test_directory = std::filesystem::temp_directory_path() / ("emulator-test-rename-" + std::to_string(getpid()));
+        std::filesystem::create_directories(rename_test_directory);
+        settings.path_mappings["C:\\sogen-rename-test"] = rename_test_directory;
 
         if (!interfaces.socket_factory)
         {
@@ -172,6 +175,9 @@ namespace sogen::test
 
         settings.path_mappings["C:\\a.txt"] =
             std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt");
+        const auto rename_test_directory = std::filesystem::temp_directory_path() / ("emulator-test-rename-" + std::to_string(getpid()));
+        std::filesystem::create_directories(rename_test_directory);
+        settings.path_mappings["C:\\sogen-rename-test"] = rename_test_directory;
 
         if (!interfaces.socket_factory)
         {

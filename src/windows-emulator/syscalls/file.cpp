@@ -208,9 +208,16 @@ namespace sogen
                     new_path = f->handle.path().parent() / new_path;
                 }
 
-                if (!info.ReplaceIfExists && c.win_emu.file_sys.stat(new_path))
+                if (!info.ReplaceIfExists && new_path.lexically_normal() != f->handle.path().lexically_normal() &&
+                    c.win_emu.file_sys.stat(new_path))
                 {
-                    return STATUS_OBJECT_NAME_EXISTS;
+                    return STATUS_OBJECT_NAME_COLLISION;
+                }
+
+                const auto parent_stat = c.win_emu.file_sys.stat(new_path.parent());
+                if (!parent_stat || !(parent_stat->st_mode & S_IFDIR))
+                {
+                    return STATUS_OBJECT_PATH_NOT_FOUND;
                 }
 
                 f->handle.defer_rename(new_path);
