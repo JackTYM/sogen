@@ -29,6 +29,7 @@
 #include <combaseapi.h>
 #include <knownfolders.h>
 #include <sddl.h>
+#include <winternl.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
 
@@ -2017,6 +2018,92 @@ namespace
                downcase(0x0410) == 0x0430;
     }
 
+    bool test_alpc_completion_port()
+    {
+        using nt_alpc_create_port_t = LONG(NTAPI*)(PHANDLE, POBJECT_ATTRIBUTES, PVOID);
+        using nt_alpc_connect_port_t =
+            LONG(NTAPI*)(PHANDLE, PUNICODE_STRING, POBJECT_ATTRIBUTES, PVOID, ULONG, PVOID, PVOID, PSIZE_T, PVOID, PVOID, PLARGE_INTEGER);
+        using nt_alpc_set_information_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+        using nt_close_t = LONG(NTAPI*)(HANDLE);
+
+        auto* const ntdll = GetModuleHandleA("ntdll.dll");
+        const auto create_port =
+            reinterpret_cast<nt_alpc_create_port_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "NtAlpcCreatePort")));
+        const auto connect_port =
+            reinterpret_cast<nt_alpc_connect_port_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "NtAlpcConnectPort")));
+        const auto set_information =
+            reinterpret_cast<nt_alpc_set_information_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "NtAlpcSetInformation")));
+        const auto nt_close = reinterpret_cast<nt_close_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "NtClose")));
+        if (!create_port || !connect_port || !set_information || !nt_close)
+        {
+            puts("ntdll ALPC functions not found");
+            return false;
+        }
+
+        const auto completion_port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
+        if (!completion_port)
+        {
+            return false;
+        }
+
+        struct
+        {
+            PVOID completion_key;
+            HANDLE completion_port;
+        } association{nullptr, completion_port};
+
+        constexpr ULONG alpc_associate_completion_port_information = 2;
+        constexpr ULONG status_not_supported = 0xC00000BB;
+
+        static constexpr wchar_t port_path[] = L"\\RPC Control\\sogen-alpc-completion-test";
+        UNICODE_STRING port_name{};
+        port_name.Buffer = const_cast<PWSTR>(port_path);
+        port_name.Length = sizeof(port_path) - sizeof(wchar_t);
+        port_name.MaximumLength = sizeof(port_path);
+
+        OBJECT_ATTRIBUTES attributes{};
+        InitializeObjectAttributes(&attributes, &port_name, 0, nullptr, nullptr);
+
+        bool valid = true;
+
+        HANDLE server_port{};
+        if (create_port(&server_port, &attributes, nullptr) == 0)
+        {
+            const auto status = set_information(server_port, alpc_associate_completion_port_information, &association, sizeof(association));
+            if (status != 0)
+            {
+                printf("Server port association returned 0x%08lX\n", static_cast<unsigned long>(status));
+                valid = false;
+            }
+            nt_close(server_port);
+        }
+        else
+        {
+            puts("NtAlpcCreatePort failed");
+            valid = false;
+        }
+
+        HANDLE client_port{};
+        if (connect_port(&client_port, &port_name, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) == 0)
+        {
+            const auto status = set_information(client_port, alpc_associate_completion_port_information, &association, sizeof(association));
+            if (static_cast<ULONG>(status) != status_not_supported)
+            {
+                printf("Client port association returned 0x%08lX\n", static_cast<unsigned long>(status));
+                valid = false;
+            }
+            nt_close(client_port);
+        }
+        else
+        {
+            puts("NtAlpcConnectPort failed");
+            valid = false;
+        }
+
+        CloseHandle(completion_port);
+        return valid;
+    }
+
     bool test_gdi()
     {
         const wchar_t* cursor_path = L"C:\\Windows\\Cursors\\aero_arrow.cur";
@@ -2401,6 +2488,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_open_named_section, "Open Named Section")
     RUN_TEST(test_handle_tag_bits, "Handle Tag Bits")
     RUN_TEST(test_unicode_case_mapping, "Unicode Case Mapping")
+    RUN_TEST(test_alpc_completion_port, "ALPC Completion Port")
     RUN_TEST(test_actctx, "Activation Context")
     RUN_TEST(test_mmio, "MMIO")
     RUN_TEST(test_gdi, "GDI")

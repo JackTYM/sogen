@@ -116,4 +116,22 @@ namespace sogen::test
 
         dump_and_expect_equal("DeserializedEmulatorBehavesLikeSource", serializer1.get_buffer(), serializer2.get_buffer());
     }
+
+    TEST(SerializationTest, PortKeepsConnectedState)
+    {
+        auto emu = create_empty_emulator();
+
+        port_creation_data data{};
+        data.connected = true;
+        const port_container original{u"", emu, data};
+
+        utils::buffer_serializer serializer{};
+        original.serialize(serializer);
+
+        utils::buffer_deserializer deserializer{serializer};
+        port_container restored{};
+        restored.deserialize(deserializer);
+
+        EXPECT_TRUE(restored.get_internal_port()->connected);
+    }
 } // namespace sogen::test

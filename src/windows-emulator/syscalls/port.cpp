@@ -184,6 +184,7 @@ namespace sogen
             c.win_emu.callbacks.on_generic_access("Connecting port", port_name);
             port_creation_data data{};
             data.sequence_number = 1;
+            data.connected = true;
             client_shared_memory.access([&](PORT_VIEW64& view) {
                 data.view_size = view.ViewSize;
                 data.view_base = c.win_emu.memory.allocate_memory(static_cast<size_t>(data.view_size), memory_permission::read_write);
@@ -277,6 +278,7 @@ namespace sogen
                 data.flags |= port_attributes.read().Flags;
             }
             data.sequence_number = 1;
+            data.connected = true;
             port_container container{std::u16string(port_name), c.win_emu, data};
             container.inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
 
@@ -733,8 +735,22 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcSetInformation()
+        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& c, const handle port_handle, const uint32_t port_information_class,
+                                             const emulator_pointer /*port_information*/, const uint32_t /*length*/)
         {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            constexpr uint32_t alpc_associate_completion_port_information = 2;
+            if (port_information_class == alpc_associate_completion_port_information && port->get_internal_port()->connected)
+            {
+                // Emulated servers reply synchronously and never post the completion a client would wait for.
+                return STATUS_NOT_SUPPORTED;
+            }
+
             return STATUS_SUCCESS;
         }
 

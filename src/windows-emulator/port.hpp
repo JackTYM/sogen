@@ -327,6 +327,7 @@ namespace sogen
         int64_t view_size{};
         ULONG flags{ALPC_PORFLG_ALLOW_LPC_REQUESTS};
         ULONG sequence_number{};
+        bool connected{};
     };
 
     struct alpc_section_view
@@ -380,6 +381,7 @@ namespace sogen
         int64_t view_size{};
         ULONG flags{};
         ULONG sequence_number{};
+        bool connected{};
         bool disconnected{};
         uint64_t next_security_context_handle{4};
         std::vector<uint64_t> security_context_handles{};
@@ -402,6 +404,7 @@ namespace sogen
             buffer.write(this->view_size);
             buffer.write(this->flags);
             buffer.write(this->sequence_number);
+            buffer.write(this->connected);
             buffer.write(this->disconnected);
             buffer.write(this->next_security_context_handle);
             buffer.write_vector(this->security_context_handles);
@@ -415,6 +418,7 @@ namespace sogen
             buffer.read(this->view_size);
             buffer.read(this->flags);
             buffer.read(this->sequence_number);
+            buffer.read(this->connected);
             buffer.read(this->disconnected);
             buffer.read(this->next_security_context_handle);
             buffer.read_vector(this->security_context_handles);
@@ -429,6 +433,7 @@ namespace sogen
             view_size = data.view_size;
             flags = data.flags;
             sequence_number = data.sequence_number;
+            connected = data.connected;
         }
 
         virtual void prepare_for_state_restore(windows_emulator& win_emu)
