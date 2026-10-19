@@ -96,6 +96,7 @@ CALL :collect imagehlp.dll
 CALL :collect inputhost.dll
 CALL :collect iphlpapi.dll
 CALL :collect kdcom.dll
+CALL :collect KerbClientShared.dll
 CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
@@ -128,7 +129,9 @@ CALL :collect ncrypt.dll
 CALL :collect ncryptprov.dll
 CALL :collect ncryptsslp.dll
 CALL :collect netapi32.dll
+CALL :collect NETLOGON.dll
 CALL :collect netmsg.dll
+CALL :collect netprovfw.dll
 CALL :collect netutils.dll
 CALL :collect nlsbres.dll
 CALL :collect normaliz.dll
