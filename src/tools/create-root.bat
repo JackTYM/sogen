@@ -108,6 +108,7 @@ CALL :collect imm32.dll
 CALL :collect imagehlp.dll
 CALL :collect inputhost.dll
 CALL :collect iphlpapi.dll
+CALL :collect joinutil.dll
 CALL :collect kdcom.dll
 CALL :collect KerbClientShared.dll
 CALL :collect kernel.appcore.dll
