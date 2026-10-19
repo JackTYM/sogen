@@ -61,6 +61,7 @@ CALL :collect coremessaging.dll
 CALL :collect credssp.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
+CALL :collect cryptdll.dll
 CALL :collect cryptsp.dll
 CALL :collect d3d10.dll
 CALL :collect d3d10core.dll
@@ -101,6 +102,7 @@ CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
+CALL :collect logoncli.dll
 CALL :collect mfperfhelper.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
