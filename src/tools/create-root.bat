@@ -65,6 +65,7 @@ CALL :collect coreuicomponents.dll
 CALL :collect credui.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
+CALL :collect cryptdll.dll
 CALL :collect cryptsp.dll
 CALL :collect CRYPTUI.dll
 CALL :collect d2d1.dll
@@ -115,6 +116,7 @@ CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
 CALL :collect logoncli.dll
 CALL :collect MF.dll
+CALL :collect mfperfhelper.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
 CALL :collect MFSENSORGROUP.dll
