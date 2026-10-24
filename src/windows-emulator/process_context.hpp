@@ -496,8 +496,8 @@ namespace sogen
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
         // and GetCursorPos to drive menu cursors and gate their input loop on the window being active.
         hwnd foreground_window{};
-        int32_t cursor_x{};
-        int32_t cursor_y{};
+        int32_t cursor_x{default_display_width / 2};
+        int32_t cursor_y{default_display_height / 2};
         hcursor current_cursor{};
         int32_t cursor_show_count{};
         // Whether the current cursor has a visible shape. SetCursor(NULL) clears it to hide the pointer
