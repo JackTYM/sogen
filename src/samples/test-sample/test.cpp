@@ -2189,6 +2189,47 @@ namespace
         return true;
     }
 
+    bool test_section_view_outlives_handle()
+    {
+        auto* const mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 0x2000, nullptr);
+        if (!mapping)
+        {
+            puts("CreateFileMappingA failed");
+            return false;
+        }
+
+        auto* const view = static_cast<volatile uint32_t*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0x2000));
+        if (!view)
+        {
+            puts("MapViewOfFile failed");
+            CloseHandle(mapping);
+            return false;
+        }
+
+        view[0] = 0x600df00d;
+        CloseHandle(mapping);
+
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(const_cast<uint32_t*>(view), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT)
+        {
+            puts("The view was released together with the last section handle");
+            return false;
+        }
+
+        view[1] = 0x1badb002;
+        const bool intact = view[0] == 0x600df00d && view[1] == 0x1badb002;
+
+        UnmapViewOfFile(const_cast<uint32_t*>(view));
+
+        if (VirtualQuery(const_cast<uint32_t*>(view), &info, sizeof(info)) == 0 || info.State != MEM_FREE)
+        {
+            puts("The view is still mapped after UnmapViewOfFile");
+            return false;
+        }
+
+        return intact;
+    }
+
     bool test_handle_tag_bits()
     {
         using nt_close_t = LONG(NTAPI*)(HANDLE);
@@ -2650,6 +2691,7 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_settimer, "User Timer")
     RUN_TEST(test_private_namespace, "Private Namespace")
     RUN_TEST(test_open_named_section, "Open Named Section")
+    RUN_TEST(test_section_view_outlives_handle, "Section View Outlives Handle")
     RUN_TEST(test_handle_tag_bits, "Handle Tag Bits")
     RUN_TEST(test_unicode_case_mapping, "Unicode Case Mapping")
     RUN_TEST(test_actctx, "Activation Context")
