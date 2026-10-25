@@ -172,6 +172,11 @@ CALL :collect rpcepmap.dll
 CALL :collect rpcns4.dll
 CALL :collect rpcrt4.dll
 CALL :collect rpcss.dll
+CALL :collect umpnpmgr.dll
+CALL :collect umpo.dll
+CALL :collect lsm.dll
+CALL :collect psmsrv.dll
+CALL :collect SystemEventsBrokerServer.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect samlib.dll
