@@ -628,6 +628,8 @@ namespace sogen
         }
 
         std::vector<uint8_t> sid{};
+        std::vector<token_privilege> privileges{};
+        LUID authentication_id{};
 
         uint64_t shared_section_address{0};
         uint64_t shared_section_size{0};

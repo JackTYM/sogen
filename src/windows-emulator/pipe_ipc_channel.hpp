@@ -54,6 +54,10 @@ namespace sogen
 
         // For `window_surface`: a frame for `window` (data carries the pixels when they are not in shared memory).
         std::optional<window_surface_update> surface{};
+
+        // For `process_alive`: whether the announced process's image is native 64-bit, so a sibling
+        // that never reports its own PEB32 can still answer ProcessWow64Information.
+        std::optional<bool> native_64bit{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via

@@ -3,6 +3,7 @@
 #include "../cpu_context.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../registry/hive_parser.hpp"
 
 namespace sogen
 {
@@ -13,6 +14,7 @@ namespace sogen
                                                                 const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes)
         {
             auto key = read_unicode_string(c.emu, attributes.ObjectName);
+            std::ranges::replace(key, u'/', registry_name_slash);
 
             if (attributes.RootDirectory)
             {
@@ -72,6 +74,12 @@ namespace sogen
                                     ULONG /*open_options*/)
         {
             return handle_NtOpenKey(c, key_handle, desired_access, object_attributes);
+        }
+
+        // Hive files are never written back (see registry_manager), so there is nothing to flush beyond validating the key.
+        NTSTATUS handle_NtFlushKey(const syscall_context& c, const handle key_handle)
+        {
+            return c.proc.registry_keys.get(key_handle) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
         }
 
         NTSTATUS handle_NtQueryKey(const syscall_context& c, const handle key_handle, const KEY_INFORMATION_CLASS key_information_class,
@@ -305,10 +313,12 @@ namespace sogen
                 info.Type = value->type;
                 info.NameLength = static_cast<ULONG>(original_name.size() * 2);
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_value_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_value_information, &info, base_size);
 
                 if (required_size > length)
                 {
@@ -331,10 +341,12 @@ namespace sogen
                 info.Type = value->type;
                 info.DataLength = static_cast<ULONG>(value->data.size());
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_value_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_value_information, &info, base_size);
 
                 if (required_size > length)
                 {
@@ -361,10 +373,12 @@ namespace sogen
                 info.DataLength = static_cast<ULONG>(value->data.size());
                 info.NameLength = static_cast<ULONG>(original_name.size() * 2);
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_value_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_value_information, &info, base_size);
 
                 if (required_size > length)
                 {
@@ -674,10 +688,12 @@ namespace sogen
                 info.TitleIndex = 0;
                 info.NameLength = static_cast<ULONG>(name_size);
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_information, &info, base_size);
 
                 if (required_size > length)
                 {
@@ -755,10 +771,12 @@ namespace sogen
                 info.Type = value->type;
                 info.NameLength = static_cast<ULONG>(name_size);
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_value_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_value_information, &info, base_size);
 
                 if (required_size > length)
                 {
@@ -782,10 +800,12 @@ namespace sogen
                 info.Type = value->type;
                 info.DataLength = static_cast<ULONG>(data_size);
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_value_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_value_information, &info, base_size);
 
                 if (required_size > length)
                 {
@@ -814,10 +834,12 @@ namespace sogen
                 info.DataLength = static_cast<ULONG>(data_size);
                 info.NameLength = static_cast<ULONG>(name_size);
 
-                if (base_size <= length)
+                if (length < base_size)
                 {
-                    c.emu.write_memory(key_value_information, &info, base_size);
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
+
+                c.emu.write_memory(key_value_information, &info, base_size);
 
                 if (required_size > length)
                 {

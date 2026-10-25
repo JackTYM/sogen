@@ -647,7 +647,6 @@ namespace sogen
     constexpr auto SHARED_SECTION = make_pseudo_handle(0x1, handle_types::section);
     constexpr auto DBWIN_BUFFER = make_pseudo_handle(0x2, handle_types::section);
 
-    constexpr auto WER_PORT_READY = make_pseudo_handle(0x1, handle_types::event);
     constexpr auto DBWIN_DATA_READY = make_pseudo_handle(0x2, handle_types::event);
     constexpr auto DBWIN_BUFFER_READY = make_pseudo_handle(0x3, handle_types::event);
     constexpr auto SVCCTRL_START_EVENT = make_pseudo_handle(0x4, handle_types::event);

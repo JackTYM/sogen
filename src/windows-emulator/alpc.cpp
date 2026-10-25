@@ -28,7 +28,11 @@ namespace sogen::alpc
         constexpr uint64_t default_max_message_length = 0xFFEF;
         constexpr uint32_t system_process_id = 4;
         constexpr uint32_t srm_apply_system_policy_update_command = 1;
+        constexpr uint32_t srm_register_logon_session_command = 2;
+        constexpr uint32_t srm_set_logon_session_names_command = 4;
+        constexpr NTSTATUS status_no_such_logon_session = 0xC000005F;
         constexpr uint32_t srm_apply_global_sacl_update_command = 5;
+        constexpr uint32_t srm_apply_cap_update_command = 6;
         // The system pid is also the root process's pid, so a kernel-side connection id must not reuse it as its
         // high word: the root's own connection ids would collide with it in the shared lookup.
         constexpr uint32_t kernel_connection_tag = 0x80000000;
@@ -315,6 +319,13 @@ namespace sogen::alpc
                 auto m = make_message(payload.sender_message_id, endpoint_id);
                 m.type = LPC_REPLY;
 
+                if (const auto context = endpoint->message_contexts.find(payload.sender_message_id);
+                    context != endpoint->message_contexts.end())
+                {
+                    m.message_context = context->second;
+                    endpoint->message_contexts.erase(context);
+                }
+
                 if (endpoint->awaited_replies.erase(payload.sender_message_id) != 0)
                 {
                     endpoint->replies[payload.sender_message_id] = std::move(m);
@@ -438,6 +449,66 @@ namespace sogen::alpc
             route(win_emu, {.port_name = listener.name, .connection_id = t.connection_id, .to_server = false, .payload = reply});
         }
 
+        void answer_logon_session(windows_emulator& win_emu, port& listener, const addressed_transport& t)
+        {
+            constexpr size_t session_offset = sizeof(uint32_t);
+            const auto& data = t.payload.data;
+
+            uint64_t session{};
+            if (data.size() < session_offset + sizeof(session))
+            {
+                win_emu.log.error("[srm] logon session request from pid %u: %zu bytes, no session id\n", t.payload.sender_process_id,
+                                  data.size());
+                return;
+            }
+
+            std::memcpy(&session, data.data() + session_offset, sizeof(session));
+            listener.srm_logon_sessions.try_emplace(session);
+            reply_kernel_status(win_emu, listener, t, STATUS_SUCCESS);
+        }
+
+        void answer_logon_session_names(windows_emulator& win_emu, port& listener, const addressed_transport& t)
+        {
+            constexpr size_t session_offset = sizeof(uint32_t);
+            constexpr size_t first_length_offset = session_offset + 8;
+            constexpr size_t second_length_offset = session_offset + 0x18;
+            constexpr size_t first_name_offset = session_offset + 0x28;
+            const auto& data = t.payload.data;
+
+            uint64_t session{};
+            uint16_t first_length{};
+            uint16_t second_length{};
+            if (data.size() < first_name_offset)
+            {
+                win_emu.log.error("[srm] logon session names from pid %u: %zu bytes, too short\n", t.payload.sender_process_id,
+                                  data.size());
+                return;
+            }
+
+            std::memcpy(&session, data.data() + session_offset, sizeof(session));
+            std::memcpy(&first_length, data.data() + first_length_offset, sizeof(first_length));
+            std::memcpy(&second_length, data.data() + second_length_offset, sizeof(second_length));
+
+            const size_t second_name_offset = first_name_offset + ((first_length + 7u) & ~size_t{7});
+            if (data.size() < second_name_offset + second_length)
+            {
+                win_emu.log.error("[srm] logon session names from pid %u: lengths %u/%u exceed %zu bytes\n", t.payload.sender_process_id,
+                                  first_length, second_length, data.size());
+                return;
+            }
+
+            const auto session_entry = listener.srm_logon_sessions.find(session);
+            if (session_entry == listener.srm_logon_sessions.end())
+            {
+                reply_kernel_status(win_emu, listener, t, status_no_such_logon_session);
+                return;
+            }
+
+            session_entry->second.first_name.assign(data.begin() + first_name_offset, data.begin() + first_name_offset + first_length);
+            session_entry->second.second_name.assign(data.begin() + second_name_offset, data.begin() + second_name_offset + second_length);
+            reply_kernel_status(win_emu, listener, t, STATUS_SUCCESS);
+        }
+
         void answer_global_sacl_update(windows_emulator& win_emu, const port& listener, const addressed_transport& t)
         {
             constexpr size_t name_length_offset = sizeof(uint32_t);
@@ -474,6 +545,31 @@ namespace sogen::alpc
             reply_kernel_status(win_emu, listener, t, STATUS_OBJECT_NAME_NOT_FOUND);
         }
 
+        void answer_cap_update(windows_emulator& win_emu, const port& listener, const addressed_transport& t)
+        {
+            const std::u16string cap_root = u"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Lsa\\CentralizedAccessPolicies";
+            const std::u16string cap_keys[] = {cap_root, cap_root + u"\\CAPEs", cap_root + u"\\CAPs"};
+
+            for (const auto& key_name : cap_keys)
+            {
+                if (!win_emu.registry.get_key({key_name}))
+                {
+                    reply_kernel_status(win_emu, listener, t, STATUS_OBJECT_NAME_NOT_FOUND);
+                    return;
+                }
+            }
+
+            const auto capes = win_emu.registry.get_key({cap_keys[1]});
+            if (capes && win_emu.registry.get_sub_key_name(*capes, 0))
+            {
+                win_emu.log.error("[srm] CAP update from pid %u: CAPEs has subkeys, the policy import is not modelled\n",
+                                  t.payload.sender_process_id);
+                return;
+            }
+
+            reply_kernel_status(win_emu, listener, t, STATUS_SUCCESS);
+        }
+
         void answer_kernel_request(windows_emulator& win_emu, port& listener, const addressed_transport& t)
         {
             const auto& data = t.payload.data;
@@ -495,9 +591,27 @@ namespace sogen::alpc
                 return;
             }
 
+            if (command == srm_register_logon_session_command)
+            {
+                answer_logon_session(win_emu, listener, t);
+                return;
+            }
+
+            if (command == srm_set_logon_session_names_command)
+            {
+                answer_logon_session_names(win_emu, listener, t);
+                return;
+            }
+
             if (command == srm_apply_global_sacl_update_command)
             {
                 answer_global_sacl_update(win_emu, listener, t);
+                return;
+            }
+
+            if (command == srm_apply_cap_update_command)
+            {
+                answer_cap_update(win_emu, listener, t);
                 return;
             }
 
@@ -561,12 +675,13 @@ namespace sogen::alpc
 
                 if (wow64)
                 {
-                    const std::array<uint32_t, 5> context{static_cast<uint32_t>(port_context), 0, sequence, m.message_id, m.callback_id};
+                    const std::array<uint32_t, 5> context{static_cast<uint32_t>(port_context), static_cast<uint32_t>(m.message_context),
+                                                          sequence, m.message_id, m.callback_id};
                     emu.write_memory(address, context.data(), sizeof(context));
                 }
                 else
                 {
-                    const std::array<uint64_t, 2> pointers{port_context, 0};
+                    const std::array<uint64_t, 2> pointers{port_context, m.message_context};
                     const std::array<uint32_t, 3> ids{sequence, m.message_id, m.callback_id};
                     emu.write_memory(address, pointers.data(), sizeof(pointers));
                     emu.write_memory(address + sizeof(pointers), ids.data(), sizeof(ids));
@@ -605,6 +720,23 @@ namespace sogen::alpc
             }
 
             emu.write_memory(attributes_address, &header, sizeof(header));
+        }
+
+        std::optional<uint64_t> read_send_message_context(const syscall_context& c, const uint64_t attributes_address, const bool wow64)
+        {
+            if (!attributes_address)
+            {
+                return std::nullopt;
+            }
+
+            const auto header = c.emu.read_memory<ALPC_MESSAGE_ATTRIBUTES>(attributes_address);
+            if (!(header.ValidAttributes & context_attribute))
+            {
+                return std::nullopt;
+            }
+
+            const auto address = attributes_address + attribute_offset(header.AllocatedAttributes, context_attribute, wow64);
+            return wow64 ? uint64_t{c.emu.read_memory<uint32_t>(address + 4)} : c.emu.read_memory<uint64_t>(address + 8);
         }
 
         std::optional<std::vector<uint8_t>> read_send_view(const syscall_context& c, const uint64_t attributes_address, const bool wow64)
@@ -1152,15 +1284,20 @@ namespace sogen::alpc
                 payload.sender_message_id = new_message_id(s);
                 payload.sender_process_id = c.proc.process_id;
                 payload.sender_thread_id = c.thread().id;
-                payload.type = sync ? LPC_REQUEST : LPC_DATAGRAM;
+                payload.type = LPC_REQUEST;
                 payload.callback_id = sent.header.native.CallbackId;
-                payload.expects_reply = sync;
+                payload.expects_reply = true;
                 payload.data = sent.data;
                 payload.view = read_send_view(c, send_attributes, wow64);
 
                 if (sync)
                 {
                     p->awaited_replies.insert(payload.sender_message_id);
+                }
+
+                if (const auto context = read_send_message_context(c, send_attributes, wow64))
+                {
+                    p->message_contexts[payload.sender_message_id] = *context;
                 }
 
                 route(c.win_emu, {.port_name = p->name,
@@ -1279,6 +1416,7 @@ namespace sogen::alpc
                                                                wait.receive_attributes, wait.wow64_layout);
                     if (status != STATUS_BUFFER_TOO_SMALL)
                     {
+                        p->last_received_sender_pid = entry->sender_process_id;
                         queue->erase(entry);
                     }
 
@@ -1426,6 +1564,25 @@ namespace sogen::alpc
         return c.proc.alpc.sections.erase(section) != 0 ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
     }
 
+    NTSTATUS create_resource_reserve(const syscall_context& c, const uint64_t resource_id_out)
+    {
+        if (!resource_id_out)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        auto& s = c.proc.alpc;
+        const auto resource_id = s.next_resource_reserve_id++;
+        s.resource_reserves.insert(resource_id);
+        c.emu.write_memory<uint64_t>(resource_id_out, resource_id);
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS delete_resource_reserve(const syscall_context& c, const uint64_t resource_id)
+    {
+        return c.proc.alpc.resource_reserves.erase(resource_id) != 0 ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+    }
+
     NTSTATUS create_section_view(const syscall_context& c, const uint64_t view_attributes)
     {
         if (!view_attributes)
@@ -1506,6 +1663,17 @@ namespace sogen::alpc
     {
         const auto it = proc.alpc.ports.find(port_id);
         return it != proc.alpc.ports.end() && !it->second.queue.empty();
+    }
+
+    std::optional<uint32_t> last_received_sender_pid(const process_context& proc, const uint64_t port_id)
+    {
+        const auto it = proc.alpc.ports.find(port_id);
+        if (it == proc.alpc.ports.end() || it->second.last_received_sender_pid == 0)
+        {
+            return std::nullopt;
+        }
+
+        return it->second.last_received_sender_pid;
     }
 
     bool deliver(windows_emulator& win_emu, const pipe_ipc_message& message)

@@ -95,14 +95,34 @@ namespace sogen
         }
     };
 
+    struct token_privilege
+    {
+        uint32_t luid{};
+        uint32_t attributes{};
+    };
+
     struct process_token : ref_counted_object
     {
-        void serialize_object(utils::buffer_serializer&) const override
+        // Unset for a handle to the owning process's own primary token, whose privileges live in
+        // process_context::privileges.
+        std::optional<std::vector<token_privilege>> privileges{};
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
         {
+            buffer.write(this->privileges.has_value());
+            if (this->privileges)
+            {
+                buffer.write_vector(*this->privileges);
+            }
         }
 
-        void deserialize_object(utils::buffer_deserializer&) override
+        void deserialize_object(utils::buffer_deserializer& buffer) override
         {
+            this->privileges.reset();
+            if (buffer.read<bool>())
+            {
+                buffer.read_vector(this->privileges.emplace());
+            }
         }
     };
 

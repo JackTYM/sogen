@@ -203,6 +203,10 @@ namespace sogen
         // process spawning at all.
         int control_fd{-1};
 
+        // Parent's end of a third socketpair on which the child sends control requests for processes it
+        // has no channel to, for the parent to route (see windows_emulator::register_child_routing_channel).
+        int router_fd{-1};
+
         // The real host OS process id backing this child (fork()'s return value in the parent) -
         // unrelated to child_process_record::pid, which is a synthetic guest pid. Lets a caller
         // force_kill() the real process even after its process_control_channel has poisoned itself
@@ -411,6 +415,13 @@ namespace sogen
         // child on a platform without spawning support - see set_process_control_server.
         std::unique_ptr<process_control_channel> process_control_server_{};
 
+        // Outgoing channel to this process's parent for control requests addressed to a process this one
+        // has no channel to (a sibling elsewhere in the spawn tree) - see set_process_control_router.
+        std::unique_ptr<process_control_channel> process_control_router_{};
+
+        // Incoming routed requests, one channel per spawned child - see register_child_routing_channel.
+        std::vector<std::unique_ptr<process_control_channel>> child_routing_channels_{};
+
         // Short names (see devices/named_pipe.hpp's pipe_short_name) of every named pipe server
         // instance known to exist, whether created in this process (NtCreateNamedPipeFile) or
         // learned about from a sibling OS process (pipe_ipc_message_type::server_created). Backs
@@ -426,7 +437,7 @@ namespace sogen
         // spawned by this process, its parent, or a sibling several hops away. Lets handle_NtOpenProcess
         // resolve a sibling pid it never spawned itself (e.g. a crash-reporting broker registering every
         // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
-        std::set<uint32_t> known_sibling_pids_{};
+        std::map<uint32_t, std::optional<bool>> known_sibling_pids_{};
 
         // Test tooling (SOGEN_INJECT_INPUT): left clicks, keys and typed text delivered in order through the same
         // path as host UI input, each a given time after the newest visible window of its class appeared (or the
@@ -560,8 +571,9 @@ namespace sogen
         // known-server announcement (see pump_pipe_ipc's generic relay loop). is_known_sibling_pid then
         // answers whether a given pid is a live process somewhere in the tree, for handle_NtOpenProcess's
         // sibling-pid fallback.
-        void broadcast_process_alive(uint32_t pid);
+        void broadcast_process_alive(uint32_t pid, std::optional<bool> native_64bit);
         bool is_known_sibling_pid(uint32_t pid) const;
+        std::optional<bool> known_sibling_native_64bit(uint32_t pid) const;
 
         // Announces that `window`, whose hierarchy is attached to `parent_window` of another process, took
         // keyboard focus, so that process's input queue routes keyboard input to it (see pump_pipe_ipc).
@@ -594,6 +606,25 @@ namespace sogen
         // perform_context_switch_work via switch_to_next_thread even while no thread is runnable, so a
         // child with zero runnable threads still services its parent's requests.
         void pump_process_control_server();
+
+        // Sets the outgoing channel through which this process asks its parent to forward a control
+        // request to a process it has no channel to (see child_process_outcome::router_fd and
+        // --child-router-fd). Left null for the root process.
+        void set_process_control_router(std::unique_ptr<process_control_channel> channel);
+        process_control_channel* process_control_router() const;
+
+        // Registers the channel a spawned child sends its routed control requests on (the parent end of
+        // child_process_outcome::router_fd), serviced by pump_child_routing_channels.
+        void register_child_routing_channel(std::unique_ptr<process_control_channel> channel);
+
+        // Answers every routed request currently queued by a child: executed here when addressed to this
+        // process, forwarded to the addressed child's control channel, or passed on to this process's own
+        // parent. Called once per scheduler tick (perform_context_switch_work).
+        void pump_child_routing_channels();
+
+        // The control channel of the live child with guest pid `pid`, or nullptr if this process spawned
+        // no such child.
+        process_control_channel* find_child_control_channel_by_pid(uint32_t pid);
 
         // Called by main.cpp right before this process's own execution ends, for every exit path
         // (clean self-terminate, an uncaught exception, GDB detach, ...) - a no-op unless this
@@ -765,6 +796,11 @@ namespace sogen
         uint64_t get_executed_instructions() const
         {
             return this->executed_instructions_;
+        }
+
+        bool runs_as_local_system() const
+        {
+            return this->application_settings_.local_system;
         }
 
         bool uses_instruction_precision() const

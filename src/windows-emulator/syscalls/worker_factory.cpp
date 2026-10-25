@@ -583,6 +583,7 @@ namespace sogen
                 {
                     const auto port = make_handle(c.emu.read_memory<uint64_t>(deferred_work + 0x08));
                     const auto flags = c.emu.read_memory<ULONG>(deferred_work + 0x10);
+                    c.emu.write_memory<uint64_t>(deferred_work, 0);
                     const emulator_object<LARGE_INTEGER> no_timeout{c.emu, 0};
                     handle_NtAlpcSendWaitReceivePort(
                         c, port, flags, emulator_object<PORT_MESSAGE64>{c.emu, message}, emulator_object<ALPC_MESSAGE_ATTRIBUTES>{c.emu, 0},

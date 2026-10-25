@@ -259,7 +259,11 @@ namespace sogen
             }
             spec.name = std::string(tokens[2]);
 
-            if (const auto rva = try_parse_number(tokens[1]))
+            if (tokens[1] == "export")
+            {
+                spec.location = std::string(tokens[2]);
+            }
+            else if (const auto rva = try_parse_number(tokens[1]))
             {
                 spec.location = *rva;
             }

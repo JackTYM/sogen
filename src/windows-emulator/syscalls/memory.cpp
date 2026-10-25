@@ -362,7 +362,7 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            if (base_address < MIN_ALLOCATION_ADDRESS || base_address >= MAX_ALLOCATION_END_EXCL)
+            if (base_address >= MAX_ALLOCATION_END_EXCL)
             {
                 if (return_length)
                 {

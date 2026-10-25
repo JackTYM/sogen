@@ -103,8 +103,14 @@ namespace sogen
 
         const auto& record = c.proc.child_processes.at(*record_id);
 
-        auto* const channel = c.win_emu.find_child_control_channel(*record_id);
-        if (!channel)
+        child_target target{.record_id = *record_id, .channel = c.win_emu.find_child_control_channel(*record_id)};
+        if (!target.channel)
+        {
+            target.channel = c.win_emu.process_control_router();
+            target.routed_pid = record.pid;
+        }
+
+        if (!target.channel)
         {
             return STATUS_NOT_SUPPORTED;
         }
@@ -114,7 +120,7 @@ namespace sogen
             return STATUS_ACCESS_DENIED;
         }
 
-        return child_target{*record_id, channel};
+        return target;
     }
 
     std::variant<const process_context::child_process_record*, NTSTATUS> resolve_child_record(const syscall_context& c, const handle h,
@@ -159,7 +165,17 @@ namespace sogen
                             request.page_protection, request.allocation_attributes, request.granted_access, request.payload.size());
         }
 
-        const auto response = target.channel->request(request, timeout_ms);
+        std::optional<process_control_response> response{};
+        if (target.routed_pid != 0)
+        {
+            auto routed = request;
+            routed.target_pid = target.routed_pid;
+            response = target.channel->request(routed, timeout_ms);
+        }
+        else
+        {
+            response = target.channel->request(request, timeout_ms);
+        }
 
         if (trace)
         {

@@ -22,4 +22,10 @@ namespace sogen
     // once per scheduler tick, the same cadence windows_emulator::pump_pipe_ipc() is driven at.
     void pump_process_control(windows_emulator& target, process_control_channel& channel);
 
+    // Answers a control request a child could not deliver itself because it has no channel to
+    // request.target_pid: executes it on `self` when addressed to it, otherwise forwards it to the
+    // addressed child of `self` or, failing that, on up to the parent of `self`. Only a process's
+    // ancestors hold channels to it, so a request between two siblings travels via their common one.
+    process_control_response route_process_control_request(windows_emulator& self, const process_control_request& request);
+
 } // namespace sogen

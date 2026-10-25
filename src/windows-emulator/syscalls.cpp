@@ -266,12 +266,18 @@ namespace sogen
                                                   emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, handle port_handle, ULONG flags);
         NTSTATUS handle_NtAlpcImpersonateClientOfPort(const syscall_context& c, handle port_handle, emulator_pointer message, ULONG flags);
+        NTSTATUS handle_NtAlpcOpenSenderProcess(const syscall_context& c, emulator_object<handle> process_handle, handle port_handle,
+                                                emulator_pointer port_message, ULONG flags, ACCESS_MASK desired_access,
+                                                uint64_t object_attributes);
         NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, handle port_handle, uint32_t information_class,
                                                emulator_pointer information, uint32_t length, emulator_pointer return_length);
         NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, handle port_handle, ULONG flags, handle section_handle,
                                                 EmulatorTraits<Emu64>::SIZE_T section_size, emulator_pointer alpc_section_handle,
                                                 emulator_pointer actual_section_size);
         NTSTATUS handle_NtAlpcDeletePortSection(const syscall_context& c, handle port_handle, ULONG flags, uint64_t section_handle);
+        NTSTATUS handle_NtAlpcCreateResourceReserve(const syscall_context& c, handle port_handle, ULONG flags,
+                                                    EmulatorTraits<Emu64>::SIZE_T message_size, emulator_pointer resource_id);
+        NTSTATUS handle_NtAlpcDeleteResourceReserve(const syscall_context& c, handle port_handle, ULONG flags, uint64_t resource_id);
         NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, handle port_handle, ULONG flags,
                                                 emulator_pointer view_attributes);
         NTSTATUS handle_NtAlpcDeleteSectionView(const syscall_context& c, handle port_handle, ULONG flags, emulator_pointer view_base);
@@ -337,6 +343,9 @@ namespace sogen
                                   emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
         NTSTATUS handle_NtOpenKeyEx(const syscall_context& c, emulator_object<handle> key_handle, ACCESS_MASK desired_access,
                                     emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG /*open_options*/);
+        NTSTATUS handle_NtFlushKey(const syscall_context& c, handle key_handle);
+        NTSTATUS handle_NtLoadDriver(const syscall_context& c, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> driver_service_name);
+        NTSTATUS handle_NtInitializeRegistry(const syscall_context& c, uint32_t boot_condition);
         NTSTATUS handle_NtQueryKey(const syscall_context& c, handle key_handle, KEY_INFORMATION_CLASS key_information_class,
                                    uint64_t key_information, ULONG length, emulator_object<ULONG> result_length);
         NTSTATUS handle_NtQueryValueKey(const syscall_context& c, handle key_handle,
@@ -498,6 +507,8 @@ namespace sogen
                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
                                 /*object_attributes*/,
                                 BOOLEAN /*effective_only*/, TOKEN_TYPE type, emulator_object<handle> new_token_handle);
+        NTSTATUS handle_NtCreateTokenEx(const syscall_context& c, emulator_object<handle> token_handle, ACCESS_MASK /*desired_access*/,
+                                        emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/, TOKEN_TYPE type);
         NTSTATUS handle_NtFilterToken(const syscall_context&, handle existing_token_handle, ULONG /*flags*/, uint64_t /*sids_to_disable*/,
                                       uint64_t /*privileges_to_delete*/, uint64_t /*restricted_sids*/,
                                       emulator_object<handle> new_token_handle);
@@ -515,6 +526,23 @@ namespace sogen
                                       ACCESS_MASK desired_access, emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
                                       uint64_t privilege_set, emulator_object<ULONG> privilege_set_length,
                                       emulator_object<ACCESS_MASK> granted_access, emulator_object<NTSTATUS> access_status);
+        NTSTATUS handle_NtAccessCheckByTypeAndAuditAlarm(const syscall_context& c, uint64_t subsystem_name, uint64_t handle_id,
+                                                         uint64_t object_type_name, uint64_t object_name, uint64_t security_descriptor,
+                                                         uint64_t principal_self_sid, ACCESS_MASK desired_access, ULONG audit_type,
+                                                         ULONG flags, uint64_t object_type_list, ULONG object_type_list_length,
+                                                         emulator_object<EMU_GENERIC_MAPPING> generic_mapping, BOOLEAN object_creation,
+                                                         emulator_object<ACCESS_MASK> granted_access,
+                                                         emulator_object<NTSTATUS> access_status,
+                                                         emulator_object<BOOLEAN> generate_on_close);
+        NTSTATUS handle_NtCloseObjectAuditAlarm(const syscall_context& c, uint64_t subsystem_name, uint64_t handle_id,
+                                                BOOLEAN generate_on_close);
+        NTSTATUS handle_NtAccessCheckAndAuditAlarm(const syscall_context& c, uint64_t subsystem_name, uint64_t handle_id,
+                                                   uint64_t object_type_name, uint64_t object_name, uint64_t security_descriptor,
+                                                   ACCESS_MASK desired_access, emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                                   BOOLEAN object_creation, emulator_object<ACCESS_MASK> granted_access,
+                                                   emulator_object<NTSTATUS> access_status, emulator_object<BOOLEAN> generate_on_close);
+        NTSTATUS handle_NtPrivilegedServiceAuditAlarm(const syscall_context& c, uint64_t subsystem_name, uint64_t service_name,
+                                                      uint64_t client_token, uint64_t privileges, BOOLEAN access_granted);
         NTSTATUS handle_NtSuspendProcess(const syscall_context& c, handle process_handle);
         NTSTATUS handle_NtResumeProcess(const syscall_context& c, handle process_handle);
         NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, handle token_handle, BOOLEAN disable_all_privileges,
@@ -1300,6 +1328,16 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtDeleteWnfStateData()
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtSetUuidSeed()
+        {
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle job_handle,
                                                     const uint32_t job_object_information_class, const uint64_t job_object_information,
                                                     const uint32_t job_object_information_length,
@@ -1715,6 +1753,8 @@ namespace sogen
         add_handler(NtUpdateWnfStateData);
         add_handler(NtCreateWnfStateName);
         add_handler(NtDeleteWnfStateName);
+        add_handler(NtDeleteWnfStateData);
+        add_handler(NtSetUuidSeed);
         add_handler(NtRaiseException);
         add_handler(NtQueryInformationJobObject);
         add_handler(NtSetSystemInformation);
@@ -1734,9 +1774,16 @@ namespace sogen
         add_handler(NtUserCallMsgFilter);
         add_handler(NtQueryValueKey);
         add_handler(NtQueryMultipleValueKey);
+        add_handler(NtFlushKey);
+        add_handler(NtLoadDriver);
+        add_handler(NtInitializeRegistry);
         add_handler(NtQueryKey);
         add_handler(NtGetNlsSectionPtr);
         add_handler(NtAccessCheck);
+        add_handler(NtAccessCheckByTypeAndAuditAlarm);
+        add_handler(NtCloseObjectAuditAlarm);
+        add_handler(NtPrivilegedServiceAuditAlarm);
+        add_handler(NtAccessCheckAndAuditAlarm);
         add_handler(NtCreateKey);
         add_handler(NtSetValueKey);
         add_handler(NtDeleteKey);
@@ -1757,6 +1804,7 @@ namespace sogen
         add_handler(NtOpenPrivateNamespace);
         add_handler(NtDeletePrivateNamespace);
         add_handler(NtDuplicateToken);
+        add_handler(NtCreateTokenEx);
         add_handler(NtFilterToken);
         add_handler(NtQueryTimerResolution);
         add_handler(NtSetInformationKey);
@@ -1801,6 +1849,7 @@ namespace sogen
         add_handler(NtAlpcConnectPort);
         add_handler(NtAlpcDisconnectPort);
         add_handler(NtAlpcImpersonateClientOfPort);
+        add_handler(NtAlpcOpenSenderProcess);
         add_handler(NtAlpcQueryInformation);
         add_handler(NtAlpcAcceptConnectPort);
         add_handler(NtListenPort);
@@ -1810,6 +1859,8 @@ namespace sogen
         add_handler(NtRequestWaitReplyPort);
         add_handler(NtAlpcCreatePortSection);
         add_handler(NtAlpcDeletePortSection);
+        add_handler(NtAlpcCreateResourceReserve);
+        add_handler(NtAlpcDeleteResourceReserve);
         add_handler(NtAlpcCreateSectionView);
         add_handler(NtAlpcDeleteSectionView);
         add_handler(NtAlpcQueryInformationMessage);

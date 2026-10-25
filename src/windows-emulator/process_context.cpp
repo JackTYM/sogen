@@ -79,6 +79,60 @@ namespace sogen
             return sid_string_to_bytes("S-1-5-18");
         }
 
+        constexpr LUID system_luid{.LowPart = 0x3E7, .HighPart = 0};
+
+        constexpr uint32_t se_privilege_enabled_by_default = 0x1;
+        constexpr uint32_t se_privilege_enabled = 0x2;
+        constexpr uint32_t se_tcb_privilege = 7;
+        constexpr uint32_t se_lock_memory_privilege = 4;
+        constexpr uint32_t se_increase_base_priority_privilege = 14;
+        constexpr uint32_t se_create_pagefile_privilege = 15;
+        constexpr uint32_t se_create_permanent_privilege = 16;
+        constexpr uint32_t se_audit_privilege = 21;
+        constexpr uint32_t se_change_notify_privilege = 23;
+        constexpr uint32_t se_impersonate_privilege = 29;
+        constexpr uint32_t se_create_global_privilege = 30;
+        constexpr uint32_t se_last_well_known_privilege = 36;
+
+        // The emulated user is an administrator that is not subject to UAC; it holds only SeChangeNotifyPrivilege,
+        // as its token always has. Chromium's sandbox relies on that set when it strips privileges.
+        std::vector<token_privilege> user_privileges()
+        {
+            return {{
+                .luid = se_change_notify_privilege,
+                .attributes = se_privilege_enabled_by_default | se_privilege_enabled,
+            }};
+        }
+
+        // Every well-known privilege is held; the ones LocalSystem has enabled at logon are enabled here, the rest
+        // stay disabled until a process adjusts them (lsass adjusts SeBackup/SeRestore during SAM setup).
+        std::vector<token_privilege> local_system_privileges()
+        {
+            constexpr std::array<uint32_t, 9> enabled_at_logon = {
+                se_tcb_privilege,
+                se_lock_memory_privilege,
+                se_increase_base_priority_privilege,
+                se_create_pagefile_privilege,
+                se_create_permanent_privilege,
+                se_audit_privilege,
+                se_change_notify_privilege,
+                se_impersonate_privilege,
+                se_create_global_privilege,
+            };
+
+            std::vector<token_privilege> privileges{};
+            for (uint32_t luid = 2; luid <= se_last_well_known_privilege; ++luid)
+            {
+                const bool enabled = std::ranges::find(enabled_at_logon, luid) != enabled_at_logon.end();
+                privileges.push_back({
+                    .luid = luid,
+                    .attributes = enabled ? (se_privilege_enabled_by_default | se_privilege_enabled) : 0,
+                });
+            }
+
+            return privileges;
+        }
+
         bool visual_shows_surface(const dcomp_resource& visual, const uint64_t surface_handle)
         {
             constexpr uint32_t visual_content_property = 0xA;
@@ -501,6 +555,8 @@ namespace sogen
         this->console_handle = this->devices.store(std::move(console));
 
         this->sid = app_settings.local_system ? local_system_sid() : get_sid(win_emu.registry);
+        this->privileges = app_settings.local_system ? local_system_privileges() : user_privileges();
+        this->authentication_id = app_settings.local_system ? system_luid : LUID{};
 
         setup_gdt(emu, win_emu.memory);
 
@@ -955,6 +1011,8 @@ namespace sogen
     {
         buffer.write(this->process_id);
         buffer.write_vector(this->sid);
+        buffer.write_vector(this->privileges);
+        buffer.write(this->authentication_id);
         buffer.write(this->shared_section_address);
         buffer.write(this->shared_section_size);
         buffer.write(this->dbwin_buffer);
@@ -1064,6 +1122,8 @@ namespace sogen
 
         buffer.read(this->process_id);
         buffer.read_vector(this->sid);
+        buffer.read_vector(this->privileges);
+        buffer.read(this->authentication_id);
         buffer.read(this->shared_section_address);
         buffer.read(this->shared_section_size);
         buffer.read(this->dbwin_buffer);

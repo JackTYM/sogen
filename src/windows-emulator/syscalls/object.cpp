@@ -626,7 +626,7 @@ namespace sogen
 
                 if (required_size > object_information_length)
                 {
-                    return STATUS_BUFFER_TOO_SMALL;
+                    return STATUS_INFO_LENGTH_MISMATCH;
                 }
 
                 if (device_path.empty())
@@ -652,7 +652,7 @@ namespace sogen
 
                 if (required_size > object_information_length)
                 {
-                    return STATUS_BUFFER_TOO_SMALL;
+                    return STATUS_INFO_LENGTH_MISMATCH;
                 }
 
                 emulator_allocator allocator(c.emu, object_information, object_information_length);
@@ -674,7 +674,7 @@ namespace sogen
 
                 if (required_size > object_information_length)
                 {
-                    return STATUS_BUFFER_TOO_SMALL;
+                    return STATUS_INFO_LENGTH_MISMATCH;
                 }
 
                 emulator_allocator allocator(c.emu, object_information, object_information_length);

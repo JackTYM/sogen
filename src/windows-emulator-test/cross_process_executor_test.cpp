@@ -552,6 +552,77 @@ namespace sogen::test
         ASSERT_EQ(section_entry->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
 
+    TEST(CrossProcessTest, DuplicatedTokenIsAdoptedAsLocalToken)
+    {
+        auto a = create_empty_emulator();
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        shared_object_description description{};
+        ASSERT_EQ(describe_shareable_object(a.process, a.process.tokens.store({}), description), STATUS_SUCCESS);
+
+        process_control_request request{};
+        write_description_to_request(description, request);
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_NE(b.process.tokens.get(make_handle(response->minted_handle_bits)), nullptr);
+    }
+
+    TEST(CrossProcessTest, RoutedRequestReachesChildByPid)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+        constexpr uint32_t child_pid = 0x2004;
+
+        const auto record_id = static_cast<uint32_t>(parent.process.get_process_handle_by_pid(child_pid, 0x001FFFFF).value.id);
+        parent.register_child_control_channel(record_id, std::make_unique<loopback_process_control_channel>(child));
+
+        shared_object_description description{};
+        ASSERT_EQ(describe_shareable_object(parent.process, parent.process.tokens.store({}), description), STATUS_SUCCESS);
+
+        process_control_request request{};
+        write_description_to_request(description, request);
+        request.request_id = 42;
+        request.target_pid = child_pid;
+
+        const auto response = route_process_control_request(parent, request);
+        ASSERT_EQ(response.request_id, 42u);
+        ASSERT_EQ(response.status, STATUS_SUCCESS);
+        ASSERT_NE(child.process.tokens.get(make_handle(response.minted_handle_bits)), nullptr);
+    }
+
+    TEST(CrossProcessTest, RoutedRequestForSelfExecutesLocally)
+    {
+        auto parent = create_empty_emulator();
+
+        process_control_request request{};
+        request.request_id = 5;
+        request.op = process_control_op::terminate;
+        request.exit_status = STATUS_SUCCESS;
+        request.target_pid = parent.process.process_id;
+
+        const auto response = route_process_control_request(parent, request);
+        ASSERT_EQ(response.request_id, 5u);
+        ASSERT_EQ(response.status, STATUS_SUCCESS);
+        ASSERT_TERMINATED_SUCCESSFULLY(parent);
+    }
+
+    TEST(CrossProcessTest, RoutedRequestForUnknownPidFailsWithoutParent)
+    {
+        auto parent = create_empty_emulator();
+
+        process_control_request request{};
+        request.request_id = 9;
+        request.op = process_control_op::query_peb;
+        request.target_pid = 0x7777;
+
+        const auto response = route_process_control_request(parent, request);
+        ASSERT_EQ(response.request_id, 9u);
+        ASSERT_EQ(response.status, STATUS_INVALID_CID);
+    }
+
     TEST(CrossProcessTest, ResumeThreadClearsSuspendedInitialThread)
     {
         auto b = create_empty_emulator();

@@ -59,6 +59,43 @@ namespace sogen
                  0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x73, 0x00, 0x2E,
                  0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+            // The header holds offsets to the name (0x20), description (0x28) and provider DLL list (0x40), and the
+            // list holds an offset to the DLL name. A name longer than the slot between the name and the description
+            // pushes everything after it back, so those offsets move by the same amount.
+            template <size_t N>
+            static std::array<std::uint8_t, N + 8> make_descriptor(const std::uint8_t (&template_data)[N], const std::uint8_t interface_id,
+                                                                   const std::u16string_view name)
+            {
+                const auto read_u64 = [&](const size_t offset) {
+                    uint64_t value{};
+                    std::memcpy(&value, template_data + offset, sizeof(value));
+                    return value;
+                };
+                const auto name_offset = read_u64(0x20);
+                const auto description_offset = read_u64(0x28);
+                const auto dll_list_offset = read_u64(0x40);
+
+                const size_t name_slot_size = description_offset - name_offset;
+                const size_t name_bytes = (name.size() + 1) * sizeof(char16_t);
+                const size_t name_slot = std::max(name_slot_size, (name_bytes + 7) & ~size_t{7});
+                const size_t shift = name_slot - name_slot_size;
+
+                std::array<std::uint8_t, N + 8> descriptor{};
+                std::copy_n(template_data, name_offset, descriptor.begin());
+                std::memcpy(descriptor.data() + name_offset, name.data(), name.size() * sizeof(char16_t));
+                std::copy(template_data + description_offset, std::end(template_data), descriptor.begin() + description_offset + shift);
+                descriptor[0x18] = interface_id;
+
+                const auto put_u64 = [&](const size_t offset, const uint64_t value) {
+                    std::memcpy(descriptor.data() + offset, &value, sizeof(value));
+                };
+                put_u64(0x28, description_offset + shift);
+                put_u64(0x40, dll_list_offset + shift);
+                put_u64(dll_list_offset + shift, read_u64(dll_list_offset) + shift);
+
+                return descriptor;
+            }
+
             static NTSTATUS complete_status_ioctl(windows_emulator& win_emu, const io_device_context& c, const NTSTATUS payload)
             {
                 ULONG info = 0;
@@ -238,15 +275,22 @@ namespace sogen
                         return write_response(sha256_output_data);
                     }
 
-                    if (algorithm_name == u"SHA1" || algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2")
+                    // AES-CMAC is a keyed hash in the primitive provider, so bcrypt expects it on the hash interface too.
+                    if (algorithm_name == u"SHA1" || algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2" ||
+                        algorithm_name == u"AES-CMAC")
                     {
-                        // All hash algorithms share the same structure; only the name differs.
-                        std::array<std::uint8_t, sizeof(sha256_output_data)> hash_output_data{};
-                        std::ranges::copy(sha256_output_data, hash_output_data.begin());
-                        std::ranges::fill_n(hash_output_data.begin() + 0x50, 0x10, std::uint8_t{0});
-                        std::memcpy(hash_output_data.data() + 0x50, algorithm_name.data(), algorithm_name.size() * sizeof(char16_t));
+                        return write_response(make_descriptor(sha256_output_data, 0x02, algorithm_name));
+                    }
 
-                        return write_response(hash_output_data);
+                    // BCRYPT_CIPHER_INTERFACE = 1 and BCRYPT_SECRET_AGREEMENT_INTERFACE = 4, per bcrypt.h.
+                    if (algorithm_name == u"3DES")
+                    {
+                        return write_response(make_descriptor(rng_output_data, 0x01, algorithm_name));
+                    }
+
+                    if (algorithm_name == u"DH")
+                    {
+                        return write_response(make_descriptor(rng_output_data, 0x04, algorithm_name));
                     }
 
                     if (algorithm_name == u"RSA")

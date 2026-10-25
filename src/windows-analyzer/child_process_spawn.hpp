@@ -91,8 +91,14 @@ namespace sogen
     // Spawns lsass.exe from the emulation root into win_emu's process tree before the target starts (the
     // role wininit plays on Windows) and blocks until lsass signals \SECURITY\LSA_AUTHENTICATION_INITIALIZED,
     // which the target's own LSA readiness check reads. Throws if lsass is missing, cannot be spawned, or
-    // exits before signalling. The returned channel controls the lsass process: force_kill() ends it.
-    std::unique_ptr<process_control_channel> boot_lsass(const child_process_spawn_config& config, windows_emulator& win_emu);
+    // exits before signalling. lsass becomes a child of win_emu's process; the returned record id indexes
+    // process_context::child_processes and the registered control channel.
+    uint32_t boot_lsass(const child_process_spawn_config& config, windows_emulator& win_emu);
+
+    // Spawns services.exe from the emulation root before lsass (the role wininit plays on Windows). lsass waits
+    // for services to signal its start event during initialisation, and services itself creates the
+    // \RPC Control\ntsvcs endpoint. Returns the record id of the services.exe child, like boot_lsass.
+    uint32_t boot_services(const child_process_spawn_config& config, windows_emulator& win_emu);
 
     // Wraps an already-connected fd (child_process_outcome::ipc_fd on the parent side, or
     // options.child_ipc_fd on the child side, both ends of the same socketpair the bootstrap

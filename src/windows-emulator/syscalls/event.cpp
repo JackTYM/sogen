@@ -230,12 +230,6 @@ namespace sogen
             const auto name = read_unicode_string(c.emu, attributes.ObjectName);
             c.win_emu.callbacks.on_generic_access("Opening event", name);
 
-            if (name == u"\\KernelObjects\\SystemErrorPortReady")
-            {
-                event_handle.write(WER_PORT_READY.bits);
-                return STATUS_SUCCESS;
-            }
-
             if (name == u"Global\\SvcctrlStartEvent_A3752DX")
             {
                 event_handle.write(SVCCTRL_START_EVENT.bits);

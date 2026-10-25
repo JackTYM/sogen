@@ -11,6 +11,7 @@ namespace sogen
         {
             constexpr uint32_t k_trace_control_wow64_bit = 0x80000000u;
             constexpr uint32_t k_trace_control_register_guids = 0x0Fu;
+            constexpr uint32_t k_trace_control_register_security_provider = 0x18u;
             constexpr uint32_t k_trace_control_add_notification_event = 0x1Bu;
             constexpr uint32_t k_trace_control_set_provider_traits = 0x1Eu;
 
@@ -81,6 +82,7 @@ namespace sogen
             case k_trace_control_add_notification_event:
                 return handle_trace_control_add_notification_event(c, input_buffer, input_buffer_length, return_length);
             case k_trace_control_register_guids:
+            case k_trace_control_register_security_provider:
             case k_trace_control_set_provider_traits:
                 return handle_trace_control_passthrough(c, output_buffer, output_buffer_length, return_length);
             default:

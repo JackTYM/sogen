@@ -10,6 +10,11 @@
 namespace sogen
 {
 
+    // Registry key names may contain '/', which the path-based lookup would split into separate components.
+    // The name is escaped to this private-use code point while it is part of a key path.
+    inline constexpr char16_t registry_name_slash = u'\uE02F';
+
+
     struct hive_value
     {
         uint32_t type{};
@@ -128,7 +133,9 @@ namespace sogen
                     return nullptr;
                 }
 
-                current_key = current_key->get_sub_key(this->file_, u16_to_u8(key_part.u16string()));
+                auto name = key_part.u16string();
+                std::ranges::replace(name, registry_name_slash, u'/');
+                current_key = current_key->get_sub_key(this->file_, u16_to_u8(name));
             }
 
             return current_key;

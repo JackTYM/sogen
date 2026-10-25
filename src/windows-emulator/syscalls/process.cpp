@@ -81,6 +81,11 @@ namespace sogen
             // host OS process this codebase has no live introspection into.
             std::optional<bool> is_native_64bit_image(const windows_emulator& win_emu, const windows_path& image_path)
             {
+                if (!image_path.is_absolute())
+                {
+                    return std::nullopt;
+                }
+
                 std::vector<std::byte> file{};
                 if (!utils::io::read_file(win_emu.file_sys.translate(image_path), &file))
                 {
@@ -322,13 +327,42 @@ namespace sogen
                     }
                 }
 
+                if (info_class == ProcessProtectionInformation)
+                {
+                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    if (std::holds_alternative<NTSTATUS>(child))
+                    {
+                        return std::get<NTSTATUS>(child);
+                    }
+
+                    return handle_query<uint8_t>(c.emu, process_information, process_information_length, return_length,
+                                                 [](uint8_t& protection_level) { protection_level = 0; });
+                }
+
+                if (info_class == ProcessSessionInformation)
+                {
+                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    if (std::holds_alternative<NTSTATUS>(child))
+                    {
+                        return std::get<NTSTATUS>(child);
+                    }
+
+                    return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length,
+                                               [](ULONG& session_id) { session_id = 0; });
+                }
+
                 if (info_class == ProcessWow64Information && process_handle.value.type == handle_types::process &&
                     process_handle.value.is_pseudo)
                 {
                     const auto child = c.proc.child_processes.find(process_handle.value.id);
                     if (child != c.proc.child_processes.end())
                     {
-                        const auto is_native_64bit = is_native_64bit_image(c.win_emu, child->second.image_path);
+                        auto is_native_64bit = is_native_64bit_image(c.win_emu, child->second.image_path);
+                        if (!is_native_64bit)
+                        {
+                            is_native_64bit = c.win_emu.known_sibling_native_64bit(child->second.pid);
+                        }
+
                         if (is_native_64bit.value_or(false))
                         {
                             return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
@@ -578,6 +612,14 @@ namespace sogen
                 return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
                     c.emu, process_information, process_information_length, return_length,
                     [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = c.proc.peb32 ? c.proc.peb32->value() : 0; });
+
+            case ProcessProtectionInformation:
+                return handle_query<uint8_t>(c.emu, process_information, process_information_length, return_length,
+                                             [](uint8_t& protection_level) { protection_level = 0; });
+
+            case ProcessSessionInformation:
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length,
+                                           [](ULONG& session_id) { session_id = 0; });
 
             case ProcessBasicInformation: {
                 const auto init_basic_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
@@ -859,6 +901,7 @@ namespace sogen
                 || info_class == ProcessTelemetryCoverage                    //
                 || info_class == ProcessExecuteFlags                         //
                 || info_class == ProcessAltPrefetchParam                     //
+                || info_class == ProcessEnergyTrackingState                  //
                 || info_class == ProcessMitigationPolicy)
             {
                 return STATUS_SUCCESS;
@@ -1077,12 +1120,21 @@ namespace sogen
         NTSTATUS handle_NtOpenProcessToken(const syscall_context& c, const handle process_handle, const ACCESS_MASK /*desired_access*/,
                                            const emulator_object<handle> token_handle)
         {
-            if (!c.proc.is_current_process_handle(process_handle))
+            if (c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                token_handle.write(c.proc.tokens.store({}));
+                return STATUS_SUCCESS;
             }
 
-            token_handle.write(c.proc.tokens.store({}));
+            const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+            if (std::holds_alternative<NTSTATUS>(child))
+            {
+                return std::get<NTSTATUS>(child);
+            }
+
+            process_token child_token{};
+            child_token.privileges = c.proc.privileges;
+            token_handle.write(c.proc.tokens.store(std::move(child_token)));
 
             return STATUS_SUCCESS;
         }
@@ -1290,6 +1342,7 @@ namespace sogen
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> client_id_attribute{};
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> image_info_attribute{};
             std::vector<handle> inherited_handles{};
+            bool has_explicit_token = false;
 
             if (attribute_list)
             {
@@ -1322,6 +1375,10 @@ namespace sogen
                                 const auto handle_count = attribute.Size / sizeof(handle);
                                 inherited_handles.resize(handle_count);
                                 c.emu.read_memory(attribute.Value, inherited_handles.data(), attribute.Size);
+                            }
+                            else if (type == PsAttributeToken)
+                            {
+                                has_explicit_token = true;
                             }
                             else
                             {
@@ -1381,6 +1438,9 @@ namespace sogen
                 .image_path = image_path,
                 .process_id = child_pid,
                 .start_suspended = (thread_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) != 0,
+                // Without PsAttributeToken the child runs on a copy of the creator's primary token. Token handles
+                // carry no identity here, so a child created with an explicit token keeps the default user.
+                .local_system = !has_explicit_token && c.win_emu.runs_as_local_system(),
             };
 
             if (std::getenv("SOGEN_TRACE_CHILD_PROCESS_LAUNCH") != nullptr)
@@ -1606,7 +1666,7 @@ namespace sogen
             });
 
             c.proc.child_processes[record_id] = record;
-            c.win_emu.broadcast_process_alive(child_pid);
+            c.win_emu.broadcast_process_alive(child_pid, is_native_64bit_image(c.win_emu, image_windows_path));
 
             return STATUS_SUCCESS;
         }

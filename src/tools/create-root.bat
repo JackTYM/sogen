@@ -172,6 +172,11 @@ CALL :collect rpcepmap.dll
 CALL :collect rpcns4.dll
 CALL :collect rpcrt4.dll
 CALL :collect rpcss.dll
+CALL :collect umpnpmgr.dll
+CALL :collect umpo.dll
+CALL :collect lsm.dll
+CALL :collect psmsrv.dll
+CALL :collect SystemEventsBrokerServer.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect samlib.dll
@@ -261,6 +266,7 @@ CALL :collect c_437.nls
 CALL :collect c_850.nls
 
 CALL :collect wdmaud.drv
+CALL :collect WUDFPlatform.dll
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 CALL :collect_file "%WINDIR%\Globalization\Sorting", SortDefault.nls, %EMU_GLOBALIZATION_SORTING%
@@ -279,6 +285,11 @@ CALL :collect_dir "%WINDIR%\Microsoft.NET" "%EMU_WINDIR%\microsoft.net"
 
 REM The .NET 2.0-3.5 runtime (CLR 2) binds framework assemblies from its own global assembly cache.
 FOR %%G IN (GAC GAC_32 GAC_64 GAC_MSIL) DO CALL :collect_dir "%WINDIR%\assembly\%%G" "%EMU_WINDIR%\assembly\%%G"
+
+REM SolidWorks Installation Manager creates WbemScripting.SWbemLocator (CLSID 4590F811-1D3A-11D0-891F-00AA004B2E24)
+REM in its Connecting step; without the wbem folder that CoCreateInstance fails and the step retries forever.
+CALL :collect_dir "%WINDIR%\System32\wbem" "%EMU_SYSDIR%\wbem"
+CALL :collect_dir "%WINDIR%\SysWOW64\wbem" "%EMU_SYSDIR_WOW64%\wbem"
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0collect-winsxs.ps1" "%EMU_WINDIR%\winsxs"
 

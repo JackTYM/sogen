@@ -48,6 +48,9 @@ namespace sogen
         uint32_t page_protection{};
         uint32_t allocation_attributes{};
         uint32_t granted_access{};
+        // Guest pid of the process a request routed through a parent is addressed to (see
+        // route_process_control_request); 0 on a channel that leads straight to its target.
+        uint32_t target_pid{};
         std::vector<std::byte> payload{};
         // Section backing being handed to the peer. Never part of the serialized body: a real transport
         // passes it out of band (a shared backing's file descriptor) and the receiver reconstructs it.
@@ -68,6 +71,7 @@ namespace sogen
             buffer.write(this->page_protection);
             buffer.write(this->allocation_attributes);
             buffer.write(this->granted_access);
+            buffer.write(this->target_pid);
             buffer.write_vector(this->payload);
         }
 
@@ -88,6 +92,7 @@ namespace sogen
             buffer.read(this->page_protection);
             buffer.read(this->allocation_attributes);
             buffer.read(this->granted_access);
+            buffer.read(this->target_pid);
             buffer.read_vector(this->payload);
         }
     };

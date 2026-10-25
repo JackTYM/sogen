@@ -62,7 +62,7 @@ namespace sogen
     {
         return type == handle_types::section || type == handle_types::event || type == handle_types::mutant ||
                type == handle_types::semaphore || type == handle_types::device || type == handle_types::file ||
-               type == handle_types::process;
+               type == handle_types::process || type == handle_types::token;
     }
 
     NTSTATUS describe_shareable_object(process_context& process, const handle resolved_handle, shared_object_description& description)
@@ -137,6 +137,19 @@ namespace sogen
 
             utils::buffer_serializer buffer{};
             buffer.write(pid);
+            description.object_bytes = buffer.get_buffer();
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::token: {
+            const bool impersonation = resolved_handle == DUMMY_IMPERSONATION_TOKEN;
+            if (!impersonation && !process.tokens.get(resolved_handle))
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            utils::buffer_serializer buffer{};
+            buffer.write(impersonation);
             description.object_bytes = buffer.get_buffer();
             return STATUS_SUCCESS;
         }
@@ -236,6 +249,24 @@ namespace sogen
             uint32_t pid{};
             buffer.read(pid);
             adopted_handle = process.get_process_handle_by_pid(pid, description.granted_access);
+            return STATUS_SUCCESS;
+        }
+
+        case handle_types::token: {
+            // A token's identity is that of the process querying it, so the receiver's token needs no
+            // state from the sender's. It is still a token distinct from the receiver's own, so adjusting
+            // its privileges must not change the receiver's.
+            bool impersonation{};
+            buffer.read(impersonation);
+            if (impersonation)
+            {
+                adopted_handle = DUMMY_IMPERSONATION_TOKEN;
+                return STATUS_SUCCESS;
+            }
+
+            process_token token{};
+            token.privileges = process.privileges;
+            adopted_handle = process.tokens.store(std::move(token));
             return STATUS_SUCCESS;
         }
 

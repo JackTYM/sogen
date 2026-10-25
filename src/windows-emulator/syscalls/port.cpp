@@ -3,6 +3,7 @@
 #include "../syscall_utils.hpp"
 #include "../port.hpp"
 #include "../alpc.hpp"
+#include "../cross_process.hpp"
 
 namespace sogen
 {
@@ -396,6 +397,33 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtAlpcOpenSenderProcess(const syscall_context& c, const emulator_object<handle> process_handle,
+                                                const handle port_handle, const emulator_pointer /*port_message*/, const ULONG /*flags*/,
+                                                const ACCESS_MASK desired_access, const uint64_t /*object_attributes*/)
+        {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port || port->alpc_port_id() == 0)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            const auto sender = alpc::last_received_sender_pid(c.proc, port->alpc_port_id());
+            if (!sender)
+            {
+                return STATUS_NOT_FOUND;
+            }
+
+            const bool is_child =
+                std::ranges::any_of(c.proc.child_processes | std::views::values, [&](const auto& record) { return record.pid == *sender; });
+            if (*sender != c.proc.process_id && !is_child && !c.win_emu.is_known_sibling_pid(*sender))
+            {
+                return STATUS_ACCESS_DENIED;
+            }
+
+            process_handle.write(c.proc.get_process_handle_by_pid(*sender, resolve_granted_process_access(desired_access)));
+            return STATUS_SUCCESS;
+        }
+
         // Locate the HANDLE attribute inside an ALPC attribute buffer: an 8-byte {Allocated; Valid} header
         // followed by the per-attribute structs, laid out highest-bit-first for the attributes the caller
         // allocated room for. Returns nothing when the caller reserved no room for a handle attribute.
@@ -613,6 +641,19 @@ namespace sogen
                                                 const uint64_t section_handle)
         {
             return alpc::delete_port_section(c, section_handle);
+        }
+
+        NTSTATUS handle_NtAlpcCreateResourceReserve(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
+                                                    const EmulatorTraits<Emu64>::SIZE_T /*message_size*/,
+                                                    const emulator_pointer resource_id)
+        {
+            return alpc::create_resource_reserve(c, resource_id);
+        }
+
+        NTSTATUS handle_NtAlpcDeleteResourceReserve(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
+                                                    const uint64_t resource_id)
+        {
+            return alpc::delete_resource_reserve(c, resource_id);
         }
 
         NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,

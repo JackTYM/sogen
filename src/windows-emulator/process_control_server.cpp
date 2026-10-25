@@ -504,6 +504,41 @@ namespace sogen
         }
     }
 
+    process_control_response route_process_control_request(windows_emulator& self, const process_control_request& request)
+    {
+        process_control_response response{};
+        if (request.target_pid == self.process.process_id)
+        {
+            execute_process_control_request(self, request, response);
+            return response;
+        }
+
+        auto* channel = self.find_child_control_channel_by_pid(request.target_pid);
+        if (!channel)
+        {
+            channel = self.process_control_router();
+        }
+
+        if (!channel)
+        {
+            response.request_id = request.request_id;
+            response.status = STATUS_INVALID_CID;
+            return response;
+        }
+
+        if (auto forwarded = channel->request(request, process_control_default_timeout_ms))
+        {
+            response = std::move(*forwarded);
+        }
+        else
+        {
+            response.status = STATUS_PROCESS_IS_TERMINATING;
+        }
+
+        response.request_id = request.request_id;
+        return response;
+    }
+
     void pump_process_control(windows_emulator& target, process_control_channel& channel)
     {
         while (const auto request = channel.try_receive())

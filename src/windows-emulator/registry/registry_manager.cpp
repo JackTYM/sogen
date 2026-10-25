@@ -98,6 +98,7 @@ namespace sogen
         this->add_path_mapping(user / ".Default", user);
 
         this->add_path_mapping(machine / "system" / "CurrentControlSet", machine / "system" / "ControlSet001");
+        this->add_path_mapping(machine / "security" / "SAM", machine / "sam" / "SAM");
         this->add_path_mapping(machine / "system" / "ControlSet001" / "Control" / "ComputerName" / "ActiveComputerName",
                                machine / "system" / "ControlSet001" / "Control" / "ComputerName" / "ComputerName");
 

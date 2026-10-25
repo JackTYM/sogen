@@ -1,6 +1,7 @@
 #include "std_include.hpp"
 #include "child_process_spawn.hpp"
 
+#include <cross_process.hpp>
 #include <named_objects.hpp>
 
 #include <algorithm>
@@ -327,7 +328,7 @@ namespace sogen
         }
 
         std::vector<std::string> build_child_argv(const child_process_spawn_config& config, const application_settings& settings,
-                                                  const int ipc_fd, const int control_fd)
+                                                  const int ipc_fd, const int control_fd, const int router_fd)
         {
             std::vector<std::string> argv{};
             argv.push_back(config.executable_path.string());
@@ -443,6 +444,9 @@ namespace sogen
             argv.emplace_back("--child-control-fd");
             argv.push_back(std::to_string(control_fd));
 
+            argv.emplace_back("--child-router-fd");
+            argv.push_back(std::to_string(router_fd));
+
             return argv;
         }
 #endif
@@ -513,6 +517,7 @@ namespace sogen
                 buffer.write(message.parent_window);
                 buffer.write(message.window_thread_id);
                 buffer.write_optional(message.surface);
+                buffer.write_optional(message.native_64bit);
 
                 const auto framed = frame_message(buffer.get_buffer());
                 this->pending_send_.insert(this->pending_send_.end(), framed.begin(), framed.end());
@@ -568,6 +573,7 @@ namespace sogen
                 deserializer.read(message.parent_window);
                 deserializer.read(message.window_thread_id);
                 deserializer.read_optional(message.surface);
+                deserializer.read_optional(message.native_64bit);
 
                 return message;
             }
@@ -732,6 +738,7 @@ namespace sogen
             buffer.write(request.page_protection);
             buffer.write(request.allocation_attributes);
             buffer.write(request.granted_access);
+            buffer.write(request.target_pid);
             buffer.write_vector(request.payload);
             write_backing_descriptor(buffer, request.backing, out_fds);
         }
@@ -753,6 +760,7 @@ namespace sogen
             buffer.read(request.page_protection);
             buffer.read(request.allocation_attributes);
             buffer.read(request.granted_access);
+            buffer.read(request.target_pid);
             buffer.read_vector(request.payload);
             request.backing = read_backing_descriptor(buffer, in_fds);
         }
@@ -1072,7 +1080,21 @@ namespace sogen
         const auto parent_control_fd = control_fds[0];
         const auto child_control_fd = control_fds[1];
 
-        const auto argv_strings = build_child_argv(config, settings, child_fd, child_control_fd);
+        int router_fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, router_fds) != 0)
+        {
+            const auto error = std::string("socketpair() failed: ") + std::strerror(errno);
+            ::close(parent_fd);
+            ::close(child_fd);
+            ::close(parent_control_fd);
+            ::close(child_control_fd);
+            return {.success = false, .failure_detail = error};
+        }
+
+        const auto parent_router_fd = router_fds[0];
+        const auto child_router_fd = router_fds[1];
+
+        const auto argv_strings = build_child_argv(config, settings, child_fd, child_control_fd, child_router_fd);
         std::vector<char*> argv{};
         argv.reserve(argv_strings.size() + 1);
         for (const auto& arg : argv_strings)
@@ -1091,6 +1113,8 @@ namespace sogen
             ::close(child_fd);
             ::close(parent_control_fd);
             ::close(child_control_fd);
+            ::close(parent_router_fd);
+            ::close(child_router_fd);
             return {.success = false, .failure_detail = error};
         }
 
@@ -1098,18 +1122,21 @@ namespace sogen
         {
             ::close(parent_fd);
             ::close(parent_control_fd);
+            ::close(parent_router_fd);
             ::execv(executable_path.c_str(), argv.data());
             _exit(127);
         }
 
         ::close(child_fd);
         ::close(child_control_fd);
+        ::close(child_router_fd);
 
         if (!send_child_bootstrap_data(parent_fd, settings, inherited_pipes, std::move(inherited_sections), inherited_events,
                                        std::move(kernel_arena_backing)))
         {
             ::close(parent_fd);
             ::close(parent_control_fd);
+            ::close(parent_router_fd);
             return {.success = false, .failure_detail = "Failed to send bootstrap data to child"};
         }
 
@@ -1120,6 +1147,7 @@ namespace sogen
         {
             ::close(parent_fd);
             ::close(parent_control_fd);
+            ::close(parent_router_fd);
             return {.success = false,
                     .failure_detail = "Child did not report readiness within " + std::to_string(ready_timeout_ms) +
                                       "ms (or exited/closed the IPC channel early)"};
@@ -1130,12 +1158,14 @@ namespace sogen
         {
             outcome.ipc_fd = parent_fd;
             outcome.control_fd = parent_control_fd;
+            outcome.router_fd = parent_router_fd;
             outcome.host_pid = static_cast<int>(pid);
         }
         else
         {
             ::close(parent_fd);
             ::close(parent_control_fd);
+            ::close(parent_router_fd);
         }
 
         return outcome;
@@ -1269,41 +1299,82 @@ namespace sogen
         constexpr auto lsass_signal_timeout = std::chrono::minutes(5);
     }
 
-    std::unique_ptr<process_control_channel> boot_lsass(const child_process_spawn_config& config, windows_emulator& win_emu)
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+    namespace
+    {
+        struct boot_process
+        {
+            uint32_t record_id{};
+            int host_pid{};
+            uint32_t guest_pid{};
+        };
+
+        boot_process spawn_boot_process(const child_process_spawn_config& config, windows_emulator& win_emu, const windows_path& image,
+                                        const std::string_view name)
+        {
+            const auto host_image = win_emu.file_sys.translate(image);
+            if (!std::filesystem::exists(host_image))
+            {
+                throw std::runtime_error(std::string(name) + " is missing from the emulation root (" + host_image.string() +
+                                         "); the target was not started");
+            }
+
+            win_emu.setup_process_if_necessary();
+            auto* const arena = win_emu.process.ensure_shared_arena();
+            const auto guest_pid = 0x1000 + 4 * arena->allocate_process_index();
+
+            application_settings settings{
+                .application = image,
+                .working_directory = windows_path{"c:/windows/system32"},
+                .process_id = guest_pid,
+                .local_system = true,
+            };
+
+            auto outcome = spawn_child_process(config, std::move(settings), {}, {}, {}, arena->backing());
+            if (!outcome.success)
+            {
+                throw std::runtime_error(std::string(name) + " failed to start: " + outcome.failure_detail);
+            }
+
+            win_emu.register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
+            win_emu.register_child_routing_channel(create_fd_process_control_channel(outcome.router_fd));
+
+            const auto record_id = static_cast<uint32_t>(
+                win_emu.process.get_process_handle_by_pid(guest_pid, resolve_granted_process_access(GENERIC_ALL)).value.id);
+            win_emu.register_child_control_channel(record_id, create_fd_process_control_channel(outcome.control_fd, outcome.host_pid));
+
+            // Boot processes are system32 images, which are always native on the emulated x64 system.
+            win_emu.broadcast_process_alive(guest_pid, true);
+            return {
+                .record_id = record_id,
+                .host_pid = outcome.host_pid,
+                .guest_pid = guest_pid,
+            };
+        }
+    }
+#endif
+
+    uint32_t boot_services(const child_process_spawn_config& config, windows_emulator& win_emu)
+    {
+#if !defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        (void)config;
+        (void)win_emu;
+        throw std::runtime_error("services.exe cannot be booted: this host cannot spawn child processes");
+#else
+        return spawn_boot_process(config, win_emu, windows_path{"c:/windows/system32/services.exe"}, "services.exe").record_id;
+#endif
+    }
+
+    uint32_t boot_lsass(const child_process_spawn_config& config, windows_emulator& win_emu)
     {
 #if !defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
         (void)config;
         (void)win_emu;
         throw std::runtime_error("lsass.exe cannot be booted: this host cannot spawn child processes");
 #else
-        const windows_path image{"c:/windows/system32/lsass.exe"};
-        const auto host_image = win_emu.file_sys.translate(image);
-        if (!std::filesystem::exists(host_image))
-        {
-            throw std::runtime_error("lsass.exe is missing from the emulation root (" + host_image.string() +
-                                     "); the target was not started");
-        }
-
-        win_emu.setup_process_if_necessary();
-        auto* const arena = win_emu.process.ensure_shared_arena();
-        const auto lsass_pid = 0x1000 + 4 * arena->allocate_process_index();
-
-        application_settings settings{
-            .application = image,
-            .working_directory = windows_path{"c:/windows/system32"},
-            .process_id = lsass_pid,
-            .local_system = true,
-        };
-
-        auto outcome = spawn_child_process(config, std::move(settings), {}, {}, {}, arena->backing());
-        if (!outcome.success)
-        {
-            throw std::runtime_error("lsass.exe failed to start: " + outcome.failure_detail);
-        }
-
-        win_emu.register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
-        win_emu.broadcast_process_alive(lsass_pid);
-        auto control = create_fd_process_control_channel(outcome.control_fd, outcome.host_pid);
+        const auto lsass = spawn_boot_process(config, win_emu, windows_path{"c:/windows/system32/lsass.exe"}, "lsass.exe");
+        auto* const control = win_emu.find_child_control_channel(lsass.record_id);
+        const auto lsass_pid = lsass.guest_pid;
 
         kernel_state lsa_initialized{};
         if (named_objects::open(win_emu.process, named_objects::kind::event, lsa_authentication_initialized_name, lsa_initialized) !=
@@ -1319,7 +1390,7 @@ namespace sogen
             const auto deadline = boot_started + lsass_signal_timeout;
             while (lsa_initialized.word(0).load(std::memory_order_acquire) == 0)
             {
-                if (::kill(outcome.host_pid, 0) != 0)
+                if (::kill(lsass.host_pid, 0) != 0)
                 {
                     throw std::runtime_error("lsass.exe exited before signalling \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
                 }
@@ -1329,6 +1400,7 @@ namespace sogen
                     throw std::runtime_error("lsass.exe did not signal \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED in time");
                 }
 
+                win_emu.pump_child_routing_channels();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
@@ -1341,7 +1413,7 @@ namespace sogen
         const auto boot_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - boot_started).count();
         win_emu.log.log("lsass.exe (pid %u) signalled \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED after %lld ms\n", lsass_pid,
                         static_cast<long long>(boot_ms));
-        return control;
+        return lsass.record_id;
 #endif
     }
 

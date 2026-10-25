@@ -30,6 +30,7 @@ namespace sogen
 
             constexpr ULONG se_group_enabled = 0x7; // SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
             constexpr ULONG se_group_owner = 0x8;
+            constexpr ULONG se_group_logon_id = 0xC0000000;
 
             struct token_group
             {
@@ -42,12 +43,13 @@ namespace sogen
             // administrator token and the elevation type is TokenElevationTypeDefault. A split token would need an
             // Explorer shell to de-elevate through (WebView2 launches its browser via CLSID_ShellWindows when its
             // host reports TokenElevationTypeFull).
-            std::array<token_group, 3> get_token_groups(const process_context& proc)
+            std::array<token_group, 4> get_token_groups(const process_context& proc)
             {
                 return {{
                     {.sid = proc.sid, .attributes = 0},
                     {.sid = interactive_sid, .attributes = se_group_enabled},
                     {.sid = administrators_sid, .attributes = se_group_enabled | se_group_owner},
+                    {.sid = logon_sid, .attributes = se_group_enabled | se_group_logon_id},
                 }};
             }
 
@@ -99,6 +101,127 @@ namespace sogen
                        proc.tokens.get(token_handle) != nullptr;
             }
 
+            constexpr ULONG se_privilege_enabled = 0x2;
+            constexpr ULONG se_privilege_removed = 0x4;
+            constexpr ULONG se_privilege_used_for_access = 0x80000000;
+
+            uint64_t privilege_list_size(const size_t count)
+            {
+                return offsetof(TOKEN_PRIVILEGES64, Privileges) + count * sizeof(LUID_AND_ATTRIBUTES);
+            }
+
+            void write_privilege_list(const syscall_context& c, const uint64_t address, const std::vector<token_privilege>& privileges)
+            {
+                c.emu.write_memory<ULONG>(address, static_cast<ULONG>(privileges.size()));
+                for (size_t i = 0; i < privileges.size(); ++i)
+                {
+                    LUID_AND_ATTRIBUTES entry{};
+                    entry.Luid.LowPart = privileges[i].luid;
+                    entry.Attributes = privileges[i].attributes;
+                    c.emu.write_memory(address + offsetof(TOKEN_PRIVILEGES64, Privileges) + i * sizeof(LUID_AND_ATTRIBUTES), entry);
+                }
+            }
+
+            std::vector<token_privilege>::iterator find_privilege(std::vector<token_privilege>& privileges, const LUID luid)
+            {
+                if (luid.HighPart != 0)
+                {
+                    return privileges.end();
+                }
+
+                return std::ranges::find(privileges, luid.LowPart, &token_privilege::luid);
+            }
+
+            std::vector<token_privilege>& token_privileges(process_context& proc, const handle token_handle)
+            {
+                auto* const token = proc.tokens.get(token_handle);
+                return token && token->privileges ? *token->privileges : proc.privileges;
+            }
+
+            bool holds_enabled_privilege(const std::vector<token_privilege>& privileges, const LUID luid)
+            {
+                return std::ranges::any_of(privileges, [&](const token_privilege& held) {
+                    return held.luid == luid.LowPart && luid.HighPart == 0 && (held.attributes & se_privilege_enabled) != 0;
+                });
+            }
+
+            struct access_decision
+            {
+                NTSTATUS status{};
+                ACCESS_MASK granted{};
+            };
+
+            access_decision evaluate_descriptor_access(const syscall_context& c, const uint64_t security_descriptor,
+                                                       const ACCESS_MASK desired_access, const EMU_GENERIC_MAPPING& mapping)
+            {
+                const auto control = emulator_object<SECURITY_DESCRIPTOR_CONTROL>{c.emu, security_descriptor + 2}.read();
+                uint64_t dacl_address = 0;
+                if (control & SE_SELF_RELATIVE)
+                {
+                    const auto descriptor = emulator_object<SECURITY_DESCRIPTOR_RELATIVE>{c.emu, security_descriptor}.read();
+                    dacl_address = descriptor.Dacl == 0 ? 0 : security_descriptor + descriptor.Dacl;
+                }
+                else
+                {
+                    dacl_address = emulator_object<uint64_t>{c.emu, security_descriptor + 32}.read();
+                }
+
+                const auto token_groups = get_token_groups(c.proc);
+                constexpr ACCESS_MASK maximum_allowed = 0x02000000;
+                constexpr ACCESS_MASK all_access = 0xFFFFFFFF;
+                const bool maximum = (desired_access & maximum_allowed) != 0;
+                const auto requested = map_generic_access(desired_access & ~maximum_allowed, mapping);
+                ACCESS_MASK remaining = maximum ? all_access : requested;
+                ACCESS_MASK granted = 0;
+                bool denied = false;
+
+                if (!(control & SE_DACL_PRESENT) || dacl_address == 0)
+                {
+                    granted = maximum ? map_generic_access(0x10000000, mapping) : requested;
+                    remaining = 0;
+                }
+                else
+                {
+                    const auto acl = emulator_object<ACL>{c.emu, dacl_address}.read();
+                    auto ace_address = dacl_address + sizeof(ACL);
+                    for (USHORT i = 0; i < acl.AceCount; ++i)
+                    {
+                        const auto ace = emulator_object<ACCESS_ALLOWED_ACE>{c.emu, ace_address}.read();
+                        if (ace.Header.AceSize < sizeof(ACCESS_ALLOWED_ACE))
+                        {
+                            return {.status = STATUS_INVALID_PARAMETER};
+                        }
+
+                        const auto ace_mask = map_generic_access(ace.Mask, mapping);
+                        const auto ace_sid = ace_address + offsetof(ACCESS_ALLOWED_ACE, SidStart);
+                        const bool applies = sid_matches(c.emu.memory(), ace_sid, c.proc.sid) ||
+                                             std::ranges::any_of(token_groups, [&](const token_group& group) {
+                                                 return (group.attributes & se_group_enabled) == se_group_enabled &&
+                                                        sid_matches(c.emu.memory(), ace_sid, group.sid);
+                                             });
+                        if (applies && ace.Header.AceType == 1 && maximum)
+                        {
+                            remaining &= ~ace_mask;
+                        }
+                        else if (applies && ace.Header.AceType == 1 && (ace_mask & remaining) != 0)
+                        {
+                            denied = true;
+                            break;
+                        }
+                        if (applies && ace.Header.AceType == 0)
+                        {
+                            const auto allowed = ace_mask & remaining;
+                            granted |= allowed;
+                            remaining &= ~allowed;
+                        }
+                        ace_address += ace.Header.AceSize;
+                    }
+                }
+
+                const bool success = !denied && (maximum ? granted != 0 : remaining == 0);
+                return {.status = success ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, .granted = granted};
+            }
+
             // The caller believes the returned handle is distinct from existing_token_handle and will
             // close both independently; since it reuses the same numeric value here, its object needs
             // an extra reference or the first CloseHandle erases it out from under the second.
@@ -137,6 +260,30 @@ namespace sogen
             else
             {
                 new_token_handle.write(DUMMY_IMPERSONATION_TOKEN);
+            }
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCreateTokenEx(const syscall_context& c, const emulator_object<handle> token_handle,
+                                        ACCESS_MASK /*desired_access*/,
+                                        const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
+                                        /*object_attributes*/,
+                                        const TOKEN_TYPE type)
+        {
+            if (type == TokenPrimary)
+            {
+                process_token token{};
+                token.privileges = c.proc.privileges;
+                token_handle.write(c.proc.tokens.store(std::move(token)));
+            }
+            else if (type == TokenImpersonation)
+            {
+                token_handle.write(DUMMY_IMPERSONATION_TOKEN);
+            }
+            else
+            {
+                return STATUS_INVALID_PARAMETER;
             }
 
             return STATUS_SUCCESS;
@@ -425,16 +572,10 @@ namespace sogen
 
             if (token_information_class == TokenPrivileges)
             {
-                // sogen doesn't track per-token privilege sets, so every token (the process's own
-                // primary token as well as any "restricted" token NtFilterToken hands back - see its
-                // own comment above) reports the one privilege real Windows practically never strips:
-                // SeChangeNotifyPrivilege. Chromium's own sandbox::RestrictedToken::DeleteAllPrivileges()
-                // keeps it by default even when stripping everything else, and
-                // base::win::AccessToken::Privileges() hard-CHECKs the returned buffer against
-                // sizeof(TOKEN_PRIVILEGES) regardless of PrivilegeCount - an honest, empty
-                // PrivilegeCount=0 answer undersizes that buffer below what any real token this API is
-                // ever actually called on has been observed to produce.
-                constexpr auto required_size = sizeof(TOKEN_PRIVILEGES64);
+                // base::win::AccessToken::Privileges() hard-CHECKs the buffer against sizeof(TOKEN_PRIVILEGES), so the
+                // answer never reports less space than that, even when fewer privileges are held.
+                const auto& privileges = token_privileges(c.proc, token_handle);
+                const auto required_size = std::max<uint64_t>(sizeof(TOKEN_PRIVILEGES64), privilege_list_size(privileges.size()));
                 return_length.write(static_cast<ULONG>(required_size));
 
                 if (required_size > token_information_length)
@@ -442,13 +583,21 @@ namespace sogen
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                TOKEN_PRIVILEGES64 privileges{};
-                privileges.PrivilegeCount = 1;
-                privileges.Privileges[0].Luid.LowPart = 23; // SE_CHANGE_NOTIFY_PRIVILEGE
-                privileges.Privileges[0].Luid.HighPart = 0;
-                privileges.Privileges[0].Attributes = 0x3; // SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED
+                write_privilege_list(c, token_information, privileges);
+                return STATUS_SUCCESS;
+            }
 
-                emulator_object<TOKEN_PRIVILEGES64>{c.emu, token_information}.write(privileges);
+            if (token_information_class == TokenRestrictedSids)
+            {
+                constexpr auto required_size = sizeof(ULONG);
+                return_length.write(required_size);
+
+                if (required_size > token_information_length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                emulator_object<ULONG>{c.emu, token_information}.write(0);
                 return STATUS_SUCCESS;
             }
 
@@ -491,10 +640,11 @@ namespace sogen
                 }
 
                 TOKEN_STATISTICS stats{};
+                stats.AuthenticationId = c.proc.authentication_id;
                 stats.TokenType = get_token_type(token_handle);
                 stats.ImpersonationLevel = stats.TokenType == TokenImpersonation ? SecurityImpersonation : SecurityAnonymous;
                 stats.GroupCount = static_cast<ULONG>(get_token_groups(c.proc).size());
-                stats.PrivilegeCount = 0;
+                stats.PrivilegeCount = static_cast<ULONG>(token_privileges(c.proc, token_handle).size());
 
                 c.emu.write_memory(token_information, stats);
 
@@ -631,75 +781,76 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            const auto control = emulator_object<SECURITY_DESCRIPTOR_CONTROL>{c.emu, security_descriptor + 2}.read();
-            uint64_t dacl_address = 0;
-            if (control & SE_SELF_RELATIVE)
+            const auto decision = evaluate_descriptor_access(c, security_descriptor, desired_access, generic_mapping.read());
+            if (decision.status == STATUS_INVALID_PARAMETER)
             {
-                const auto descriptor = emulator_object<SECURITY_DESCRIPTOR_RELATIVE>{c.emu, security_descriptor}.read();
-                dacl_address = descriptor.Dacl == 0 ? 0 : security_descriptor + descriptor.Dacl;
-            }
-            else
-            {
-                dacl_address = emulator_object<uint64_t>{c.emu, security_descriptor + 32}.read();
-            }
-
-            const auto token_groups = get_token_groups(c.proc);
-            const auto mapping = generic_mapping.read();
-            constexpr ACCESS_MASK maximum_allowed = 0x02000000;
-            constexpr ACCESS_MASK all_access = 0xFFFFFFFF;
-            const bool maximum = (desired_access & maximum_allowed) != 0;
-            const auto requested = map_generic_access(desired_access & ~maximum_allowed, mapping);
-            ACCESS_MASK remaining = maximum ? all_access : requested;
-            ACCESS_MASK granted = 0;
-            bool denied = false;
-
-            if (!(control & SE_DACL_PRESENT) || dacl_address == 0)
-            {
-                granted = maximum ? map_generic_access(0x10000000, mapping) : requested;
-                remaining = 0;
-            }
-            else
-            {
-                const auto acl = emulator_object<ACL>{c.emu, dacl_address}.read();
-                auto ace_address = dacl_address + sizeof(ACL);
-                for (USHORT i = 0; i < acl.AceCount; ++i)
-                {
-                    const auto ace = emulator_object<ACCESS_ALLOWED_ACE>{c.emu, ace_address}.read();
-                    if (ace.Header.AceSize < sizeof(ACCESS_ALLOWED_ACE))
-                    {
-                        return STATUS_INVALID_PARAMETER;
-                    }
-
-                    const auto ace_mask = map_generic_access(ace.Mask, mapping);
-                    const auto ace_sid = ace_address + offsetof(ACCESS_ALLOWED_ACE, SidStart);
-                    const bool applies = sid_matches(c.emu.memory(), ace_sid, c.proc.sid) ||
-                                         std::ranges::any_of(token_groups, [&](const token_group& group) {
-                                             return (group.attributes & se_group_enabled) == se_group_enabled &&
-                                                    sid_matches(c.emu.memory(), ace_sid, group.sid);
-                                         });
-                    if (applies && ace.Header.AceType == 1 && maximum)
-                    {
-                        remaining &= ~ace_mask;
-                    }
-                    else if (applies && ace.Header.AceType == 1 && (ace_mask & remaining) != 0)
-                    {
-                        denied = true;
-                        break;
-                    }
-                    if (applies && ace.Header.AceType == 0)
-                    {
-                        const auto allowed = ace_mask & remaining;
-                        granted |= allowed;
-                        remaining &= ~allowed;
-                    }
-                    ace_address += ace.Header.AceSize;
-                }
+                return decision.status;
             }
 
             privilege_set_length.write(0);
-            granted_access.write(granted);
-            const bool success = !denied && (maximum ? granted != 0 : remaining == 0);
-            access_status.write(success ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
+            granted_access.write(decision.granted);
+            access_status.write(decision.status);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAccessCheckByTypeAndAuditAlarm(
+            const syscall_context& c, const uint64_t /*subsystem_name*/, const uint64_t /*handle_id*/, const uint64_t /*object_type_name*/,
+            const uint64_t /*object_name*/, const uint64_t security_descriptor, const uint64_t /*principal_self_sid*/,
+            const ACCESS_MASK desired_access, const ULONG /*audit_type*/, const ULONG /*flags*/, const uint64_t object_type_list,
+            const ULONG object_type_list_length, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+            const BOOLEAN /*object_creation*/, const emulator_object<ACCESS_MASK> granted_access,
+            const emulator_object<NTSTATUS> access_status, const emulator_object<BOOLEAN> generate_on_close)
+        {
+            if (object_type_list != 0 || object_type_list_length != 0)
+            {
+                c.win_emu.log.error("NtAccessCheckByTypeAndAuditAlarm with an object type list is not supported\n");
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            const auto decision = evaluate_descriptor_access(c, security_descriptor, desired_access, generic_mapping.read());
+            if (decision.status == STATUS_INVALID_PARAMETER)
+            {
+                return decision.status;
+            }
+
+            granted_access.write(decision.granted);
+            access_status.write(decision.status);
+            generate_on_close.write(FALSE);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAccessCheckAndAuditAlarm(const syscall_context& c, const uint64_t /*subsystem_name*/,
+                                                   const uint64_t /*handle_id*/, const uint64_t /*object_type_name*/,
+                                                   const uint64_t /*object_name*/, const uint64_t security_descriptor,
+                                                   const ACCESS_MASK desired_access,
+                                                   const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                                   const BOOLEAN /*object_creation*/, const emulator_object<ACCESS_MASK> granted_access,
+                                                   const emulator_object<NTSTATUS> access_status,
+                                                   const emulator_object<BOOLEAN> generate_on_close)
+        {
+            const auto decision = evaluate_descriptor_access(c, security_descriptor, desired_access, generic_mapping.read());
+            if (decision.status == STATUS_INVALID_PARAMETER)
+            {
+                return decision.status;
+            }
+
+            granted_access.write(decision.granted);
+            access_status.write(decision.status);
+            generate_on_close.write(FALSE);
+            return STATUS_SUCCESS;
+        }
+
+        // sogen keeps no security event log, so audit alarms have no records to open, close or write.
+        NTSTATUS handle_NtPrivilegedServiceAuditAlarm(const syscall_context& /*c*/, const uint64_t /*subsystem_name*/,
+                                                      const uint64_t /*service_name*/, const uint64_t /*client_token*/,
+                                                      const uint64_t /*privileges*/, const BOOLEAN /*access_granted*/)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCloseObjectAuditAlarm(const syscall_context& /*c*/, const uint64_t /*subsystem_name*/,
+                                                const uint64_t /*handle_id*/, const BOOLEAN /*generate_on_close*/)
+        {
             return STATUS_SUCCESS;
         }
 
@@ -741,32 +892,72 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, const handle /*token_handle*/,
-                                                const BOOLEAN disable_all_privileges, const emulator_object<TOKEN_PRIVILEGES64> new_state,
-                                                const ULONG /*buffer_length*/, const emulator_object<TOKEN_PRIVILEGES64> previous_state,
+        NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, const handle token_handle, const BOOLEAN disable_all_privileges,
+                                                const emulator_object<TOKEN_PRIVILEGES64> new_state, const ULONG buffer_length,
+                                                const emulator_object<TOKEN_PRIVILEGES64> previous_state,
                                                 const emulator_object<ULONG> return_length)
         {
-            constexpr ULONG se_change_notify_privilege = 23;
+            auto& privileges = token_privileges(c.proc, token_handle);
+            auto updated = privileges;
+            std::vector<token_privilege> previous{};
+            bool all_assigned = true;
 
+            if (disable_all_privileges)
+            {
+                for (const auto& privilege : privileges)
+                {
+                    if (privilege.attributes & se_privilege_enabled)
+                    {
+                        previous.push_back(privilege);
+                    }
+                }
+
+                for (auto& privilege : updated)
+                {
+                    privilege.attributes &= ~se_privilege_enabled;
+                }
+            }
+            else if (new_state)
+            {
+                const auto count = new_state.read().PrivilegeCount;
+                for (ULONG i = 0; i < count; ++i)
+                {
+                    const auto entry = c.emu.read_memory<LUID_AND_ATTRIBUTES>(new_state.value() + offsetof(TOKEN_PRIVILEGES64, Privileges) +
+                                                                              i * sizeof(LUID_AND_ATTRIBUTES));
+                    const auto held = find_privilege(updated, entry.Luid);
+                    if (held == updated.end())
+                    {
+                        all_assigned = false;
+                        continue;
+                    }
+
+                    const auto before = *held;
+                    if (entry.Attributes & se_privilege_removed)
+                    {
+                        updated.erase(held);
+                        previous.push_back(before);
+                        continue;
+                    }
+
+                    held->attributes = (held->attributes & ~se_privilege_enabled) | (entry.Attributes & se_privilege_enabled);
+                    if (held->attributes != before.attributes)
+                    {
+                        previous.push_back(before);
+                    }
+                }
+            }
+
+            const auto previous_size = privilege_list_size(previous.size());
+            return_length.write_if_valid(static_cast<ULONG>(previous_size));
+            if (previous_state && buffer_length < previous_size)
+            {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            privileges = std::move(updated);
             if (previous_state)
             {
-                previous_state.write(TOKEN_PRIVILEGES64{});
-            }
-
-            return_length.write_if_valid(static_cast<ULONG>(sizeof(ULONG)));
-
-            if (disable_all_privileges || !new_state)
-            {
-                return STATUS_SUCCESS;
-            }
-
-            const auto requested_count = new_state.read().PrivilegeCount;
-            bool all_assigned = true;
-            for (ULONG i = 0; i < requested_count; ++i)
-            {
-                const auto entry = c.emu.read_memory<LUID_AND_ATTRIBUTES>(new_state.value() + offsetof(TOKEN_PRIVILEGES64, Privileges) +
-                                                                          i * sizeof(LUID_AND_ATTRIBUTES));
-                all_assigned &= entry.Luid.HighPart == 0 && entry.Luid.LowPart == se_change_notify_privilege;
+                write_privilege_list(c, previous_state.value(), previous);
             }
 
             return all_assigned ? STATUS_SUCCESS : STATUS_NOT_ALL_ASSIGNED;
@@ -775,7 +966,6 @@ namespace sogen
         NTSTATUS handle_NtPrivilegeCheck(const syscall_context& c, const handle /*token_handle*/, const uint64_t required_privileges,
                                          const emulator_object<BOOLEAN> result)
         {
-            constexpr ULONG se_change_notify_privilege = 23;
             constexpr ULONG privilege_set_all_necessary = 1;
             constexpr uint64_t privilege_set_privileges_offset = 8;
 
@@ -786,9 +976,15 @@ namespace sogen
             bool any_held = false;
             for (ULONG i = 0; i < count; ++i)
             {
-                const auto entry = c.emu.read_memory<LUID_AND_ATTRIBUTES>(required_privileges + privilege_set_privileges_offset +
-                                                                          i * sizeof(LUID_AND_ATTRIBUTES));
-                const bool held = entry.Luid.HighPart == 0 && entry.Luid.LowPart == se_change_notify_privilege;
+                const auto entry_address = required_privileges + privilege_set_privileges_offset + i * sizeof(LUID_AND_ATTRIBUTES);
+                const auto entry = c.emu.read_memory<LUID_AND_ATTRIBUTES>(entry_address);
+                const bool held = holds_enabled_privilege(c.proc.privileges, entry.Luid);
+                if (held)
+                {
+                    c.emu.write_memory<ULONG>(entry_address + offsetof(LUID_AND_ATTRIBUTES, Attributes),
+                                              entry.Attributes | se_privilege_used_for_access);
+                }
+
                 all_held &= held;
                 any_held |= held;
             }

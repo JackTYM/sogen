@@ -77,11 +77,6 @@ namespace sogen
             return create_audio_service_port(port);
         }
 
-        if (port == u"\\WindowsErrorReportingServicePort")
-        {
-            return std::make_unique<noop_port>();
-        }
-
         if (port == u"\\BaseNamedObjects\\CoreMessagingRegistrar")
         {
             return create_core_messaging_registrar_port();

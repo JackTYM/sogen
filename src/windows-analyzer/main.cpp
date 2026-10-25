@@ -97,6 +97,9 @@ namespace sogen
             // Set only on a process spawned by spawn_child_process: the inherited socketpair fd for
             // its process_control_channel - not user-facing, hidden from --help (see below).
             int child_control_fd{-1};
+            // Set only on a process spawned by spawn_child_process: the inherited socketpair fd on which it
+            // asks its parent to route control requests to processes it has no channel to.
+            int child_router_fd{-1};
         };
 
         void split_and_insert(std::set<std::string, std::less<>>& container, const std::string_view str, const char splitter = ',')
@@ -851,6 +854,10 @@ namespace sogen
                             win_emu_ptr->register_child_control_channel(
                                 record_id, create_fd_process_control_channel(outcome.control_fd, outcome.host_pid));
                         }
+                        if (outcome.success && outcome.router_fd >= 0)
+                        {
+                            win_emu_ptr->register_child_routing_channel(create_fd_process_control_channel(outcome.router_fd));
+                        }
                         return outcome;
                     };
             }
@@ -871,6 +878,11 @@ namespace sogen
                 if (options.child_control_fd >= 0)
                 {
                     win_emu->set_process_control_server(create_fd_process_control_channel(options.child_control_fd));
+                }
+
+                if (options.child_router_fd >= 0)
+                {
+                    win_emu->set_process_control_router(create_fd_process_control_channel(options.child_router_fd));
                 }
 #endif
             }
@@ -1109,17 +1121,21 @@ namespace sogen
                 }
             }
 
-            std::unique_ptr<process_control_channel> lsass{};
-            if (!child_bootstrap && options.minidump_path.empty())
-            {
-                lsass = boot_lsass(spawn_config, *win_emu);
-            }
-            const auto stop_lsass = utils::finally([&] {
-                if (lsass)
+            std::vector<uint32_t> boot_processes{};
+            const auto stop_boot_processes = utils::finally([&] {
+                for (const auto record_id : boot_processes)
                 {
-                    lsass->force_kill();
+                    if (auto* const control = win_emu->find_child_control_channel(record_id))
+                    {
+                        control->force_kill();
+                    }
                 }
             });
+            if (!child_bootstrap && options.minidump_path.empty())
+            {
+                boot_processes.push_back(boot_services(spawn_config, *win_emu));
+                boot_processes.push_back(boot_lsass(spawn_config, *win_emu));
+            }
 
             return run_emulation(context, options);
         }
@@ -1253,6 +1269,11 @@ namespace sogen
             app.add_option("--child-control-fd", options.child_control_fd,
                            "Internal use only: inherited socketpair fd for this process's "
                            "process_control_channel, set alongside --child-ipc-fd")
+                ->group("");
+
+            app.add_option("--child-router-fd", options.child_router_fd,
+                           "Internal use only: inherited socketpair fd for control requests this process routes "
+                           "through its parent, set alongside --child-ipc-fd")
                 ->group("");
 
             std::vector<std::string> send_input_args{};

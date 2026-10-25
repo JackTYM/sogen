@@ -15,6 +15,9 @@ namespace sogen
     {
         uint32_t record_id{};
         process_control_channel* channel{};
+        // Set when `channel` leads to this process's parent rather than to the target itself, which
+        // then forwards the request to this guest pid (see route_process_control_request).
+        uint32_t routed_pid{};
     };
 
     // Thin wrapper around process_control_channel::request() shared by every cross-process syscall
@@ -49,9 +52,9 @@ namespace sogen
     // to their existing same-process-only logic, exactly the STATUS_NOT_SUPPORTED they already return
     // unconditionally today for any handle that isn't process_context::is_current_process_handle.
     // Returns STATUS_INVALID_HANDLE if h names a record process_context::child_processes doesn't know,
-    // STATUS_NOT_SUPPORTED if the record exists but has no live control channel (no spawning support
-    // on this platform, or a snapshot-restored process whose children's channels were never
-    // serialized), and STATUS_ACCESS_DENIED if required_access isn't fully covered by the record's
+    // STATUS_NOT_SUPPORTED if the record exists but has neither a live control channel nor a parent
+    // to route through (no spawning support on this platform, or a snapshot-restored process whose
+    // children's channels were never serialized), and STATUS_ACCESS_DENIED if required_access isn't fully covered by the record's
     // granted_access.
     //
     // A pseudo handle only ever carries {id, type} - there is nowhere to stash a narrowed per-handle

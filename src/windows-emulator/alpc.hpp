@@ -45,8 +45,15 @@ namespace sogen
             uint32_t callback_id{};
             uint64_t client_view_size{};
             uint64_t via_port_id{};
+            uint64_t message_context{};
             std::vector<uint8_t> data{};
             std::optional<std::vector<uint8_t>> view{};
+        };
+
+        struct srm_logon_session
+        {
+            std::vector<uint8_t> first_name{};
+            std::vector<uint8_t> second_name{};
         };
 
         struct port
@@ -65,6 +72,7 @@ namespace sogen
 
             std::set<uint32_t> awaited_replies{};
             std::map<uint32_t, message> replies{};
+            std::map<uint32_t, uint64_t> message_contexts{};
 
             std::optional<NTSTATUS> connection_status{};
             std::optional<message> connection_reply{};
@@ -75,6 +83,8 @@ namespace sogen
             std::shared_ptr<kernel_slot> name_slot{};
             std::optional<std::u16string> kernel_peer{};
             std::optional<std::vector<uint8_t>> srm_system_policy{};
+            std::map<uint64_t, srm_logon_session> srm_logon_sessions{};
+            uint32_t last_received_sender_pid{};
         };
 
         struct pending_message
@@ -99,6 +109,8 @@ namespace sogen
             uint64_t next_section_id{1};
             std::map<uint64_t, uint64_t> sections{};
             std::map<uint64_t, uint64_t> views{};
+            uint64_t next_resource_reserve_id{1};
+            std::set<uint64_t> resource_reserves{};
         };
 
         enum class wait_kind : uint8_t
@@ -149,6 +161,8 @@ namespace sogen
                                    uint64_t timeout);
         NTSTATUS create_port_section(const syscall_context& c, uint64_t size, uint64_t section_handle_out, uint64_t actual_size_out);
         NTSTATUS delete_port_section(const syscall_context& c, uint64_t section);
+        NTSTATUS create_resource_reserve(const syscall_context& c, uint64_t resource_id_out);
+        NTSTATUS delete_resource_reserve(const syscall_context& c, uint64_t resource_id);
         NTSTATUS create_section_view(const syscall_context& c, uint64_t view_attributes);
         NTSTATUS delete_section_view(const syscall_context& c, uint64_t view_base);
         NTSTATUS query_emulated_port_information(const syscall_context& c, uint32_t info_class, uint64_t information, uint32_t length,
@@ -159,6 +173,7 @@ namespace sogen
         void close_port(windows_emulator& win_emu, uint64_t port_id);
 
         bool has_queued_message(const process_context& proc, uint64_t port_id);
+        std::optional<uint32_t> last_received_sender_pid(const process_context& proc, uint64_t port_id);
         std::optional<NTSTATUS> try_complete_wait(windows_emulator& win_emu, emulator_thread& thread, const pending_wait& wait);
 
         bool deliver(windows_emulator& win_emu, const pipe_ipc_message& message);

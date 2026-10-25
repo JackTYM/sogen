@@ -694,6 +694,7 @@ namespace sogen
 
             win_emu.pump_pipe_ipc();
             win_emu.pump_process_control_server();
+            win_emu.pump_child_routing_channels();
             win_emu.pump_child_exit_notifications();
 
             worker_factory_support::create_workers_for_pending_work(win_emu);
@@ -1145,6 +1146,7 @@ namespace sogen
         this->mod_manager.map_main_modules(this->emu(), this->application_settings_.application, this->version, context, this->log);
         this->install_section_first_execution_hooks();
         publish_kernel_event(context, u"\\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
+        publish_kernel_event(context, u"\\KernelObjects\\SystemErrorPortReady");
 
         const auto* executable = this->mod_manager.executable;
         const auto* ntdll = this->mod_manager.ntdll;
@@ -1212,6 +1214,15 @@ namespace sogen
         for (const auto& [window, owner] : this->process.foreign_windows)
         {
             peer->send(make_window_created_message(window, owner.process_id, owner.thread_id));
+        }
+
+        for (const auto& [pid, native_64bit] : this->known_sibling_pids_)
+        {
+            pipe_ipc_message message{};
+            message.type = pipe_ipc_message_type::process_alive;
+            message.client_process_id = pid;
+            message.native_64bit = native_64bit;
+            peer->send(message);
         }
 
         this->pipe_ipc_peers_.push_back(std::move(peer));
@@ -1324,9 +1335,9 @@ namespace sogen
         }
     }
 
-    void windows_emulator::broadcast_process_alive(const uint32_t pid)
+    void windows_emulator::broadcast_process_alive(const uint32_t pid, const std::optional<bool> native_64bit)
     {
-        this->known_sibling_pids_.insert(pid);
+        this->known_sibling_pids_.insert_or_assign(pid, native_64bit);
 
         if (this->pipe_ipc_peers_.empty())
         {
@@ -1336,6 +1347,7 @@ namespace sogen
         pipe_ipc_message message{};
         message.type = pipe_ipc_message_type::process_alive;
         message.client_process_id = pid;
+        message.native_64bit = native_64bit;
 
         for (auto& peer : this->pipe_ipc_peers_)
         {
@@ -1451,6 +1463,12 @@ namespace sogen
         return this->known_sibling_pids_.contains(pid);
     }
 
+    std::optional<bool> windows_emulator::known_sibling_native_64bit(const uint32_t pid) const
+    {
+        const auto sibling = this->known_sibling_pids_.find(pid);
+        return sibling == this->known_sibling_pids_.end() ? std::nullopt : sibling->second;
+    }
+
     void windows_emulator::pump_pipe_ipc()
     {
         static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
@@ -1484,7 +1502,7 @@ namespace sogen
                 }
                 else if (message->type == pipe_ipc_message_type::process_alive && message->client_process_id)
                 {
-                    this->known_sibling_pids_.insert(*message->client_process_id);
+                    this->known_sibling_pids_.insert_or_assign(*message->client_process_id, message->native_64bit);
                 }
                 else if (message->type == pipe_ipc_message_type::focus_changed && this->process.windows.get(message->parent_window))
                 {
@@ -1546,6 +1564,50 @@ namespace sogen
         {
             pump_process_control(*this, *this->process_control_server_);
         }
+    }
+
+    void windows_emulator::set_process_control_router(std::unique_ptr<process_control_channel> channel)
+    {
+        this->process_control_router_ = std::move(channel);
+    }
+
+    process_control_channel* windows_emulator::process_control_router() const
+    {
+        return this->process_control_router_.get();
+    }
+
+    void windows_emulator::register_child_routing_channel(std::unique_ptr<process_control_channel> channel)
+    {
+        this->child_routing_channels_.push_back(std::move(channel));
+    }
+
+    void windows_emulator::pump_child_routing_channels()
+    {
+        for (const auto& channel : this->child_routing_channels_)
+        {
+            while (const auto request = channel->try_receive())
+            {
+                channel->respond(route_process_control_request(*this, *request));
+            }
+        }
+    }
+
+    process_control_channel* windows_emulator::find_child_control_channel_by_pid(const uint32_t pid)
+    {
+        for (const auto& [record_id, record] : this->process.child_processes)
+        {
+            if (record.pid != pid || record.exit_status != STATUS_PENDING)
+            {
+                continue;
+            }
+
+            if (auto* channel = this->find_child_control_channel(record_id))
+            {
+                return channel;
+            }
+        }
+
+        return nullptr;
     }
 
     void windows_emulator::notify_own_exit(const std::optional<NTSTATUS> exit_status)
