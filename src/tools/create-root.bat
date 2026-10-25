@@ -261,6 +261,7 @@ CALL :collect c_437.nls
 CALL :collect c_850.nls
 
 CALL :collect wdmaud.drv
+CALL :collect WUDFPlatform.dll
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 CALL :collect_file "%WINDIR%\Globalization\Sorting", SortDefault.nls, %EMU_GLOBALIZATION_SORTING%
