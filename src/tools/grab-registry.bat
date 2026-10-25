@@ -33,6 +33,17 @@ REG SAVE HKLM\HARDWARE "%REGDIR%\HARDWARE" /Y
 REG SAVE HKLM\SAM "%REGDIR%\SAM" /Y
 COPY /B /Y C:\Users\Default\NTUSER.DAT "%REGDIR%\NTUSER.DAT"
 
+REM --- A live capture carries the host's PendingFileRenameOperations (file moves/deletes queued for its next
+REM --- boot, on paths of this host). smss consumes them at boot, so a booted guest never sees them; left in,
+REM --- installers detect a pending reboot.
+REG UNLOAD HKLM\SogenSysSeed >NUL 2>&1
+REG LOAD HKLM\SogenSysSeed "%REGDIR%\SYSTEM"
+FOR /F "tokens=3" %%C IN ('REG QUERY HKLM\SogenSysSeed\Select /v Current ^| FINDSTR /I /C:"Current"') DO SET /A SYS_CONTROL_SET=%%C
+SET SESSION_MANAGER=HKLM\SogenSysSeed\ControlSet00%SYS_CONTROL_SET%\Control\Session Manager
+REG DELETE "%SESSION_MANAGER%" /v PendingFileRenameOperations /f >NUL 2>&1
+REG DELETE "%SESSION_MANAGER%" /v PendingFileRenameOperations2 /f >NUL 2>&1
+REG UNLOAD HKLM\SogenSysSeed
+
 REM --- Seed the guest's HKCU (\Software\Valve\Steam) so its steam_api finds our steamclient shim and the
 REM --- synthetic Steam process. Load the copied hive, add the values, unload. A stale mount from a failed
 REM --- previous run is unloaded first (error suppressed).
