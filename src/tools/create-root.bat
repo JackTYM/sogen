@@ -293,6 +293,9 @@ CALL :collect_dir "%WINDIR%\Microsoft.NET" "%EMU_WINDIR%\microsoft.net"
 REM The .NET 2.0-3.5 runtime (CLR 2) binds framework assemblies from its own global assembly cache.
 FOR %%G IN (GAC GAC_32 GAC_64 GAC_MSIL) DO CALL :collect_dir "%WINDIR%\assembly\%%G" "%EMU_WINDIR%\assembly\%%G"
 
+REM The 32-bit system directory: WoW64 processes and the installer load many of its DLLs by name.
+CALL :collect_dir "%WINDIR%\SysWOW64" "%EMU_SYSDIR_WOW64%"
+
 REM SolidWorks Installation Manager creates WbemScripting.SWbemLocator (CLSID 4590F811-1D3A-11D0-891F-00AA004B2E24)
 REM in its Connecting step; without the wbem folder that CoCreateInstance fails and the step retries forever.
 CALL :collect_dir "%WINDIR%\System32\wbem" "%EMU_SYSDIR%\wbem"
