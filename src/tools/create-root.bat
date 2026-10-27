@@ -56,6 +56,7 @@ CALL :collect cabinet.dll
 CALL :collect cfgmgr32.dll
 CALL :collect ci.dll
 CALL :collect clbcatq.dll
+CALL :collect coml2.dll
 CALL :collect coloradapterclient.dll
 CALL :collect combase.dll
 CALL :collect comctl32.dll
