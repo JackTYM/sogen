@@ -1209,6 +1209,17 @@ namespace sogen
         }
     }
 
+    bool process_context::is_valid_handle(const handle handle)
+    {
+        if (handle.value.is_pseudo)
+        {
+            return true;
+        }
+
+        auto* store = this->get_handle_store(handle);
+        return store && store->get_object(handle);
+    }
+
     emulator_thread* process_context::find_thread_by_id(const uint32_t thread_id)
     {
         if (const auto cached = this->thread_handles_by_id.find(thread_id); cached != this->thread_handles_by_id.end())

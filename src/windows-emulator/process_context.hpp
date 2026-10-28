@@ -433,6 +433,7 @@ namespace sogen
         void restore_windows_after_state_restore(windows_emulator& win_emu);
 
         generic_handle_store* get_handle_store(handle handle);
+        bool is_valid_handle(handle handle);
         emulator_thread* find_thread_by_id(uint32_t thread_id);
         const emulator_thread* find_thread_by_id(uint32_t thread_id) const;
         bool is_window_effectively_visible(hwnd window) const;
