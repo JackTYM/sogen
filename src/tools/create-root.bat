@@ -295,6 +295,7 @@ FOR %%G IN (GAC GAC_32 GAC_64 GAC_MSIL) DO CALL :collect_dir "%WINDIR%\assembly\
 
 REM The 32-bit system directory: WoW64 processes and the installer load many of its DLLs by name.
 CALL :collect_dir "%WINDIR%\SysWOW64" "%EMU_SYSDIR_WOW64%"
+CALL :collect_dir "%WINDIR%\Fonts" "%EMU_WINDIR%\fonts"
 
 REM SolidWorks Installation Manager creates WbemScripting.SWbemLocator (CLSID 4590F811-1D3A-11D0-891F-00AA004B2E24)
 REM in its Connecting step; without the wbem folder that CoCreateInstance fails and the step retries forever.
