@@ -22,6 +22,7 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            const auto previous_state = mutant->signal_state();
             const auto [old_count, succeeded] = mutant->release(c.thread().id);
 
             if (!succeeded)
@@ -31,7 +32,7 @@ namespace sogen
 
             if (previous_count)
             {
-                previous_count.write(1 - static_cast<LONG>(old_count));
+                previous_count.write(previous_state);
             }
 
             if (old_count == 1)

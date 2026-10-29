@@ -705,6 +705,11 @@ namespace sogen
             return false;
         }
 
+        int32_t signal_state() const
+        {
+            return 1 - static_cast<int32_t>(this->locked_count);
+        }
+
         std::pair<uint32_t, bool> release(const uint32_t thread_id)
         {
             const auto old_count = this->locked_count;
