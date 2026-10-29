@@ -620,24 +620,48 @@ namespace sogen
         // kernel lock, which is held again when this returns. Other vCPUs dispatch meanwhile, so the dispatch
         // marker is set aside for that time. The dispatching vCPU's thread counts as saved meanwhile, so that a
         // context access from another vCPU does not wait for f; its registers, including any change made to them,
-        // are reloaded before this returns. Within a dispatch, only a syscall handler may call this, as an access
-        // treats the saved registers as the syscall's hook frame.
+        // are reloaded before this returns. If f throws, the vCPU keeps its own registers and such a change is lost.
+        // Within a dispatch, only a syscall handler may call this, as an access treats the saved registers as the
+        // syscall's hook frame.
         template <typename F>
         decltype(auto) run_without_kernel_lock(F&& f)
         {
             this->kernel_lock_.assert_held();
-            auto* dispatch_vcpu = std::exchange(this->dispatch_vcpu_, nullptr);
+            auto* dispatch_vcpu = this->dispatch_vcpu_;
             const auto saved = this->save_dispatching_thread(dispatch_vcpu);
+            this->dispatch_vcpu_ = nullptr;
             this->kernel_lock_.unlock();
-            const auto _ = utils::finally([this, dispatch_vcpu, saved] {
-                this->kernel_lock_.lock();
-                this->dispatch_vcpu_ = dispatch_vcpu;
+
+            const auto run_unlocked = [&]() -> decltype(auto) {
+                const auto _ = utils::finally([this, dispatch_vcpu, saved] {
+                    this->kernel_lock_.lock();
+                    this->dispatch_vcpu_ = dispatch_vcpu;
+                    if (saved)
+                    {
+                        dispatch_vcpu->active_thread_saved = false;
+                    }
+                });
+                return f();
+            };
+
+            if constexpr (std::is_void_v<decltype(run_unlocked())>)
+            {
+                run_unlocked();
                 if (saved)
                 {
                     this->reload_dispatching_thread(*dispatch_vcpu);
                 }
-            });
-            return f();
+            }
+            else
+            {
+                auto result = run_unlocked();
+                if (saved)
+                {
+                    this->reload_dispatching_thread(*dispatch_vcpu);
+                }
+
+                return result;
+            }
         }
 
         // Swaps the registers of the outgoing thread on a vCPU for the incoming one. With more than one vCPU the

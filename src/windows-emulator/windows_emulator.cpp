@@ -1169,7 +1169,6 @@ namespace sogen
 
     void windows_emulator::reload_dispatching_thread(vcpu_context& vcpu) const
     {
-        vcpu.active_thread_saved = false;
         vcpu.thread().restore(vcpu.cpu, this->process.gdt_base);
     }
 

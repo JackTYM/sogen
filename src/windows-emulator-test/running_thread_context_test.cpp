@@ -1126,4 +1126,60 @@ namespace sogen::test
         const auto _ = utils::finally([&] { this->emu->stop(); });
         EXPECT_TRUE(this->wait_for_deletion(this->first));
     }
+
+    TEST_F(RunningThreadContextTest, FailedReloadAfterAnUnlockedHostCallReachesTheCaller)
+    {
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_call = std::async(std::launch::async, [&] {
+            return this->emu->dispatch_on_cpu(this->emu->vcpu(1).cpu, [&] {
+                try
+                {
+                    this->emu->run_without_kernel_lock([&] {
+                        entered = true;
+                        this->wait_until(released);
+                    });
+                    return false;
+                }
+                catch (const std::exception&)
+                {
+                    return &this->emu->active_cpu() == &this->emu->vcpu(1).cpu;
+                }
+            });
+        });
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+        this->emu->synchronize([&] { this->thread(this->second).last_registers.clear(); });
+        released = true;
+
+        EXPECT_TRUE(host_call.get());
+        EXPECT_FALSE(this->emu->vcpu(1).active_thread_saved);
+        EXPECT_EQ(second_rax, this->rax(1));
+    }
+
+    TEST_F(RunningThreadContextTest, HostCallThatThrowsLeavesItsThreadLoaded)
+    {
+        const std::atomic_bool fails{true};
+        const auto thrown = this->emu->dispatch_on_cpu(this->emu->vcpu(1).cpu, [&] {
+            try
+            {
+                this->emu->run_without_kernel_lock([&] {
+                    if (fails)
+                    {
+                        throw std::runtime_error("Host call failed");
+                    }
+                });
+                return false;
+            }
+            catch (const std::runtime_error&)
+            {
+                return &this->emu->active_cpu() == &this->emu->vcpu(1).cpu;
+            }
+        });
+
+        EXPECT_TRUE(thrown);
+        EXPECT_FALSE(this->emu->vcpu(1).active_thread_saved);
+        EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
+        EXPECT_EQ(second_rax, this->rax(1));
+    }
 }
