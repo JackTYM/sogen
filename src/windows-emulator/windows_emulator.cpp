@@ -611,6 +611,7 @@ namespace sogen
                 }
 
                 vcpu.active_thread = &thread;
+                thread.last_vcpu = &vcpu;
 
                 win_emu.transfer_thread_registers(vcpu, active_thread, thread);
             }

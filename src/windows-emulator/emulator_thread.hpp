@@ -15,6 +15,7 @@ namespace sogen
 
     struct completion_state;
     struct process_context;
+    struct vcpu_context;
     struct windows_arch_abi;
 
     struct user_timer_key
@@ -403,6 +404,8 @@ namespace sogen
         // Counts syscalls on other vCPUs waiting in wait_for_thread_registers for this thread. The thread must not be
         // loaded onto a vCPU or deleted while it is non-zero.
         uint32_t pending_register_accesses{0};
+        // The vCPU that loaded this thread last. The thread is still loaded while it is that vCPU's active thread.
+        vcpu_context* last_vcpu{};
         bool alerted{false};
         uint32_t create_flags{0};
         uint32_t suspended{0};
@@ -695,10 +698,7 @@ namespace sogen
             this->marker.mark_as_moved();
         }
 
-        static bool deleter(emulator_thread& t)
-        {
-            return ref_counted_object::deleter(t) && t.is_terminated() && t.pending_register_accesses == 0;
-        }
+        static bool deleter(emulator_thread& t);
 
       private:
         bool can_coalesce_message(const msg& msg) const;

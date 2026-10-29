@@ -1175,6 +1175,13 @@ namespace sogen
         return this->exit_status.has_value();
     }
 
+    bool emulator_thread::deleter(emulator_thread& t)
+    {
+        const auto loaded = t.last_vcpu && t.last_vcpu->active_thread == &t;
+        return ref_counted_object::deleter(t) && t.is_terminated() && !loaded && !t.registers_in_transit &&
+               t.pending_register_accesses == 0;
+    }
+
     bool emulator_thread::is_thread_ready(windows_emulator& win_emu)
     {
         if (this->is_terminated() || this->suspended > 0)
