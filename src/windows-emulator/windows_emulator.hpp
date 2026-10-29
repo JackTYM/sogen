@@ -166,7 +166,8 @@ namespace sogen
         guest_cpu& cpu;
         emulator_thread* active_thread{};
         std::atomic_bool switch_thread{false};
-        // Set while this vCPU waits in wait_for_thread_registers. Its active thread's registers are saved meanwhile.
+        // Set while this vCPU waits in wait_for_thread_registers or runs a host call through run_without_kernel_lock.
+        // Its active thread's registers are saved meanwhile, and it reloads them before it continues.
         bool active_thread_saved{false};
 
         emulator_thread& thread() const
@@ -608,16 +609,23 @@ namespace sogen
         // Runs f with the kernel lock released, for host calls that can block for a long time (e.g. a GPU present)
         // and would otherwise stall every other vCPU. f must not touch any emulator or guest state. Requires the
         // kernel lock, which is held again when this returns. Other vCPUs dispatch meanwhile, so the dispatch
-        // marker is set aside for that time.
+        // marker is set aside for that time. The dispatching vCPU's thread counts as saved meanwhile, so that a
+        // context access from another vCPU does not wait for f; its registers, including any change made to them,
+        // are reloaded before this returns.
         template <typename F>
         decltype(auto) run_without_kernel_lock(F&& f)
         {
             this->kernel_lock_.assert_held();
             auto* dispatch_vcpu = std::exchange(this->dispatch_vcpu_, nullptr);
+            const auto saved = this->save_dispatching_thread(dispatch_vcpu);
             this->kernel_lock_.unlock();
-            const auto _ = utils::finally([this, dispatch_vcpu] {
+            const auto _ = utils::finally([this, dispatch_vcpu, saved] {
                 this->kernel_lock_.lock();
                 this->dispatch_vcpu_ = dispatch_vcpu;
+                if (saved)
+                {
+                    this->reload_dispatching_thread(*dispatch_vcpu);
+                }
             });
             return f();
         }
@@ -630,12 +638,15 @@ namespace sogen
 
         // Blocks until the thread's saved registers are current: no vCPU is transferring them and no other vCPU has the
         // thread loaded. A vCPU that has it loaded is asked to switch away, which saves them. The calling vCPU's active
-        // thread must already be saved, so that two vCPUs accessing each other's thread do not wait for each other.
-        // Requires the kernel lock, which it releases while waiting. Returns false if the emulator stops first, in which
-        // case the thread's registers must not be accessed.
+        // thread must already be saved, so that two vCPUs accessing each other's thread do not wait for each other,
+        // and the caller must reload it from the saved registers afterwards, since other vCPUs may read and write them
+        // during the wait. Requires the kernel lock, which it releases while waiting. Returns false if the emulator
+        // stops first, in which case the thread's registers must not be accessed.
         [[nodiscard]] bool wait_for_thread_registers(vcpu_context& vcpu, emulator_thread& thread);
 
       private:
+        bool save_dispatching_thread(vcpu_context* vcpu);
+        void reload_dispatching_thread(vcpu_context& vcpu) const;
         void set_foreground_window(hwnd window);
         void deliver_ui_event(const ui_event& event);
         void resize_window_from_host(hwnd window_handle, bool maximized, int32_t client_width, int32_t client_height);
@@ -655,6 +666,8 @@ namespace sogen
         // The emulator kernel lock: held by all code touching shared kernel state,
         // released while guest code executes (docs/multi-vcpu-design.md, section 7).
         kernel_lock kernel_lock_{};
+        // Notified under the kernel lock whenever a thread's registers become saved or leave transit.
+        std::condition_variable_any thread_registers_saved_{};
 
         void credit_idle_wakeup();
         bool wait_for_idle_wakeup(std::chrono::milliseconds timeout);

@@ -990,6 +990,7 @@ namespace sogen
                 // vCPU can pick it up once it becomes ready.
                 vcpu.active_thread->save(vcpu.cpu);
                 vcpu.active_thread = nullptr;
+                this->thread_registers_saved_.notify_all();
             }
 
             const auto host_wait_pending = has_pending_host_wait(this->process);
@@ -1111,6 +1112,7 @@ namespace sogen
                     outgoing->registers_in_transit = false;
                 }
                 incoming.registers_in_transit = false;
+                this->thread_registers_saved_.notify_all();
             });
 
             if (outgoing)
@@ -1140,6 +1142,7 @@ namespace sogen
 
         vcpu.active_thread_saved = true;
         ++thread.pending_register_accesses;
+        this->thread_registers_saved_.notify_all();
         const auto _ = utils::finally([&] {
             vcpu.active_thread_saved = false;
             --thread.pending_register_accesses;
@@ -1153,16 +1156,39 @@ namespace sogen
                 return false;
             }
 
-            if (auto* owner = loaded_elsewhere())
+            if (auto* owner = thread.registers_in_transit ? nullptr : loaded_elsewhere())
             {
                 owner->switch_thread = true;
                 owner->cpu.stop();
             }
 
-            this->run_without_kernel_lock([] { std::this_thread::yield(); });
+            // Bounded, so that the kick is repeated: a stop that reaches a vCPU just before it enters guest code is
+            // lost on WHP.
+            auto* dispatch_vcpu = std::exchange(this->dispatch_vcpu_, nullptr);
+            this->thread_registers_saved_.wait_for(this->kernel_lock_, std::chrono::milliseconds(1));
+            this->dispatch_vcpu_ = dispatch_vcpu;
         }
 
         return true;
+    }
+
+    bool windows_emulator::save_dispatching_thread(vcpu_context* vcpu)
+    {
+        if (this->vcpu_count_ == 1 || !vcpu || !vcpu->active_thread || vcpu->active_thread_saved)
+        {
+            return false;
+        }
+
+        vcpu->active_thread->save(vcpu->cpu);
+        vcpu->active_thread_saved = true;
+        this->thread_registers_saved_.notify_all();
+        return true;
+    }
+
+    void windows_emulator::reload_dispatching_thread(vcpu_context& vcpu) const
+    {
+        vcpu.active_thread_saved = false;
+        vcpu.thread().restore(vcpu.cpu, this->process.gdt_base);
     }
 
     bool windows_emulator::activate_thread(vcpu_context& vcpu, const uint32_t id)
@@ -2617,6 +2643,7 @@ namespace sogen
         }
 
         this->idle_wakeup_cv_.notify_all();
+        this->thread_registers_saved_.notify_all();
 
         for (uint32_t i = 0; i < this->vcpu_count_; ++i)
         {

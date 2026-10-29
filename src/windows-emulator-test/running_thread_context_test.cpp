@@ -560,6 +560,27 @@ namespace sogen::test
                 return buffer;
             }
 
+            // A syscall on vCPU 1 in a host call that runs with the kernel lock released until released is set.
+            std::future<void> unlocked_host_wait_on_second_vcpu(std::atomic_bool& entered, const std::atomic_bool& released)
+            {
+                return std::async(std::launch::async, [this, &entered, &released] {
+                    this->emu->dispatch_on_cpu(this->emu->vcpu(1).cpu, [&] {
+                        this->emu->run_without_kernel_lock([&] {
+                            entered = true;
+                            this->wait_until(released);
+                        });
+                    });
+                });
+            }
+
+            static void wait_until(const std::atomic_bool& flag)
+            {
+                while (!flag)
+                {
+                    std::this_thread::yield();
+                }
+            }
+
             template <typename Handler>
             std::future<NTSTATUS> access_from_first_vcpu(Handler handler, const handle thread_handle,
                                                          const emulator_object<CONTEXT64> buffer)
@@ -839,5 +860,109 @@ namespace sogen::test
         const auto _ = utils::finally([&] { this->emu->stop(); });
 
         EXPECT_TRUE(this->wait_for_deletion(transferred));
+    }
+
+    TEST_F(RunningThreadContextTest, GetDoesNotWaitForAThreadInAnUnlockedHostWait)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_wait = this->unlocked_host_wait_on_second_vcpu(entered, released);
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+
+        const auto status = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer).get();
+        released = true;
+        host_wait.get();
+
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(second_rax, buffer.read().Rax);
+        EXPECT_EQ(0u, this->machine->second().stops.load());
+        EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
+        EXPECT_EQ(second_rax, this->rax(1));
+        EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_FALSE(this->emu->vcpu(1).active_thread_saved);
+    }
+
+    TEST_F(RunningThreadContextTest, SetDuringAnUnlockedHostWaitIsReloadedWhenTheWaitEnds)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT_INTEGER_64, written_rax);
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_wait = this->unlocked_host_wait_on_second_vcpu(entered, released);
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+
+        const auto status = this->access_from_first_vcpu(syscalls::handle_NtSetContextThread, this->second, buffer).get();
+        released = true;
+        host_wait.get();
+
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
+        EXPECT_EQ(written_rax, this->rax(1));
+        EXPECT_EQ(first_rax, this->rax(0));
+    }
+
+    TEST_F(RunningThreadContextTest, ThreadInTransitIsNotKicked)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        this->emu->synchronize([&] { this->thread(this->second).registers_in_transit = true; });
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        while (this->emu->synchronize([&] { return this->thread(this->second).pending_register_accesses == 0; }))
+        {
+            std::this_thread::yield();
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const auto stops_in_transit = this->machine->second().stops.load();
+        this->emu->synchronize([&] { this->thread(this->second).registers_in_transit = false; });
+
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+        const auto status = caller.get();
+        caller_returned = true;
+
+        EXPECT_EQ(0u, stops_in_transit);
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(second_rax, buffer.read().Rax);
+        EXPECT_TRUE(second_vcpu.get());
+    }
+
+    TEST_F(RunningThreadContextTest, GetWaitsForAThreadSwitchedOutForAnotherOne)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        const auto ready = this->create_thread(20);
+        this->thread(ready).setup_if_necessary(this->emu->vcpu(1).cpu, this->emu->process);
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+
+        const auto status = this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
+            return syscalls::handle_NtGetContextThread(this->context(0), this->second, buffer); //
+        });
+        caller_returned = true;
+
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(second_rax, buffer.read().Rax);
+        EXPECT_TRUE(second_vcpu.get());
+        EXPECT_EQ(&this->thread(ready), this->emu->vcpu(1).active_thread);
+        EXPECT_EQ(first_rax, this->rax(0));
+    }
+
+    TEST_F(RunningThreadContextTest, WaitForAVcpuThatIgnoresTheKickBlocksInsteadOfSpinning)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        this->wait_for_kick(this->emu->vcpu(1), caller);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto kicks = this->machine->second().stops.load();
+
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+        const auto status = caller.get();
+        caller_returned = true;
+
+        EXPECT_LT(kicks, 500u);
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_TRUE(second_vcpu.get());
     }
 }
