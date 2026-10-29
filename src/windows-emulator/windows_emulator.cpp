@@ -411,7 +411,8 @@ namespace sogen
 
             for (auto it = threads.begin(); it != threads.end();)
             {
-                if (!it->second.is_terminated() || it->second.ref_count > 0 || it->second.registers_in_transit)
+                if (!it->second.is_terminated() || it->second.ref_count > 0 || it->second.registers_in_transit ||
+                    it->second.pending_register_accesses != 0)
                 {
                     ++it;
                     continue;

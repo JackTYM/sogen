@@ -401,7 +401,7 @@ namespace sogen
         // be scheduled, deleted or have its registers accessed until the transfer is done.
         bool registers_in_transit{false};
         // Counts syscalls on other vCPUs waiting in wait_for_thread_registers for this thread. The thread must not be
-        // loaded onto a vCPU while it is non-zero.
+        // loaded onto a vCPU or deleted while it is non-zero.
         uint32_t pending_register_accesses{0};
         bool alerted{false};
         uint32_t create_flags{0};
@@ -697,7 +697,7 @@ namespace sogen
 
         static bool deleter(emulator_thread& t)
         {
-            return ref_counted_object::deleter(t) && t.is_terminated();
+            return ref_counted_object::deleter(t) && t.is_terminated() && t.pending_register_accesses == 0;
         }
 
       private:

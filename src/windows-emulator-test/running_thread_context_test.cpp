@@ -1,15 +1,19 @@
 #include "emulation_test_utils.hpp"
 #include <syscall_utils.hpp>
+#include <utils/finally.hpp>
 
 #include <cstring>
 #include <future>
 #include <map>
+#include <optional>
 #include <span>
 
 namespace sogen::syscalls
 {
     NTSTATUS handle_NtGetContextThread(const syscall_context& c, handle thread_handle, emulator_object<CONTEXT64> thread_context);
     NTSTATUS handle_NtSetContextThread(const syscall_context& c, handle thread_handle, emulator_object<CONTEXT64> thread_context);
+    NTSTATUS handle_NtTerminateThread(const syscall_context& c, handle thread_handle, NTSTATUS exit_status);
+    NTSTATUS handle_NtClose(const syscall_context& c, handle h);
 }
 
 namespace sogen::test
@@ -398,6 +402,48 @@ namespace sogen::test
                 return *this->emu->process.threads.get(thread_handle);
             }
 
+            bool thread_exists(const handle thread_handle)
+            {
+                return this->emu->synchronize([&] {
+                    return this->emu->process.threads.get(thread_handle) != nullptr; //
+                });
+            }
+
+            bool wait_for_deletion(const handle thread_handle)
+            {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                while (this->thread_exists(thread_handle))
+                {
+                    if (std::chrono::steady_clock::now() > deadline)
+                    {
+                        return false;
+                    }
+
+                    std::this_thread::yield();
+                }
+
+                return true;
+            }
+
+            void wait_for_kick(const vcpu_context& vcpu, const std::future<NTSTATUS>& caller)
+            {
+                while (!vcpu.switch_thread && caller.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                {
+                    std::this_thread::yield();
+                }
+            }
+
+            template <typename Handler>
+            std::future<NTSTATUS> access_from_first_vcpu(Handler handler, const handle thread_handle,
+                                                         const emulator_object<CONTEXT64> buffer)
+            {
+                return std::async(std::launch::async, [this, handler, thread_handle, buffer] {
+                    return this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
+                        return handler(this->context(0), thread_handle, buffer); //
+                    });
+                });
+            }
+
             std::unique_ptr<windows_emulator> emu{};
             two_vcpu_machine* machine{};
             handle first{};
@@ -486,5 +532,57 @@ namespace sogen::test
         EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
         EXPECT_EQ(second_rax, this->rax(1));
         EXPECT_EQ(first_rax, this->rax(0));
+    }
+
+    TEST_F(RunningThreadContextTest, ThreadExitingDuringAnAccessIsDeletedOnlyAfterIt)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        std::optional<bool> exists_during_access{};
+        const auto idle_thread =
+            this->emu->process.threads.store(emulator_thread{this->emu->memory, this->emu->process, 0, 0, 0x100000, 0, 9, true});
+        this->thread(idle_thread).await_host_condition = [&] {
+            if (!exists_during_access)
+            {
+                exists_during_access = this->emu->process.threads.get(this->second) != nullptr;
+            }
+
+            return false;
+        };
+
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        auto& vcpu = this->emu->vcpu(1);
+        this->wait_for_kick(vcpu, caller);
+        this->emu->dispatch_on_cpu(vcpu.cpu, [&] {
+            syscalls::handle_NtClose(this->context(1), this->second);
+            syscalls::handle_NtTerminateThread(this->context(1), this->second, STATUS_SUCCESS);
+        });
+        auto second_vcpu = std::async(std::launch::async, [&] { return this->emu->perform_thread_switch(vcpu); });
+        const auto _ = utils::finally([&] { this->emu->stop(); });
+
+        EXPECT_EQ(STATUS_SUCCESS, caller.get());
+        EXPECT_EQ(second_rax, this->emu->synchronize([&] { return buffer.read().Rax; }));
+        EXPECT_EQ(std::optional{true}, exists_during_access);
+        EXPECT_TRUE(this->wait_for_deletion(this->second));
+    }
+
+    TEST_F(RunningThreadContextTest, ThreadClosedAfterExitingDuringAnAccessIsDeletedOnlyAfterIt)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        auto& vcpu = this->emu->vcpu(1);
+        this->wait_for_kick(vcpu, caller);
+
+        const auto exists_during_access = this->emu->dispatch_on_cpu(vcpu.cpu, [&] {
+            syscalls::handle_NtTerminateThread(this->context(1), this->second, STATUS_SUCCESS);
+            syscalls::handle_NtClose(this->context(1), this->second);
+            return this->emu->process.threads.get(this->second) != nullptr;
+        });
+        auto second_vcpu = std::async(std::launch::async, [&] { return this->emu->perform_thread_switch(vcpu); });
+        const auto _ = utils::finally([&] { this->emu->stop(); });
+
+        EXPECT_TRUE(exists_during_access);
+        EXPECT_EQ(STATUS_SUCCESS, caller.get());
+        EXPECT_EQ(second_rax, this->emu->synchronize([&] { return buffer.read().Rax; }));
+        EXPECT_TRUE(this->wait_for_deletion(this->second));
     }
 }
