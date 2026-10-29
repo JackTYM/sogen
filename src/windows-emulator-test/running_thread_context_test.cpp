@@ -41,6 +41,8 @@ namespace sogen::test
         constexpr uint32_t reserved_eax = 0x5001;
         constexpr uint32_t written_eax = 0x6001;
         constexpr uint32_t written_dr7 = 0x401;
+        constexpr uint32_t get_context_syscall_id = 0x42;
+        constexpr uint64_t instrumentation_callback = 0x20000;
 
         template <typename Cpu>
         class register_file_cpu : public Cpu
@@ -524,6 +526,27 @@ namespace sogen::test
                     this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
                         const auto c = this->context(0);
                         forward_syscall(c, handler);
+                    });
+                });
+            }
+
+            void register_get_context_syscall()
+            {
+                std::array<std::byte, 8> stub{std::byte{0x4C}, std::byte{0x8B}, std::byte{0xD1}, std::byte{0xB8}};
+                std::memcpy(stub.data() + 4, &get_context_syscall_id, sizeof(get_context_syscall_id));
+                this->emu->dispatcher.setup({exported_symbol{.name = "NtGetContextThread"}}, stub, {}, {});
+            }
+
+            // Issues NtGetContextThread from vCPU 0 through the dispatcher, as the syscall hook does.
+            std::future<void> dispatch_get_context_from_first_vcpu(const handle thread_handle, const emulator_object<CONTEXT64> buffer)
+            {
+                auto& cpu = this->emu->vcpu(0).x64_cpu();
+                cpu.reg(x86_register::eax, get_context_syscall_id);
+                cpu.reg(x86_register::r10, thread_handle.bits);
+                cpu.reg(x86_register::rdx, buffer.value());
+                return std::async(std::launch::async, [this] {
+                    this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [this] {
+                        this->emu->dispatcher.dispatch(*this->emu, this->emu->vcpu(0)); //
                     });
                 });
             }
@@ -1035,5 +1058,44 @@ namespace sogen::test
         EXPECT_EQ(this->retriggered_ip(), this->rip(0));
         EXPECT_EQ(first_rax, this->rax(0));
         EXPECT_EQ(untouched_rax, buffer.read().Rax);
+    }
+
+    TEST_F(RunningThreadContextTest, RetriedSyscallIsReportedAndRedirectedOnlyOnce)
+    {
+        this->register_get_context_syscall();
+        this->emu->process.instrumentation_callback = instrumentation_callback;
+        size_t reported{0};
+        this->emu->callbacks.on_syscall = [&](uint32_t, std::string_view) {
+            ++reported;
+            return instruction_hook_continuation::run_instruction;
+        };
+
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        auto interrupted = this->dispatch_get_context_from_first_vcpu(this->second, buffer);
+        this->wait_for_kick(this->emu->vcpu(1), interrupted);
+        this->emu->stop();
+        interrupted.get();
+        const auto interrupted_ip = this->rip(0);
+        const auto interrupted_r10 = this->emu->vcpu(0).x64_cpu().reg(x86_register::r10);
+        const auto reported_when_interrupted = reported;
+
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_call = this->unlocked_host_wait_on_second_vcpu(entered, released);
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+        this->emu->vcpu(0).x64_cpu().reg(x86_register::rip, interrupted_ip + this->emu->abi().syscall_abi().syscall_instruction_size());
+        this->dispatch_get_context_from_first_vcpu(this->second, buffer).get();
+        released = true;
+        host_call.get();
+
+        EXPECT_EQ(this->retriggered_ip(), interrupted_ip);
+        EXPECT_EQ(this->second.bits, interrupted_r10);
+        EXPECT_EQ(1u, reported_when_interrupted);
+        EXPECT_EQ(1u, reported);
+        EXPECT_EQ(second_rax, buffer.read().Rax);
+        EXPECT_EQ(STATUS_SUCCESS, this->rax(0));
+        EXPECT_EQ(thread_ip, this->emu->vcpu(0).x64_cpu().reg(x86_register::r10));
+        EXPECT_EQ(instrumentation_callback - this->emu->abi().syscall_abi().syscall_instruction_size(), this->rip(0));
     }
 }

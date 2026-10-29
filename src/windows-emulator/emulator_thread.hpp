@@ -406,6 +406,9 @@ namespace sogen
         uint32_t pending_register_accesses{0};
         // The vCPU that loaded this thread last. The thread is still loaded while it is that vCPU's active thread.
         vcpu_context* last_vcpu{};
+        // The address of a syscall that was retriggered and runs again when the thread continues, so that it is
+        // reported once.
+        std::optional<uint64_t> retriggered_syscall_ip{};
         bool alerted{false};
         uint32_t create_flags{0};
         uint32_t suspended{0};
