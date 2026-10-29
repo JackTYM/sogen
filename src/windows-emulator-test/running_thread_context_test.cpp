@@ -1188,13 +1188,14 @@ namespace sogen::test
         const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
         auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
         auto& vcpu = this->emu->vcpu(1);
+        const auto kicks_under_lock = [this] { return this->emu->synchronize([this] { return this->machine->second().stops.load(); }); };
         this->wait_for_kick(vcpu, caller);
-        const auto first_kicks = this->machine->second().stops.load();
+        const auto first_kicks = kicks_under_lock();
 
-        vcpu.switch_thread = false;
+        this->emu->synchronize([&] { vcpu.switch_thread = false; });
         this->wait_for_kick(vcpu, caller);
         const auto kicked_again = vcpu.switch_thread.load();
-        const auto kicks = this->machine->second().stops.load();
+        const auto kicks = kicks_under_lock();
 
         std::atomic_bool caller_returned{false};
         auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
