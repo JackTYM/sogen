@@ -1182,4 +1182,101 @@ namespace sogen::test
         EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
         EXPECT_EQ(second_rax, this->rax(1));
     }
+
+    TEST_F(RunningThreadContextTest, KickThatIsLostIsRepeated)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        auto& vcpu = this->emu->vcpu(1);
+        this->wait_for_kick(vcpu, caller);
+        const auto first_kicks = this->machine->second().stops.load();
+
+        vcpu.switch_thread = false;
+        this->wait_for_kick(vcpu, caller);
+        const auto kicked_again = vcpu.switch_thread.load();
+        const auto kicks = this->machine->second().stops.load();
+
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+        const auto status = caller.get();
+        caller_returned = true;
+
+        EXPECT_TRUE(kicked_again);
+        EXPECT_GT(kicks, first_kicks);
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(second_rax, buffer.read().Rax);
+        EXPECT_TRUE(second_vcpu.get());
+    }
+
+    TEST_F(RunningThreadContextTest, SetOfAWaitingCallerIsInPlaceWhenItContinues)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        auto& vcpu = this->emu->vcpu(1);
+        this->wait_for_kick(vcpu, caller);
+
+        const auto caller_context = this->context_buffer(0x800, CONTEXT_INTEGER_64, written_rax);
+        const auto set_status = this->emu->dispatch_on_cpu(vcpu.cpu, [&] {
+            return syscalls::handle_NtSetContextThread(this->context(1), this->first, caller_context); //
+        });
+
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+        const auto status = caller.get();
+        caller_returned = true;
+
+        EXPECT_EQ(STATUS_SUCCESS, set_status);
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_TRUE(second_vcpu.get());
+        EXPECT_EQ(second_rax, buffer.read().Rax);
+        EXPECT_EQ(written_rax, this->rax(0));
+        EXPECT_EQ(thread_ip, this->rip(0));
+    }
+
+    TEST_F(RunningThreadContextTest, ThreadInAnUnlockedHostCallContinuesAtAnIpSetMeanwhile)
+    {
+        constexpr uint64_t new_ip = 0x30000;
+        const auto buffer = this->context_buffer(0, CONTEXT_CONTROL_64);
+        auto value = buffer.read();
+        value.Rip = new_ip;
+        buffer.write(value);
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_call = this->unlocked_syscall_on_second_vcpu(entered, released);
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+
+        const auto status = this->access_from_first_vcpu(syscalls::handle_NtSetContextThread, this->second, buffer).get();
+        released = true;
+        host_call.get();
+
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(new_ip - this->emu->abi().syscall_abi().syscall_instruction_size(), this->rip(1));
+        EXPECT_EQ(STATUS_SUCCESS, this->rax(1));
+    }
+
+    TEST_F(RunningThreadContextTest, WowDebugRegistersReachAThreadInAnUnlockedHostCall)
+    {
+        const auto reserved = this->give_wow64_context(this->second);
+        const auto buffer = this->wow64_debug_register_write();
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_call = this->unlocked_host_wait_on_second_vcpu(entered, released);
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+
+        const auto status = this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
+            return syscalls::handle_NtSetInformationThread(this->context(0), this->second, ThreadWow64Context, buffer.value(),
+                                                           sizeof(WOW64_CONTEXT));
+        });
+        released = true;
+        host_call.get();
+
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_EQ(0u, this->machine->second().stops.load());
+        EXPECT_EQ(written_eax, reserved.read().Context.Eax);
+        EXPECT_EQ(written_dr7, this->emu->vcpu(1).x64_cpu().reg(x86_register::dr7));
+        EXPECT_EQ(second_rax, this->rax(1));
+        EXPECT_EQ(first_rax, this->rax(0));
+    }
 }
