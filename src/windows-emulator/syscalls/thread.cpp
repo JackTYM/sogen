@@ -135,7 +135,12 @@ namespace sogen
                     if (needs_switch)
                     {
                         c.vcpu.active_thread->save(c.emu);
-                        c.win_emu.wait_for_thread_registers(c.vcpu, *thread);
+                        if (!c.win_emu.wait_for_thread_registers(c.vcpu, *thread))
+                        {
+                            c.vcpu.active_thread->restore(c.emu, c.proc.gdt_base);
+                            return STATUS_UNSUCCESSFUL;
+                        }
+
                         thread->restore(c.emu, c.proc.gdt_base);
                     }
 
@@ -1108,13 +1113,13 @@ namespace sogen
         // reports. A thread that has not run yet is described, as on Windows, by its initial context
         // (RtlUserThreadStart with the start routine and argument) that LdrInitializeThunk continues into.
         template <typename Context, typename Access>
-        void access_thread_context(const syscall_context& c, emulator_thread& thread, Access&& access)
+        NTSTATUS access_thread_context(const syscall_context& c, emulator_thread& thread, Access&& access)
         {
             auto& active = *c.vcpu.active_thread;
             if (&thread == &active)
             {
                 access();
-                return;
+                return STATUS_SUCCESS;
             }
 
             active.save(c.emu);
@@ -1122,7 +1127,11 @@ namespace sogen
                 active.restore(c.emu, c.proc.gdt_base); //
             });
 
-            c.win_emu.wait_for_thread_registers(c.vcpu, thread);
+            if (!c.win_emu.wait_for_thread_registers(c.vcpu, thread))
+            {
+                return STATUS_UNSUCCESSFUL;
+            }
+
             thread.restore(c.emu, c.proc.gdt_base);
             if (!thread.setup_done && !c.proc.is_wow64_process)
             {
@@ -1140,7 +1149,7 @@ namespace sogen
 
             if (!access())
             {
-                return;
+                return STATUS_SUCCESS;
             }
 
             if (initial_context)
@@ -1153,6 +1162,8 @@ namespace sogen
             {
                 thread.save(c.emu);
             }
+
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtGetContextThread(const syscall_context& c, const handle thread_handle,
@@ -1178,26 +1189,35 @@ namespace sogen
                     c.win_emu.callbacks.on_suspicious_activity("Reading debug registers");
                 }
 
-                access_thread_context<arm64_context>(c, *thread, [&] {
+                const auto status = access_thread_context<arm64_context>(c, *thread, [&] {
                     store_context(c.emu, context);
                     return false;
                 });
+                if (status != STATUS_SUCCESS)
+                {
+                    return status;
+                }
+
                 c.emu.write_memory(thread_context.value(), context);
                 return STATUS_SUCCESS;
             }
 
-            thread_context.access([&](CONTEXT64& context) {
-                if ((context.ContextFlags & CONTEXT_DEBUG_REGISTERS_64) == CONTEXT_DEBUG_REGISTERS_64)
-                {
-                    c.win_emu.callbacks.on_suspicious_activity("Reading debug registers");
-                }
+            auto context = thread_context.read();
+            if ((context.ContextFlags & CONTEXT_DEBUG_REGISTERS_64) == CONTEXT_DEBUG_REGISTERS_64)
+            {
+                c.win_emu.callbacks.on_suspicious_activity("Reading debug registers");
+            }
 
-                access_thread_context<CONTEXT64>(c, *thread, [&] {
-                    store_context(c.emu, context);
-                    return false;
-                });
+            const auto status = access_thread_context<CONTEXT64>(c, *thread, [&] {
+                store_context(c.emu, context);
+                return false;
             });
+            if (status != STATUS_SUCCESS)
+            {
+                return status;
+            }
 
+            thread_context.write(context);
             return STATUS_SUCCESS;
         }
 
@@ -1219,12 +1239,16 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                access_thread_context<arm64_context>(c, *thread, [&] {
+                const auto status = access_thread_context<arm64_context>(c, *thread, [&] {
                     load_context(c.emu, context);
                     // X18 always addresses the thread's TEB; the kernel does not take it from a user context.
                     c.win_emu.abi().install_thread_environment(c.emu, thread->teb64->value());
                     return true;
                 });
+                if (status != STATUS_SUCCESS)
+                {
+                    return status;
+                }
 
                 if ((context.ContextFlags & arm64_context_debug_registers) == arm64_context_debug_registers)
                 {
@@ -1235,10 +1259,14 @@ namespace sogen
             }
 
             const auto context = thread_context.read();
-            access_thread_context<CONTEXT64>(c, *thread, [&] {
+            const auto status = access_thread_context<CONTEXT64>(c, *thread, [&] {
                 load_context(c.emu, context);
                 return true;
             });
+            if (status != STATUS_SUCCESS)
+            {
+                return status;
+            }
 
             if ((context.ContextFlags & CONTEXT_DEBUG_REGISTERS_64) == CONTEXT_DEBUG_REGISTERS_64)
             {

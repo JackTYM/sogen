@@ -631,8 +631,9 @@ namespace sogen
         // Blocks until the thread's saved registers are current: no vCPU is transferring them and no other vCPU has the
         // thread loaded. A vCPU that has it loaded is asked to switch away, which saves them. The calling vCPU's active
         // thread must already be saved, so that two vCPUs accessing each other's thread do not wait for each other.
-        // Requires the kernel lock, which it releases while waiting.
-        void wait_for_thread_registers(vcpu_context& vcpu, emulator_thread& thread);
+        // Requires the kernel lock, which it releases while waiting. Returns false if the emulator stops first, in which
+        // case the thread's registers must not be accessed.
+        [[nodiscard]] bool wait_for_thread_registers(vcpu_context& vcpu, emulator_thread& thread);
 
       private:
         void set_foreground_window(hwnd window);

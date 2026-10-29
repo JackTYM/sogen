@@ -24,6 +24,7 @@ namespace sogen::test
         constexpr uint64_t first_rax = 0x1001;
         constexpr uint64_t second_rax = 0x2001;
         constexpr uint64_t written_rax = 0x3001;
+        constexpr uint64_t untouched_rax = 0x4001;
 
         template <typename Cpu>
         class register_file_cpu : public Cpu
@@ -584,5 +585,36 @@ namespace sogen::test
         EXPECT_EQ(STATUS_SUCCESS, caller.get());
         EXPECT_EQ(second_rax, this->emu->synchronize([&] { return buffer.read().Rax; }));
         EXPECT_TRUE(this->wait_for_deletion(this->second));
+    }
+
+    TEST_F(RunningThreadContextTest, GetInterruptedByAStopFailsWithoutReturningRegisters)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL, untouched_rax);
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        this->wait_for_kick(this->emu->vcpu(1), caller);
+        this->emu->stop();
+
+        EXPECT_EQ(STATUS_UNSUCCESSFUL, caller.get());
+        EXPECT_EQ(untouched_rax, buffer.read().Rax);
+        EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
+        EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_EQ(second_rax, this->rax(1));
+        EXPECT_EQ(0u, this->thread(this->second).pending_register_accesses);
+    }
+
+    TEST_F(RunningThreadContextTest, SetInterruptedByAStopFailsWithoutWritingRegisters)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT_INTEGER_64, written_rax);
+        auto caller = this->access_from_first_vcpu(syscalls::handle_NtSetContextThread, this->second, buffer);
+        this->wait_for_kick(this->emu->vcpu(1), caller);
+        this->emu->stop();
+
+        EXPECT_EQ(STATUS_UNSUCCESSFUL, caller.get());
+        EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_EQ(second_rax, this->rax(1));
+
+        auto& vcpu = this->emu->vcpu(0);
+        this->thread(this->second).restore(vcpu.cpu, this->emu->process.gdt_base);
+        EXPECT_EQ(stale_rax, this->rax(0));
     }
 }
