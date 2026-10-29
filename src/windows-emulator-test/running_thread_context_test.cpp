@@ -3,6 +3,7 @@
 #include <utils/finally.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -20,6 +21,8 @@ namespace sogen::syscalls
 {
     NTSTATUS handle_NtGetContextThread(const syscall_context& c, handle thread_handle, emulator_object<CONTEXT64> thread_context);
     NTSTATUS handle_NtSetContextThread(const syscall_context& c, handle thread_handle, emulator_object<CONTEXT64> thread_context);
+    NTSTATUS handle_NtSetInformationThread(const syscall_context& c, handle thread_handle, THREADINFOCLASS info_class,
+                                           uint64_t thread_information, uint32_t thread_information_length);
     NTSTATUS handle_NtTerminateThread(const syscall_context& c, handle thread_handle, NTSTATUS exit_status);
     NTSTATUS handle_NtClose(const syscall_context& c, handle h);
 }
@@ -34,6 +37,9 @@ namespace sogen::test
         constexpr uint64_t written_rax = 0x3001;
         constexpr uint64_t untouched_rax = 0x4001;
         constexpr uint64_t thread_ip = 0x10000;
+        constexpr uint32_t reserved_eax = 0x5001;
+        constexpr uint32_t written_eax = 0x6001;
+        constexpr uint32_t written_dr7 = 0x401;
 
         template <typename Cpu>
         class register_file_cpu : public Cpu
@@ -487,12 +493,71 @@ namespace sogen::test
                 return true;
             }
 
-            void wait_for_kick(const vcpu_context& vcpu, const std::future<NTSTATUS>& caller)
+            template <typename Result>
+            void wait_for_kick(const vcpu_context& vcpu, const std::future<Result>& caller)
             {
                 while (!vcpu.switch_thread && caller.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
                 {
                     std::this_thread::yield();
                 }
+            }
+
+            // Issues a syscall from vCPU 0 through the dispatcher's forwarding, which writes the status and rewinds a
+            // retriggered syscall.
+            template <typename... Args>
+            std::future<void> syscall_from_first_vcpu(NTSTATUS (*handler)(const syscall_context&, Args...),
+                                                      const std::array<uint64_t, sizeof...(Args)> arguments)
+            {
+                constexpr std::array argument_registers{x86_register::r10, x86_register::rdx, x86_register::r8, x86_register::r9};
+                for (size_t i = 0; i < arguments.size(); ++i)
+                {
+                    this->emu->vcpu(0).x64_cpu().reg(argument_registers.at(i), arguments.at(i));
+                }
+
+                return std::async(std::launch::async, [this, handler] {
+                    this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
+                        const auto c = this->context(0);
+                        forward_syscall(c, handler);
+                    });
+                });
+            }
+
+            uint64_t retriggered_ip() const
+            {
+                return thread_ip - this->emu->abi().syscall_abi().syscall_instruction_size();
+            }
+
+            uint64_t saved_register(const handle thread_handle, const x86_register reg)
+            {
+                auto& cpu = this->emu->vcpu(0).x64_cpu();
+                const auto live = cpu.save_registers();
+                this->thread(thread_handle).load_registers(cpu);
+                const auto value = cpu.reg(reg);
+                cpu.restore_registers(live);
+                return value;
+            }
+
+            emulator_object<WOW64_CPURESERVED> give_wow64_context(const handle thread_handle)
+            {
+                this->emu->process.is_wow64_process = true;
+                const auto address = this->emu->memory.allocate_memory(0x1000, memory_permission::read_write);
+                const emulator_object<WOW64_CPURESERVED> reserved{this->emu->memory, address};
+                WOW64_CPURESERVED value{};
+                value.Context.Eax = reserved_eax;
+                reserved.write(value);
+                this->thread(thread_handle).wow64_cpu_reserved = reserved;
+                return reserved;
+            }
+
+            emulator_object<WOW64_CONTEXT> wow64_debug_register_write()
+            {
+                const emulator_object<WOW64_CONTEXT> buffer{this->emu->memory, this->storage + 0x800};
+                WOW64_CONTEXT value{};
+                value.ContextFlags = CONTEXT_DEBUG_REGISTERS_32 | CONTEXT_INTEGER_32;
+                value.Dr7 = written_dr7;
+                value.Eax = written_eax;
+                buffer.write(value);
+                return buffer;
             }
 
             template <typename Handler>
@@ -642,38 +707,77 @@ namespace sogen::test
         EXPECT_TRUE(this->wait_for_deletion(this->second));
     }
 
-    TEST_F(RunningThreadContextTest, GetInterruptedByAStopFailsWithoutReturningRegisters)
+    TEST_F(RunningThreadContextTest, GetInterruptedByAStopIsRetriedWithoutReturningRegisters)
     {
         const auto buffer = this->context_buffer(0, CONTEXT64_ALL, untouched_rax);
-        auto caller = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer);
+        auto caller = this->syscall_from_first_vcpu(syscalls::handle_NtGetContextThread, {this->second.bits, buffer.value()});
         this->wait_for_kick(this->emu->vcpu(1), caller);
         this->emu->stop();
+        caller.get();
 
-        EXPECT_EQ(STATUS_UNSUCCESSFUL, caller.get());
+        EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_EQ(this->retriggered_ip(), this->emu->vcpu(0).x64_cpu().reg(x86_register::rip));
         EXPECT_EQ(untouched_rax, buffer.read().Rax);
         EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
-        EXPECT_EQ(first_rax, this->rax(0));
         EXPECT_EQ(second_rax, this->rax(1));
         EXPECT_EQ(0u, this->thread(this->second).pending_register_accesses);
         EXPECT_FALSE(this->emu->vcpu(0).active_thread_saved);
     }
 
-    TEST_F(RunningThreadContextTest, SetInterruptedByAStopFailsWithoutWritingRegisters)
+    TEST_F(RunningThreadContextTest, SetInterruptedByAStopIsRetriedWithoutWritingRegisters)
     {
         const auto buffer = this->context_buffer(0, CONTEXT_INTEGER_64, written_rax);
-        auto caller = this->access_from_first_vcpu(syscalls::handle_NtSetContextThread, this->second, buffer);
+        auto caller = this->syscall_from_first_vcpu(syscalls::handle_NtSetContextThread, {this->second.bits, buffer.value()});
         this->wait_for_kick(this->emu->vcpu(1), caller);
         this->emu->stop();
+        caller.get();
 
-        EXPECT_EQ(STATUS_UNSUCCESSFUL, caller.get());
         EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_EQ(this->retriggered_ip(), this->emu->vcpu(0).x64_cpu().reg(x86_register::rip));
         EXPECT_EQ(second_rax, this->rax(1));
+        EXPECT_EQ(stale_rax, this->saved_register(this->second, x86_register::rax));
         EXPECT_EQ(0u, this->thread(this->second).pending_register_accesses);
         EXPECT_FALSE(this->emu->vcpu(0).active_thread_saved);
+    }
 
-        auto& vcpu = this->emu->vcpu(0);
-        this->thread(this->second).restore(vcpu.cpu, this->emu->process.gdt_base);
-        EXPECT_EQ(stale_rax, this->rax(0));
+    TEST_F(RunningThreadContextTest, WowDebugRegistersReachAThreadRunningOnAnotherVcpu)
+    {
+        const auto reserved = this->give_wow64_context(this->second);
+        const auto buffer = this->wow64_debug_register_write();
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+
+        const auto status = this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
+            return syscalls::handle_NtSetInformationThread(this->context(0), this->second, ThreadWow64Context, buffer.value(),
+                                                           sizeof(WOW64_CONTEXT));
+        });
+        caller_returned = true;
+
+        EXPECT_EQ(STATUS_SUCCESS, status);
+        EXPECT_TRUE(second_vcpu.get());
+        EXPECT_EQ(written_eax, reserved.read().Context.Eax);
+        EXPECT_EQ(&this->thread(this->second), this->emu->vcpu(1).active_thread);
+        EXPECT_EQ(written_dr7, this->emu->vcpu(1).x64_cpu().reg(x86_register::dr7));
+        EXPECT_EQ(second_rax, this->rax(1));
+        EXPECT_EQ(first_rax, this->rax(0));
+    }
+
+    TEST_F(RunningThreadContextTest, WowDebugRegisterWriteInterruptedByAStopIsRetriedWithoutWritingAnything)
+    {
+        const auto reserved = this->give_wow64_context(this->second);
+        const auto buffer = this->wow64_debug_register_write();
+        auto caller = this->syscall_from_first_vcpu(syscalls::handle_NtSetInformationThread,
+                                                    {this->second.bits, ThreadWow64Context, buffer.value(), sizeof(WOW64_CONTEXT)});
+        this->wait_for_kick(this->emu->vcpu(1), caller);
+        this->emu->stop();
+        caller.get();
+
+        EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_EQ(this->retriggered_ip(), this->emu->vcpu(0).x64_cpu().reg(x86_register::rip));
+        EXPECT_EQ(0, reserved.read().Flags);
+        EXPECT_EQ(reserved_eax, reserved.read().Context.Eax);
+        EXPECT_EQ(0u, this->saved_register(this->second, x86_register::dr7));
+        EXPECT_EQ(0u, this->thread(this->second).pending_register_accesses);
     }
 
     TEST_F(RunningThreadContextTest, ThreadRunningOnAnotherVcpuIsDeletedOnlyAfterItsVcpuUnloadsIt)

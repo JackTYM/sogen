@@ -60,6 +60,20 @@ namespace sogen
                 const emulator_object<WOW64_CONTEXT> context_obj{c.emu, thread_information};
                 const auto new_wow64_context = context_obj.read();
 
+                const bool sets_debug_registers =
+                    (new_wow64_context.ContextFlags & CONTEXT_DEBUG_REGISTERS_32) == CONTEXT_DEBUG_REGISTERS_32;
+                const bool needs_switch = sets_debug_registers && thread != c.vcpu.active_thread;
+                if (needs_switch)
+                {
+                    c.vcpu.active_thread->save(c.emu);
+                    if (!c.win_emu.wait_for_thread_registers(c.vcpu, *thread))
+                    {
+                        c.vcpu.active_thread->restore(c.emu, c.proc.gdt_base);
+                        c.retrigger_syscall = true;
+                        return STATUS_UNSUCCESSFUL;
+                    }
+                }
+
                 // Update the persistent context for future queries
                 thread->wow64_cpu_reserved->access([&](WOW64_CPURESERVED& ctx) {
                     ctx.Flags |= WOW64_CPURESERVED_FLAG_RESET_STATE;
@@ -129,18 +143,10 @@ namespace sogen
                 // WOW64_CPURESERVED block that wow64cpu reloads on resume. They must be programmed into
                 // the VP directly, otherwise a 32-bit hardware breakpoint armed via the thread context
                 // (e.g. t6r's CEG single-step trick) never arms and never fires.
-                if ((new_wow64_context.ContextFlags & CONTEXT_DEBUG_REGISTERS_32) == CONTEXT_DEBUG_REGISTERS_32)
+                if (sets_debug_registers)
                 {
-                    const bool needs_switch = thread != c.vcpu.active_thread;
                     if (needs_switch)
                     {
-                        c.vcpu.active_thread->save(c.emu);
-                        if (!c.win_emu.wait_for_thread_registers(c.vcpu, *thread))
-                        {
-                            c.vcpu.active_thread->restore(c.emu, c.proc.gdt_base);
-                            return STATUS_UNSUCCESSFUL;
-                        }
-
                         thread->restore(c.emu, c.proc.gdt_base);
                     }
 
@@ -1129,6 +1135,7 @@ namespace sogen
 
             if (!c.win_emu.wait_for_thread_registers(c.vcpu, thread))
             {
+                c.retrigger_syscall = true;
                 return STATUS_UNSUCCESSFUL;
             }
 
