@@ -1115,6 +1115,20 @@ namespace sogen
             cpu_context::save(dynamic_cast<arm64_cpu&>(cpu), context);
         }
 
+        bool is_saved_in_syscall(windows_emulator& win_emu, const emulator_thread& thread)
+        {
+            for (uint32_t i = 0; i < win_emu.vcpu_count(); ++i)
+            {
+                const auto& vcpu = win_emu.vcpu(i);
+                if (vcpu.active_thread == &thread)
+                {
+                    return vcpu.active_thread_saved;
+                }
+            }
+
+            return false;
+        }
+
         // Runs access with the thread's user-mode registers on the calling vCPU and keeps any change it
         // reports. A thread that has not run yet is described, as on Windows, by its initial context
         // (RtlUserThreadStart with the start routine and argument) that LdrInitializeThunk continues into.
@@ -1154,9 +1168,25 @@ namespace sogen
                 load_context(c.emu, c.emu.read_memory<Context>(*initial_context));
             }
 
+            // Windows shows a thread inside a syscall after the syscall instruction. Its saved registers keep the
+            // instruction itself, which its vCPU continues after and a retriggered syscall rewinds to.
+            const auto& abi = c.win_emu.abi();
+            const auto in_syscall = is_saved_in_syscall(c.win_emu, thread);
+            const auto syscall_ip = abi.instruction_pointer(c.emu);
+            const auto return_ip = syscall_ip + abi.syscall_abi().syscall_instruction_size();
+            if (in_syscall)
+            {
+                abi.instruction_pointer(c.emu, return_ip);
+            }
+
             if (!access())
             {
                 return STATUS_SUCCESS;
+            }
+
+            if (in_syscall && abi.instruction_pointer(c.emu) == return_ip)
+            {
+                abi.instruction_pointer(c.emu, syscall_ip);
             }
 
             if (initial_context)

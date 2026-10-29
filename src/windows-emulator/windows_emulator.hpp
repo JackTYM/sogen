@@ -611,7 +611,8 @@ namespace sogen
         // kernel lock, which is held again when this returns. Other vCPUs dispatch meanwhile, so the dispatch
         // marker is set aside for that time. The dispatching vCPU's thread counts as saved meanwhile, so that a
         // context access from another vCPU does not wait for f; its registers, including any change made to them,
-        // are reloaded before this returns.
+        // are reloaded before this returns. Within a dispatch, only a syscall handler may call this, as an access
+        // treats the saved registers as the syscall's hook frame.
         template <typename F>
         decltype(auto) run_without_kernel_lock(F&& f)
         {

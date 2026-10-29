@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace sogen::syscalls
@@ -446,6 +447,11 @@ namespace sogen::test
                 return this->emu->vcpu(vcpu).x64_cpu().reg(x86_register::rax);
             }
 
+            uint64_t rip(const size_t vcpu)
+            {
+                return this->emu->vcpu(vcpu).x64_cpu().reg(x86_register::rip);
+            }
+
             // What the worker of vCPU 1 does when its guest code stops: switch threads, if it was asked to.
             std::future<bool> run_second_vcpu_worker(const std::atomic_bool& caller_returned)
             {
@@ -527,6 +533,11 @@ namespace sogen::test
                 return thread_ip - this->emu->abi().syscall_abi().syscall_instruction_size();
             }
 
+            uint64_t after_syscall_ip() const
+            {
+                return thread_ip + this->emu->abi().syscall_abi().syscall_instruction_size();
+            }
+
             uint64_t saved_register(const handle thread_handle, const x86_register reg)
             {
                 auto& cpu = this->emu->vcpu(0).x64_cpu();
@@ -569,6 +580,22 @@ namespace sogen::test
                             entered = true;
                             this->wait_until(released);
                         });
+                    });
+                });
+            }
+
+            // The same host call made by a syscall handler on vCPU 1, which writes the status and rewinds a moved IP.
+            std::future<void> unlocked_syscall_on_second_vcpu(std::atomic_bool& entered, const std::atomic_bool& released)
+            {
+                return std::async(std::launch::async, [this, &entered, &released] {
+                    this->emu->dispatch_on_cpu(this->emu->vcpu(1).cpu, [&] {
+                        const auto c = this->context(1);
+                        const auto ip = c.emu.read_instruction_pointer();
+                        this->emu->run_without_kernel_lock([&] {
+                            entered = true;
+                            this->wait_until(released);
+                        });
+                        write_syscall_result(c, STATUS_SUCCESS, ip);
                     });
                 });
             }
@@ -964,5 +991,49 @@ namespace sogen::test
         EXPECT_LT(kicks, 500u);
         EXPECT_EQ(STATUS_SUCCESS, status);
         EXPECT_TRUE(second_vcpu.get());
+    }
+
+    TEST_F(RunningThreadContextTest, ThreadInAnUnlockedHostCallShowsTheInstructionAfterItsSyscall)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT_CONTROL_64 | CONTEXT_INTEGER_64);
+        std::atomic_bool entered{false};
+        std::atomic_bool released{false};
+        auto host_call = this->unlocked_syscall_on_second_vcpu(entered, released);
+        const auto release = utils::finally([&] { released = true; });
+        this->wait_until(entered);
+
+        const auto get_status = this->access_from_first_vcpu(syscalls::handle_NtGetContextThread, this->second, buffer).get();
+        const auto set_status = this->access_from_first_vcpu(syscalls::handle_NtSetContextThread, this->second, buffer).get();
+        released = true;
+        host_call.get();
+
+        EXPECT_EQ(STATUS_SUCCESS, get_status);
+        EXPECT_EQ(STATUS_SUCCESS, set_status);
+        EXPECT_EQ(this->after_syscall_ip(), buffer.read().Rip);
+        EXPECT_EQ(thread_ip, this->rip(1));
+        EXPECT_EQ(STATUS_SUCCESS, this->rax(1));
+        EXPECT_EQ(first_rax, this->rax(0));
+    }
+
+    TEST_F(RunningThreadContextTest, WaitingCallerShowsTheInstructionAfterItsSyscallAndIsStillRetried)
+    {
+        const auto buffer = this->context_buffer(0, CONTEXT64_ALL, untouched_rax);
+        auto caller = this->syscall_from_first_vcpu(syscalls::handle_NtGetContextThread, {this->second.bits, buffer.value()});
+        this->wait_for_kick(this->emu->vcpu(1), caller);
+
+        const auto caller_context = this->context_buffer(0x800, CONTEXT_CONTROL_64 | CONTEXT_INTEGER_64);
+        const auto [get_status, set_status] = this->emu->dispatch_on_cpu(this->emu->vcpu(1).cpu, [&] {
+            return std::pair{syscalls::handle_NtGetContextThread(this->context(1), this->first, caller_context),
+                             syscalls::handle_NtSetContextThread(this->context(1), this->first, caller_context)};
+        });
+        this->emu->stop();
+        caller.get();
+
+        EXPECT_EQ(STATUS_SUCCESS, get_status);
+        EXPECT_EQ(STATUS_SUCCESS, set_status);
+        EXPECT_EQ(this->after_syscall_ip(), caller_context.read().Rip);
+        EXPECT_EQ(this->retriggered_ip(), this->rip(0));
+        EXPECT_EQ(first_rax, this->rax(0));
+        EXPECT_EQ(untouched_rax, buffer.read().Rax);
     }
 }
