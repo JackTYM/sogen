@@ -1122,11 +1122,11 @@ namespace sogen
             return true;
         }
 
-        vcpu.active_thread_saved = true;
+        const auto was_saved = std::exchange(vcpu.active_thread_saved, true);
         ++thread.pending_register_accesses;
         this->thread_registers_saved_.notify_all();
         const auto _ = utils::finally([&] {
-            vcpu.active_thread_saved = false;
+            vcpu.active_thread_saved = was_saved;
             --thread.pending_register_accesses;
             this->wake_idle_vcpu();
         });

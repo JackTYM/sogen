@@ -1279,4 +1279,21 @@ namespace sogen::test
         EXPECT_EQ(second_rax, this->rax(1));
         EXPECT_EQ(first_rax, this->rax(0));
     }
+
+    TEST_F(RunningThreadContextTest, WaitKeepsTheSavedMarkOfAnEnclosingUnlockedRegion)
+    {
+        std::atomic_bool caller_returned{false};
+        auto second_vcpu = this->run_second_vcpu_worker(caller_returned);
+        const auto [available, still_saved] = this->emu->dispatch_on_cpu(this->emu->vcpu(0).cpu, [&] {
+            auto& vcpu = this->emu->vcpu(0);
+            vcpu.active_thread_saved = true;
+            const auto result = this->emu->wait_for_thread_registers(vcpu, this->thread(this->second));
+            return std::pair{result, std::exchange(vcpu.active_thread_saved, false)};
+        });
+        caller_returned = true;
+
+        EXPECT_TRUE(available);
+        EXPECT_TRUE(still_saved);
+        EXPECT_TRUE(second_vcpu.get());
+    }
 }
