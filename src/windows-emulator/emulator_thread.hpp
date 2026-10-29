@@ -701,6 +701,9 @@ namespace sogen
             this->marker.mark_as_moved();
         }
 
+        // A thread loaded on unloading_vcpu counts as unloaded, since that vCPU is about to unload it. The scheduler's
+        // deletion and the handle deleter share this, so that the scheduler never erases a thread the deleter keeps.
+        bool can_be_deleted(const vcpu_context* unloading_vcpu = nullptr) const;
         static bool deleter(emulator_thread& t);
 
       private:

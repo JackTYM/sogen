@@ -201,14 +201,14 @@ namespace sogen::test
                 return register_file_cpu::get_cpu(index);
             }
 
-            void serialize_state(utils::buffer_serializer& /*buffer*/, bool /*is_snapshot*/) const override
+            void serialize_state(utils::buffer_serializer& buffer, bool /*is_snapshot*/) const override
             {
-                throw std::runtime_error("Not supported");
+                buffer.write_vector(this->save_registers());
             }
 
-            void deserialize_state(utils::buffer_deserializer& /*buffer*/, bool /*is_snapshot*/) override
+            void deserialize_state(utils::buffer_deserializer& buffer, bool /*is_snapshot*/) override
             {
-                throw std::runtime_error("Not supported");
+                this->restore_registers(buffer.read_vector<std::byte>());
             }
 
             void read_memory(const uint64_t address, void* data, const size_t size) const override
@@ -322,9 +322,10 @@ namespace sogen::test
                 return nullptr;
             }
 
-            void map_mmio(uint64_t /*address*/, size_t /*size*/, mmio_read_callback /*read_cb*/, mmio_write_callback /*write_cb*/) override
+            void map_mmio(const uint64_t address, const size_t size, mmio_read_callback /*read_cb*/,
+                          mmio_write_callback /*write_cb*/) override
             {
-                throw std::runtime_error("Not supported");
+                this->map_memory(address, size, memory_permission::read_write);
             }
 
             void map_memory(const uint64_t address, const size_t size, memory_permission /*permissions*/) override
@@ -1097,5 +1098,32 @@ namespace sogen::test
         EXPECT_EQ(STATUS_SUCCESS, this->rax(0));
         EXPECT_EQ(thread_ip, this->emu->vcpu(0).x64_cpu().reg(x86_register::r10));
         EXPECT_EQ(instrumentation_callback - this->emu->abi().syscall_abi().syscall_instruction_size(), this->rip(0));
+    }
+
+    TEST_F(RunningThreadContextTest, DeserializedThreadIsDeletedOnlyAfterItsVcpuUnloadsIt)
+    {
+        utils::buffer_serializer state{};
+        this->emu->synchronize([&] {
+            this->emu->vcpu(1).active_thread = nullptr;
+            this->emu->serialize(state);
+        });
+        utils::buffer_deserializer deserializer{state};
+        this->emu->synchronize([&] { this->emu->deserialize(deserializer); });
+
+        auto& vcpu = this->emu->vcpu(0);
+        ASSERT_EQ(&this->thread(this->first), vcpu.active_thread);
+        ASSERT_EQ(&vcpu, vcpu.active_thread->last_vcpu);
+        ASSERT_TRUE(this->emu->activate_thread(this->emu->vcpu(1), 12));
+
+        const auto exists_after_close = this->emu->dispatch_on_cpu(this->emu->vcpu(1).cpu, [&] {
+            syscalls::handle_NtTerminateThread(this->context(1), this->first, STATUS_SUCCESS);
+            syscalls::handle_NtClose(this->context(1), this->first);
+            return this->emu->process.threads.get(this->first) != nullptr;
+        });
+        EXPECT_TRUE(exists_after_close);
+
+        auto first_vcpu = std::async(std::launch::async, [&] { return this->emu->perform_thread_switch(vcpu); });
+        const auto _ = utils::finally([&] { this->emu->stop(); });
+        EXPECT_TRUE(this->wait_for_deletion(this->first));
     }
 }

@@ -170,6 +170,15 @@ namespace sogen
         // Its active thread's registers are saved meanwhile, and it reloads them before it continues.
         bool active_thread_saved{false};
 
+        void set_active_thread(emulator_thread* thread)
+        {
+            this->active_thread = thread;
+            if (thread)
+            {
+                thread->last_vcpu = this;
+            }
+        }
+
         emulator_thread& thread() const
         {
             if (!this->active_thread)
