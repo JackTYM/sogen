@@ -2,11 +2,19 @@
 #include <syscall_utils.hpp>
 #include <utils/finally.hpp>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <future>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <thread>
+#include <vector>
 
 namespace sogen::syscalls
 {
@@ -25,6 +33,7 @@ namespace sogen::test
         constexpr uint64_t second_rax = 0x2001;
         constexpr uint64_t written_rax = 0x3001;
         constexpr uint64_t untouched_rax = 0x4001;
+        constexpr uint64_t thread_ip = 0x10000;
 
         template <typename Cpu>
         class register_file_cpu : public Cpu
@@ -324,6 +333,47 @@ namespace sogen::test
             }
         };
 
+        // Stops the emulator if the test has not finished in time, which ends every wait a test can hang in.
+        class watchdog
+        {
+          public:
+            explicit watchdog(windows_emulator& emu)
+                : thread_([this, &emu] {
+                      std::unique_lock lock{this->mutex_};
+                      if (!this->finished_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return this->finished_; }))
+                      {
+                          this->expired_ = true;
+                          emu.stop();
+                      }
+                  })
+            {
+            }
+
+            ~watchdog()
+            {
+                {
+                    const std::scoped_lock lock{this->mutex_};
+                    this->finished_ = true;
+                }
+
+                this->finished_cv_.notify_one();
+                this->thread_.join();
+                EXPECT_FALSE(this->expired_) << "The test did not finish within 10 seconds";
+            }
+
+            watchdog(const watchdog&) = delete;
+            watchdog& operator=(const watchdog&) = delete;
+            watchdog(watchdog&&) = delete;
+            watchdog& operator=(watchdog&&) = delete;
+
+          private:
+            std::mutex mutex_{};
+            std::condition_variable finished_cv_{};
+            bool finished_{false};
+            bool expired_{false};
+            std::thread thread_;
+        };
+
         class RunningThreadContextTest : public testing::Test
         {
           protected:
@@ -340,22 +390,33 @@ namespace sogen::test
                     emulator_settings{.disable_logging = true, .emulation_root = get_emulator_root(), .load_registry = false},
                     emulator_callbacks{}, std::move(interfaces));
                 this->emu->process.default_register_set = this->machine->save_registers();
-                this->first = this->run_thread(this->emu->vcpu(0), first_rax);
-                this->second = this->run_thread(this->emu->vcpu(1), second_rax);
+                this->first = this->run_thread(this->emu->vcpu(0), 8, first_rax);
+                this->second = this->run_thread(this->emu->vcpu(1), 12, second_rax);
                 this->storage = this->emu->memory.allocate_memory(0x1000, memory_permission::read_write);
+                this->watchdog_.emplace(*this->emu);
             }
 
-            handle run_thread(vcpu_context& vcpu, const uint64_t live_rax)
+            void TearDown() override
             {
-                const auto thread_handle =
-                    this->emu->process.threads.store(emulator_thread{this->emu->memory, this->emu->process, 0, 0, 0x100000, 0, 8, true});
+                this->watchdog_.reset();
+            }
+
+            handle create_thread(const uint32_t id)
+            {
+                return this->emu->process.threads.store(
+                    emulator_thread{this->emu->memory, this->emu->process, 0, 0, 0x100000, 0, id, true});
+            }
+
+            handle run_thread(vcpu_context& vcpu, const uint32_t id, const uint64_t live_rax)
+            {
+                const auto thread_handle = this->create_thread(id);
                 auto* thread = this->emu->process.threads.get(thread_handle);
                 thread->setup_if_necessary(vcpu.cpu, this->emu->process);
-                vcpu.x64_cpu().reg(x86_register::rip, 0x10000);
+                vcpu.x64_cpu().reg(x86_register::rip, thread_ip);
                 vcpu.x64_cpu().reg(x86_register::rax, stale_rax);
                 thread->save(vcpu.cpu);
+                EXPECT_TRUE(this->emu->activate_thread(vcpu, id));
                 vcpu.x64_cpu().reg(x86_register::rax, live_rax);
-                vcpu.active_thread = thread;
                 return thread_handle;
             }
 
@@ -446,6 +507,7 @@ namespace sogen::test
             }
 
             std::unique_ptr<windows_emulator> emu{};
+            std::optional<watchdog> watchdog_{};
             two_vcpu_machine* machine{};
             handle first{};
             handle second{};
@@ -519,13 +581,6 @@ namespace sogen::test
             return status;
         });
 
-        const auto finished = first_vcpu.wait_for(std::chrono::seconds(10));
-        if (finished != std::future_status::ready)
-        {
-            this->emu->stop();
-        }
-
-        EXPECT_EQ(std::future_status::ready, finished);
         EXPECT_EQ(STATUS_SUCCESS, first_vcpu.get());
         EXPECT_TRUE(second_vcpu.get());
         EXPECT_EQ(second_rax, first_buffer.read().Rax);
@@ -538,13 +593,13 @@ namespace sogen::test
     TEST_F(RunningThreadContextTest, ThreadExitingDuringAnAccessIsDeletedOnlyAfterIt)
     {
         const auto buffer = this->context_buffer(0, CONTEXT64_ALL);
-        std::optional<bool> exists_during_access{};
-        const auto idle_thread =
-            this->emu->process.threads.store(emulator_thread{this->emu->memory, this->emu->process, 0, 0, 0x100000, 0, 9, true});
-        this->thread(idle_thread).await_host_condition = [&] {
-            if (!exists_during_access)
+        const auto exists_during_access = std::make_shared<std::optional<bool>>();
+        const auto idle_thread = this->create_thread(9);
+        this->thread(idle_thread).await_host_condition = [exists_during_access, &threads = this->emu->process.threads,
+                                                          target = this->second] {
+            if (!*exists_during_access)
             {
-                exists_during_access = this->emu->process.threads.get(this->second) != nullptr;
+                *exists_during_access = threads.get(target) != nullptr;
             }
 
             return false;
@@ -562,7 +617,7 @@ namespace sogen::test
 
         EXPECT_EQ(STATUS_SUCCESS, caller.get());
         EXPECT_EQ(second_rax, this->emu->synchronize([&] { return buffer.read().Rax; }));
-        EXPECT_EQ(std::optional{true}, exists_during_access);
+        EXPECT_EQ(std::optional{true}, *exists_during_access);
         EXPECT_TRUE(this->wait_for_deletion(this->second));
     }
 
@@ -600,6 +655,7 @@ namespace sogen::test
         EXPECT_EQ(first_rax, this->rax(0));
         EXPECT_EQ(second_rax, this->rax(1));
         EXPECT_EQ(0u, this->thread(this->second).pending_register_accesses);
+        EXPECT_FALSE(this->emu->vcpu(0).active_thread_saved);
     }
 
     TEST_F(RunningThreadContextTest, SetInterruptedByAStopFailsWithoutWritingRegisters)
@@ -612,6 +668,8 @@ namespace sogen::test
         EXPECT_EQ(STATUS_UNSUCCESSFUL, caller.get());
         EXPECT_EQ(first_rax, this->rax(0));
         EXPECT_EQ(second_rax, this->rax(1));
+        EXPECT_EQ(0u, this->thread(this->second).pending_register_accesses);
+        EXPECT_FALSE(this->emu->vcpu(0).active_thread_saved);
 
         auto& vcpu = this->emu->vcpu(0);
         this->thread(this->second).restore(vcpu.cpu, this->emu->process.gdt_base);
