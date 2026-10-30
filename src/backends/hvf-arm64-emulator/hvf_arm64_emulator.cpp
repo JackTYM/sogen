@@ -653,6 +653,22 @@ namespace sogen::hvf
                 run_condition_.wait(lock, [&] { return !in_hypervisor_ || entries_ != entry; });
             }
 
+            bool enable_hardware_tso()
+            {
+                bool enabled = false;
+                if (__builtin_available(macOS 15.0, *))
+                {
+                    constexpr uint64_t entso = 1ull << 1;
+                    on_owner([&] {
+                        uint64_t actlr{};
+                        enabled = hv_vcpu_get_sys_reg(vcpu_, HV_SYS_REG_ACTLR_EL1, &actlr) == HV_SUCCESS &&
+                                  hv_vcpu_set_sys_reg(vcpu_, HV_SYS_REG_ACTLR_EL1, actlr | entso) == HV_SUCCESS &&
+                                  hv_vcpu_get_sys_reg(vcpu_, HV_SYS_REG_ACTLR_EL1, &actlr) == HV_SUCCESS && (actlr & entso) != 0;
+                    });
+                }
+                return enabled;
+            }
+
           private:
             hvf_arm64_emulator& machine_;
             size_t index_{};
@@ -1232,6 +1248,11 @@ namespace sogen::hvf
             void set_el0_exception_handler(hvf::el0_exception_handler handler)
             {
                 el0_exception_handler_ = std::move(handler);
+            }
+
+            bool enable_hardware_tso()
+            {
+                return std::ranges::all_of(vcpus_, [](const auto& vcpu) { return vcpu->enable_hardware_tso(); });
             }
 
           private:
@@ -2743,5 +2764,10 @@ namespace sogen::hvf
     void set_el0_exception_handler(arm64_emulator& vm, el0_exception_handler handler)
     {
         dynamic_cast<hvf_arm64_emulator&>(vm).set_el0_exception_handler(std::move(handler));
+    }
+
+    bool enable_hardware_tso(arm64_emulator& vm)
+    {
+        return dynamic_cast<hvf_arm64_emulator&>(vm).enable_hardware_tso();
     }
 }

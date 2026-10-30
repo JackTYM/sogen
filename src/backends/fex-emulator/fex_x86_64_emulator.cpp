@@ -4978,6 +4978,10 @@ namespace sogen::fex
         void create_vm()
         {
             this->vm_ = hvf::create_arm64_emulator(1);
+            if (hvf::enable_hardware_tso(*this->vm_))
+            {
+                this->context_->SetHardwareTSOSupport(true);
+            }
             hvf::set_el0_exception_handler(*this->vm_, [this](arm64_cpu& cpu, const hvf::el0_exception& exception) {
                 return this->handle_vm_exception(cpu, exception);
             });
