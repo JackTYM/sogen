@@ -896,6 +896,23 @@ namespace sogen::fex
             mmio_read_callback read_cb;
         };
 
+        // The host registers of JIT code that was stopped by a fault, which the fault handlers read and redirect.
+        class fault_context
+        {
+          public:
+            virtual uint64_t pc() const = 0;
+            virtual void set_pc(uint64_t value) = 0;
+            virtual void set_sp(uint64_t value) = 0;
+            virtual uint64_t gpr(uint32_t index) const = 0;
+            virtual void set_gpr(uint32_t index, uint64_t value) = 0;
+            virtual bool set_vector(uint32_t index, __uint128_t value) = 0;
+            virtual std::optional<bool> is_write() const = 0;
+            virtual std::optional<int32_t> handle_unaligned_access(FEXCore::Core::InternalThreadState* thread) = 0;
+
+          protected:
+            ~fault_context() = default;
+        };
+
         struct hook_entry
         {
             x86_hookable_instructions type = x86_hookable_instructions::invalid;
@@ -3507,26 +3524,22 @@ namespace sogen::fex
         // Called only from signal-handler context; see pending_fault_kind for why hooks cannot run
         // directly there. state_already_spilled selects the dispatcher unwind entry that skips the SRA
         // spill only for FEXCore's synthetic-exception path, where CpuStateFrame is already current.
-        void defer_hook_dispatch(ucontext_t* context, const pending_fault_dispatch& dispatch, bool state_already_spilled)
+        void defer_hook_dispatch(fault_context& context, const pending_fault_dispatch& dispatch, bool state_already_spilled)
         {
             this->pending_fault_dispatch_ = dispatch;
             const auto& config = this->signal_delegator_->GetConfig();
             const auto target = state_already_spilled ? config.ThreadStopHandlerAddress : config.ThreadStopHandlerAddressSpillSRA;
             this->unwind_to_dispatcher_frame(context);
-            set_host_pc(context, target);
+            context.set_pc(target);
         }
 
         // The stop handlers pop the dispatcher's entry frame, but JIT code can be interrupted with SP elsewhere (e.g.
         // mid-call into a helper), so SP is reset to that frame first, as FEX's own signal delegator does.
-        void unwind_to_dispatcher_frame(ucontext_t* context) const
+        void unwind_to_dispatcher_frame(fault_context& context) const
         {
             auto* frame = this->thread_->CurrentFrame;
             frame->SignalHandlerRefCounter = 0;
-#ifdef __APPLE__
-            context->uc_mcontext->__ss.__sp = frame->ReturningStackLocation;
-#else
-            context->uc_mcontext.sp = frame->ReturningStackLocation;
-#endif
+            context.set_sp(frame->ReturningStackLocation);
         }
 
         // The dispatcher is separate from FEXCore's CodeBuffer range, so IsAddressInCodeBuffer does
@@ -3612,10 +3625,86 @@ namespace sogen::fex
 #endif
         }
 
+        class signal_fault_context final : public fault_context
+        {
+          public:
+            explicit signal_fault_context(ucontext_t* context)
+                : context_(context)
+            {
+            }
+
+            uint64_t pc() const override
+            {
+                return get_host_pc(this->context_);
+            }
+
+            void set_pc(const uint64_t value) override
+            {
+                set_host_pc(this->context_, value);
+            }
+
+            void set_sp(const uint64_t value) override
+            {
+#ifdef __APPLE__
+                this->context_->uc_mcontext->__ss.__sp = value;
+#else
+                this->context_->uc_mcontext.sp = value;
+#endif
+            }
+
+            uint64_t gpr(const uint32_t index) const override
+            {
+                return get_host_gpr(this->context_, index);
+            }
+
+            void set_gpr(const uint32_t index, const uint64_t value) override
+            {
+                set_host_gpr(this->context_, index, value);
+            }
+
+            bool set_vector(const uint32_t index, const __uint128_t value) override
+            {
+                auto* fprs = get_host_vector_registers(this->context_);
+                if (fprs == nullptr)
+                {
+                    return false;
+                }
+
+                fprs[index] = value;
+                return true;
+            }
+
+            std::optional<bool> is_write() const override
+            {
+#ifdef __linux__
+                constexpr uint64_t esr_write_not_read = 1ULL << 6;
+                if (const auto* esr = find_aarch64_context<esr_context>(this->context_, ESR_MAGIC))
+                {
+                    return (esr->esr & esr_write_not_read) != 0;
+                }
+#endif
+                return std::nullopt;
+            }
+
+            std::optional<int32_t> handle_unaligned_access(FEXCore::Core::InternalThreadState* thread) override
+            {
+#ifdef __APPLE__
+                auto* gprs = reinterpret_cast<uint64_t*>(&this->context_->uc_mcontext->__ss);
+#else
+                auto* gprs = reinterpret_cast<uint64_t*>(this->context_->uc_mcontext.regs);
+#endif
+                return FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
+                    thread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, this->pc(), gprs);
+            }
+
+          private:
+            ucontext_t* context_;
+        };
+
         // FEXCore's call-ret shadow stack (x25, see ensure_callret_buffer) is bracketed by a guard page
         // on each side. Upstream FEX treats hitting either guard as recoverable and resets x25 to the
         // default location (Base + CALLRET_STACK_SIZE/4), which this mirrors.
-        bool handle_callret_stack_fault(ucontext_t* context, uint64_t fault_address) const
+        bool handle_callret_stack_fault(fault_context& context, uint64_t fault_address) const
         {
             if (this->thread_ == nullptr || this->thread_->CallRetStackBase == nullptr)
             {
@@ -3630,27 +3719,25 @@ namespace sogen::fex
                 return false;
             }
 
-            set_host_gpr(context, 25, base + callret_stack_size / 4);
+            context.set_gpr(25, base + callret_stack_size / 4);
             return true;
         }
 
       public:
         // Applies a decode_arm64_load result once its data has been fetched, writing the possibly
         // extended value into the destination register and advancing PC past the decoded instruction.
-        bool complete_decoded_load(ucontext_t* uctx, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
+        static bool complete_decoded_load(fault_context& context, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
         {
             if (decoded.is_vector)
             {
-                auto* fprs = get_host_vector_registers(uctx);
-                if (fprs == nullptr)
+                __uint128_t value{};
+                std::memcpy(&value, data, sizeof(value));
+                if (!context.set_vector(decoded.rt, value))
                 {
                     return false;
                 }
 
-                __uint128_t value{};
-                std::memcpy(&value, data, sizeof(value));
-                fprs[decoded.rt] = value;
-                set_host_pc(uctx, pc + 4);
+                context.set_pc(pc + 4);
                 return true;
             }
 
@@ -3683,14 +3770,14 @@ namespace sogen::fex
                 result &= 0xFFFFFFFFULL;
             }
 
-            set_host_gpr(uctx, decoded.rt, result);
-            set_host_pc(uctx, pc + 4);
+            context.set_gpr(decoded.rt, result);
+            context.set_pc(pc + 4);
             return true;
         }
 
-        bool handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
+        static bool handle_mmio_fault(fault_context& context, const mmio_region& region, uint64_t fault_addr)
         {
-            const uint64_t pc = get_host_pc(uctx);
+            const uint64_t pc = context.pc();
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
             const auto decoded = decode_arm64_load(insn);
             if (!decoded)
@@ -3712,7 +3799,31 @@ namespace sogen::fex
 
             alignas(16) std::array<std::byte, 16> buffer{};
             region.read_cb(fault_addr - region.address, buffer.data(), decoded->size);
-            return this->complete_decoded_load(uctx, *decoded, buffer.data(), pc);
+            return complete_decoded_load(context, *decoded, buffer.data(), pc);
+        }
+
+        // An instruction-fetch fault reports si_addr == pc, which a genuine MMIO data access
+        // never does, so excluding it costs no real MMIO hits. It matters because a bad branch
+        // to a garbage pc can land inside a registered mmio_region by chance; handle_mmio_fault
+        // would then try to decode the instruction at that same garbage address and crash there
+        // instead, masking the real bug behind a confusing secondary symptom.
+        std::optional<bool> try_handle_mmio_fault(fault_context& context, const uint64_t fault_addr)
+        {
+            if (fault_addr == context.pc())
+            {
+                return std::nullopt;
+            }
+
+            const auto guest_fault_addr = this->to_guest_address(fault_addr);
+            for (const auto& region : this->mmio_regions_)
+            {
+                if (guest_fault_addr >= region.address && guest_fault_addr < region.address + region.size)
+                {
+                    return handle_mmio_fault(context, region, guest_fault_addr);
+                }
+            }
+
+            return std::nullopt;
         }
 
         // LDAR/LDAPR/STLR require natural alignment on real hardware, unlike plain LDR/STR, but x86
@@ -3721,9 +3832,9 @@ namespace sogen::fex
         // (Darwin reports SIGBUS/BUS_ADRALN). sogen runs every guest thread of a process cooperatively
         // on one host thread, so there is no concurrent host-thread race for these instructions to
         // order against, making the downgrade to a plain access correctness-preserving.
-        bool handle_misaligned_atomic_fault(ucontext_t* uctx, uint64_t fault_addr)
+        bool handle_misaligned_atomic_fault(fault_context& context, uint64_t fault_addr)
         {
-            const uint64_t pc = get_host_pc(uctx);
+            const uint64_t pc = context.pc();
 
             // FEXCore rewrites a faulting access in its own code into a half-barrier sequence, so it does not trap
             // again. Emulating each access instead traps on every execution.
@@ -3731,18 +3842,14 @@ namespace sogen::fex
             {
 #ifdef __APPLE__
                 ::pthread_jit_write_protect_np(0);
-                auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
-#else
-                auto* gprs = reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs);
 #endif
-                const auto skip = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
-                    this->thread_, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc, gprs);
+                const auto skip = context.handle_unaligned_access(this->thread_);
 #ifdef __APPLE__
                 ::pthread_jit_write_protect_np(1);
 #endif
                 if (skip)
                 {
-                    set_host_pc(uctx, pc + *skip);
+                    context.set_pc(pc + *skip);
                     return true;
                 }
             }
@@ -3751,23 +3858,23 @@ namespace sogen::fex
 
             if (const auto load = decode_arm64_load(insn))
             {
-                return this->complete_decoded_load(uctx, *load, reinterpret_cast<const void*>(fault_addr), pc);
+                return complete_decoded_load(context, *load, reinterpret_cast<const void*>(fault_addr), pc);
             }
 
             if (const auto store = decode_arm64_store(insn))
             {
-                const uint64_t value = get_host_gpr(uctx, store->rt);
+                const uint64_t value = context.gpr(store->rt);
                 std::memcpy(reinterpret_cast<void*>(fault_addr), &value, store->size);
-                set_host_pc(uctx, pc + 4);
+                context.set_pc(pc + 4);
                 return true;
             }
 
             return false;
         }
 
-        bool handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr)
+        bool handle_general_memory_violation(fault_context& context, uint64_t fault_addr)
         {
-            const uint64_t pc = get_host_pc(uctx);
+            const uint64_t pc = context.pc();
             const auto guest_fault_addr = this->to_guest_address(fault_addr);
 
             memory_operation operation = memory_operation::exec;
@@ -3775,18 +3882,15 @@ namespace sogen::fex
             if (fault_addr != pc)
             {
                 const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-#ifdef __linux__
                 // The emulation decoder below is intentionally limited to the ordered STLR-family
                 // instructions that can fault for alignment. Ordinary translated STR/STUR stores must
-                // still be reported as writes on real protection faults, so use the kernel-provided
-                // AArch64 ESR WnR bit for access classification instead of broadening that decoder.
-                constexpr uint64_t esr_write_not_read = 1ULL << 6;
-                if (const auto* esr = find_aarch64_context<esr_context>(uctx, ESR_MAGIC))
+                // still be reported as writes on real protection faults, so the AArch64 ESR WnR bit
+                // classifies the access wherever the fault reports it, instead of broadening that decoder.
+                if (const auto is_write = context.is_write())
                 {
-                    operation = (esr->esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
+                    operation = *is_write ? memory_operation::write : memory_operation::read;
                 }
                 else
-#endif
                 {
                     operation = decode_arm64_store(insn) ? memory_operation::write : memory_operation::read;
                 }
@@ -3807,7 +3911,7 @@ namespace sogen::fex
             const auto violation = this->first_range_violation(guest_fault_addr, access_size, operation);
             if (!violation)
             {
-                return this->handle_misaligned_atomic_fault(uctx, fault_addr);
+                return this->handle_misaligned_atomic_fault(context, fault_addr);
             }
 
             // FEX's block chaining (directly-linked blocks and callret RET fast-paths) advances execution
@@ -3830,7 +3934,7 @@ namespace sogen::fex
 
             // SRA is still live only in host registers here - this fault interrupted guest-translated
             // JIT code at an arbitrary point, not FEXCore's own controlled synthetic-exception path.
-            this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/false);
+            this->defer_hook_dispatch(context, dispatch, /*state_already_spilled=*/false);
             return true;
         }
 
@@ -3844,6 +3948,7 @@ namespace sogen::fex
             }
 
             auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
+            signal_fault_context context{uctx};
 
             if (sig == SIGSEGV || sig == SIGBUS)
             {
@@ -3857,50 +3962,9 @@ namespace sogen::fex
                 // a guest address and would dispatch a synthetic guest exception built from this
                 // backend's own internal pointer.
 #endif
-                const auto interrupt_page_addr = get_untagged_pointer_address(this->thread_->InterruptFaultPage);
-                if (fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(this->thread_->InterruptFaultPage))
+                if (this->is_interrupt_page(fault_addr))
                 {
-                    const auto fault_pc = get_host_pc(uctx);
-                    const bool is_dispatch_code = this->context_ && this->context_->IsAddressInCodeBuffer(this->thread_, fault_pc);
-
-                    // ExitFunctionLinkerAddress's own epilogue (EmitSignalGuardedRegion's closing
-                    // sequence) also writes InterruptFaultPage from inside the CodeBuffer, via a
-                    // JIT-emitted `strb`, so IsAddressInCodeBuffer cannot tell it apart from a genuine
-                    // per-block-entry interrupt check. Redirecting to ThreadStopHandlerAddress while
-                    // mid-epilogue pops the dispatcher's frame at the wrong stack depth. The raw
-                    // instruction word distinguishes them: STRB (unsigned-offset immediate) encodes
-                    // size=00,V=0,opc=00, distinct from both of EmitSuspendInterruptCheck's forms
-                    // (64-bit `str` has size=11, the 128-bit vector `str` has V=1).
-                    const bool is_strb_epilogue_write = (*reinterpret_cast<const uint32_t*>(fault_pc) & 0xFFC00000u) == 0x39000000u;
-
-                    if (is_dispatch_code && !is_strb_epilogue_write)
-                    {
-                        // A genuine cooperative stop at a JIT block-entry interrupt check, triggered by
-                        // the quantum timer's async mprotect. Live guest state is in host registers
-                        // (SRA) and CPUState.rip is frequently stale, since a completed syscall leaves
-                        // it at its fallthrough and execution then runs through directly-linked blocks
-                        // and callret RET fast-paths that never rewrite it. Resuming from that stale rip
-                        // with stale registers re-executes an already-retired instruction - a `retn`
-                        // whose return slot was reused pops garbage and branches wild. Both halves are
-                        // therefore required: reconstruct the rip from the faulting host PC, and unwind
-                        // through the SpillSRA handler so the live SRA registers reach CPUState before
-                        // ExecuteThread returns. This mirrors FEX's own ReconstructThreadState.
-                        this->thread_->CurrentFrame->State.rip = this->context_->RestoreRIPFromHostPC(this->thread_, fault_pc);
-                        this->interrupt_page_unwind_ = true;
-                        const auto& stop_cfg = this->signal_delegator_->GetConfig();
-                        this->unwind_to_dispatcher_frame(uctx);
-                        set_host_pc(uctx, stop_cfg.ThreadStopHandlerAddressSpillSRA);
-                        return true;
-                    }
-
-                    // Not a block-entry check but ordinary bookkeeping racing a stop request from another
-                    // thread: either FEXCore's DeferredSignalRefCountGuard destructor or
-                    // ExitFunctionLinkerAddress's JIT-emitted epilogue strb. ThreadStopHandlerAddress
-                    // expects to unwind a live JIT dispatcher frame, so taking it from the host-C++ side
-                    // corrupts the stack into a pc==lr==0 crash. Only the page's protection state drives
-                    // the stop mechanism, not the stored value, so skip the faulting store; the next real
-                    // block entry still sees the page protected and stops correctly.
-                    set_host_pc(uctx, fault_pc + 4);
+                    this->handle_interrupt_page_fault(context);
                     return true;
                 }
 
@@ -3936,27 +4000,14 @@ namespace sogen::fex
 
                 // Checked early, before the general-violation routing that would otherwise mis-dispatch
                 // this host arena address as a guest access violation.
-                if (this->handle_callret_stack_fault(uctx, fault_addr))
+                if (this->handle_callret_stack_fault(context, fault_addr))
                 {
                     return true;
                 }
 
-                // An instruction-fetch fault reports si_addr == pc, which a genuine MMIO data access
-                // never does, so excluding it costs no real MMIO hits. It matters because a bad branch
-                // to a garbage pc can land inside a registered mmio_region by chance; handle_mmio_fault
-                // would then try to decode the instruction at that same garbage address and crash there
-                // instead, masking the real bug behind a confusing secondary symptom.
-                const auto pc_for_mmio_check = get_host_pc(uctx);
-                if (fault_addr != pc_for_mmio_check)
+                if (const auto handled = this->try_handle_mmio_fault(context, fault_addr))
                 {
-                    const auto guest_fault_addr = this->to_guest_address(fault_addr);
-                    for (const auto& region : this->mmio_regions_)
-                    {
-                        if (guest_fault_addr >= region.address && guest_fault_addr < region.address + region.size)
-                        {
-                            return this->handle_mmio_fault(uctx, region, guest_fault_addr);
-                        }
-                    }
+                    return *handled;
                 }
 
 #ifdef __APPLE__
@@ -3990,7 +4041,7 @@ namespace sogen::fex
                 // that merely happens to also be unaligned, and memcpy-ing to it would fault a second
                 // time inside the signal handler. The shadow-table-validated path classifies such an
                 // address correctly and raises it via memory_violation_hooks_ instead.
-                if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->handle_general_memory_violation(uctx, fault_addr))
+                if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->handle_general_memory_violation(context, fault_addr))
                 {
                     return true;
                 }
@@ -4060,7 +4111,7 @@ namespace sogen::fex
                 // confirmed inside a live JIT code buffer - anything else is a host bug elsewhere that
                 // must not be interpreted as guest state, and the wrapper below logs and re-raises it.
                 if ((sig == SIGSEGV || sig == SIGBUS) && this->context_ && this->context_->IsAddressInCodeBuffer(this->thread_, pc) &&
-                    this->handle_general_memory_violation(uctx, reinterpret_cast<uint64_t>(info->si_addr)))
+                    this->handle_general_memory_violation(context, reinterpret_cast<uint64_t>(info->si_addr)))
                 {
                     return true;
                 }
@@ -4068,6 +4119,13 @@ namespace sogen::fex
                 return false;
             }
 
+            return this->handle_generated_exception(context);
+        }
+
+        // Called once the faulting host PC is known to be inside the dispatcher, where FEXCore's
+        // guest-exception trampolines live.
+        bool handle_generated_exception(fault_context& context)
+        {
             auto* frame = this->thread_->CurrentFrame;
             if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
             {
@@ -4130,8 +4188,59 @@ namespace sogen::fex
 
             // SRA is already spilled: this is FEXCore's own controlled synthetic-exception/Break-op
             // path, not an arbitrary interruption of live JIT code.
-            this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/true);
+            this->defer_hook_dispatch(context, dispatch, /*state_already_spilled=*/true);
             return true;
+        }
+
+        bool is_interrupt_page(const uint64_t address) const
+        {
+            const auto interrupt_page_addr = get_untagged_pointer_address(this->thread_->InterruptFaultPage);
+            return address >= interrupt_page_addr && address < interrupt_page_addr + sizeof(this->thread_->InterruptFaultPage);
+        }
+
+        void handle_interrupt_page_fault(fault_context& context)
+        {
+            const auto fault_pc = context.pc();
+            const bool is_dispatch_code = this->context_ && this->context_->IsAddressInCodeBuffer(this->thread_, fault_pc);
+
+            // ExitFunctionLinkerAddress's own epilogue (EmitSignalGuardedRegion's closing
+            // sequence) also writes InterruptFaultPage from inside the CodeBuffer, via a
+            // JIT-emitted `strb`, so IsAddressInCodeBuffer cannot tell it apart from a genuine
+            // per-block-entry interrupt check. Redirecting to ThreadStopHandlerAddress while
+            // mid-epilogue pops the dispatcher's frame at the wrong stack depth. The raw
+            // instruction word distinguishes them: STRB (unsigned-offset immediate) encodes
+            // size=00,V=0,opc=00, distinct from both of EmitSuspendInterruptCheck's forms
+            // (64-bit `str` has size=11, the 128-bit vector `str` has V=1).
+            const bool is_strb_epilogue_write = (*reinterpret_cast<const uint32_t*>(fault_pc) & 0xFFC00000u) == 0x39000000u;
+
+            if (is_dispatch_code && !is_strb_epilogue_write)
+            {
+                // A genuine cooperative stop at a JIT block-entry interrupt check, triggered by
+                // the quantum timer's async mprotect. Live guest state is in host registers
+                // (SRA) and CPUState.rip is frequently stale, since a completed syscall leaves
+                // it at its fallthrough and execution then runs through directly-linked blocks
+                // and callret RET fast-paths that never rewrite it. Resuming from that stale rip
+                // with stale registers re-executes an already-retired instruction - a `retn`
+                // whose return slot was reused pops garbage and branches wild. Both halves are
+                // therefore required: reconstruct the rip from the faulting host PC, and unwind
+                // through the SpillSRA handler so the live SRA registers reach CPUState before
+                // ExecuteThread returns. This mirrors FEX's own ReconstructThreadState.
+                this->thread_->CurrentFrame->State.rip = this->context_->RestoreRIPFromHostPC(this->thread_, fault_pc);
+                this->interrupt_page_unwind_ = true;
+                const auto& stop_cfg = this->signal_delegator_->GetConfig();
+                this->unwind_to_dispatcher_frame(context);
+                context.set_pc(stop_cfg.ThreadStopHandlerAddressSpillSRA);
+                return;
+            }
+
+            // Not a block-entry check but ordinary bookkeeping racing a stop request from another
+            // thread: either FEXCore's DeferredSignalRefCountGuard destructor or
+            // ExitFunctionLinkerAddress's JIT-emitted epilogue strb. ThreadStopHandlerAddress
+            // expects to unwind a live JIT dispatcher frame, so taking it from the host-C++ side
+            // corrupts the stack into a pc==lr==0 crash. Only the page's protection state drives
+            // the stop mechanism, not the stored value, so skip the faulting store; the next real
+            // block entry still sees the page protected and stops correctly.
+            context.set_pc(fault_pc + 4);
         }
 
       private:
