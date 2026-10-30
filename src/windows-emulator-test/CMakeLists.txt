@@ -49,6 +49,11 @@ target_link_libraries(windows-emulator-test PRIVATE
   debugger
 )
 
+if(SOGEN_ENABLE_FEX AND SOGEN_ENABLE_HVF)
+  target_compile_definitions(windows-emulator-test PRIVATE SOGEN_ENABLE_FEX_HVF=1)
+  target_link_libraries(windows-emulator-test PRIVATE fex-hvf)
+endif()
+
 if(EMSCRIPTEN)
   target_link_options(windows-emulator-test PRIVATE -sASYNCIFY_EXPORTS=main)
 endif()

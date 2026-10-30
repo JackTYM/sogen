@@ -4,6 +4,7 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
   *.rc
 )
 
+list(FILTER SRC_FILES EXCLUDE REGEX "/hvf/")
 list(SORT SRC_FILES)
 
 if(SOGEN_BUILD_STATIC)
@@ -21,5 +22,10 @@ target_link_libraries(fex-emulator PRIVATE emulator-common)
 # imported FEXCore shared library. The dependency forces the ExternalProject to build before this target.
 target_link_libraries(fex-emulator PRIVATE fexcore)
 add_dependencies(fex-emulator fex_external)
+
+if(SOGEN_ENABLE_HVF)
+  add_subdirectory(hvf)
+  target_link_libraries(fex-emulator PRIVATE fex-hvf)
+endif()
 
 sogen_strip_target(fex-emulator)
