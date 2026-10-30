@@ -52,8 +52,14 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/arm/thread_status.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <dlfcn.h>
 #include <libkern/OSCacheControl.h>
 #include <libproc.h>
+
+#include "hvf/hvf_vcpu.hpp"
+#include "hvf/hvf_vm.hpp"
 #endif
 
 #include <atomic>
@@ -1070,6 +1076,90 @@ namespace sogen::fex
             return result;
         }
 
+        struct fexcore_image_copy
+        {
+            uint64_t image_base{};
+            uint64_t size{};
+            uint64_t copy_base{};
+
+            uint64_t rebase(const uint64_t address) const
+            {
+                return address - this->image_base < this->size ? this->copy_base + (address - this->image_base) : address;
+            }
+        };
+
+        // libFEXCore's image cannot be mapped into the VM, since it holds executing host code (see
+        // address_space::map_stage2), but JIT output reads constant tables from it through JITPointers. The VM
+        // gets a read-only copy at the same layout instead, and those pointers are rebased onto it.
+        const fexcore_image_copy& copy_fexcore_image(hvf::vm& vm)
+        {
+            static const fexcore_image_copy copy = [&vm] {
+                Dl_info info{};
+                if (::dladdr(reinterpret_cast<const void*>(&FEXCore::Config::Initialize), &info) == 0)
+                {
+                    throw std::runtime_error("Failed to locate the FEXCore image");
+                }
+
+                const auto* header = static_cast<const mach_header_64*>(info.dli_fbase);
+                intptr_t slide = 0;
+                for (uint32_t i = 0; i < ::_dyld_image_count(); ++i)
+                {
+                    if (::_dyld_get_image_header(i) == reinterpret_cast<const mach_header*>(header))
+                    {
+                        slide = ::_dyld_get_image_vmaddr_slide(i);
+                        break;
+                    }
+                }
+
+                std::vector<std::pair<uint64_t, uint64_t>> segments{};
+                const auto* command = reinterpret_cast<const load_command*>(header + 1);
+                for (uint32_t i = 0; i < header->ncmds; ++i)
+                {
+                    if (command->cmd == LC_SEGMENT_64)
+                    {
+                        const auto* segment = reinterpret_cast<const segment_command_64*>(command);
+                        if (std::string_view{segment->segname} != SEG_PAGEZERO && segment->vmsize != 0)
+                        {
+                            segments.emplace_back(segment->vmaddr + slide, segment->filesize);
+                        }
+                    }
+                    command = reinterpret_cast<const load_command*>(reinterpret_cast<const uint8_t*>(command) + command->cmdsize);
+                }
+
+                uint64_t lowest = UINT64_MAX;
+                uint64_t end = 0;
+                for (const auto& [address, file_size] : segments)
+                {
+                    lowest = std::min(lowest, address);
+                    end = std::max(end, address + file_size);
+                }
+
+                if (end <= lowest)
+                {
+                    throw std::runtime_error("The FEXCore image has no segments");
+                }
+
+                const size_t size = host_page_align_up_apple(end - lowest);
+
+                void* copy_base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (copy_base == MAP_FAILED)
+                {
+                    throw std::runtime_error("Failed to allocate the FEXCore image copy");
+                }
+
+                for (const auto& [address, file_size] : segments)
+                {
+                    std::memcpy(static_cast<uint8_t*>(copy_base) + (address - lowest), reinterpret_cast<const void*>(address), file_size);
+                }
+
+                ::mprotect(copy_base, size, PROT_READ);
+                vm.map(reinterpret_cast<uint64_t>(copy_base), size, PROT_READ);
+                return fexcore_image_copy{.image_base = lowest, .size = size, .copy_base = reinterpret_cast<uint64_t>(copy_base)};
+            }();
+
+            return copy;
+        }
+
         // Under guest VA == host VA, FEXCore's own internal buffers (obtained via a raw ::mmap(NULL,
         // ...), uncoordinated with sogen's bookkeeping) can land inside the guest's own address space,
         // so an ordinary guest write into a buffer placed there corrupts FEXCore's state (the
@@ -1096,13 +1186,21 @@ namespace sogen::fex
             }
 
             // Must run before the first FEXCore-internal allocation (context/CodeBuffer creation) and
-            // before the memory manager first queries reserved_host_ranges(). Idempotent.
-            void install()
+            // before the memory manager first queries reserved_host_ranges(). Idempotent. With a VM, every
+            // committed sub-region is also mapped into it, and code buffers are plain host memory that only the VM
+            // executes, so the execution mode cannot change once FEXCore has allocated.
+            void install(hvf::vm* vm)
             {
                 if (this->base_ != 0)
                 {
+                    if (vm != this->vm_)
+                    {
+                        throw std::runtime_error("FEX cannot switch between in-process and hypervisor execution within one process");
+                    }
                     return;
                 }
+
+                this->vm_ = vm;
 
                 void* base = ::mmap(nullptr, arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 if (base == MAP_FAILED)
@@ -1133,6 +1231,7 @@ namespace sogen::fex
             }
 
           private:
+            hvf::vm* vm_ = nullptr;
             uintptr_t base_ = 0;
             uintptr_t cursor_ = 0; // bump pointer, monotonically increasing within the arena
             std::mutex lock_;
@@ -1188,7 +1287,14 @@ namespace sogen::fex
                 // only where it deliberately targets a specific base it has already reserved itself.
                 if (addr != nullptr || (flags & MAP_ANONYMOUS) == 0)
                 {
-                    return ::mmap(addr, length, prot, flags, fd, offset);
+                    // A fixed mapping over memory the VM maps, such as VirtualDontNeed's, replaces the pages the
+                    // VM still points at.
+                    void* result = ::mmap(addr, length, prot, flags, fd, offset);
+                    if (this->vm_ != nullptr && result != MAP_FAILED && (flags & MAP_FIXED) != 0)
+                    {
+                        this->vm_->refresh_backing(reinterpret_cast<uint64_t>(result), length);
+                    }
+                    return result;
                 }
 
                 const size_t rounded = host_page_align_up_apple(length);
@@ -1203,6 +1309,22 @@ namespace sogen::fex
                             arena_size >> 20);
                     errno = ENOMEM;
                     return MAP_FAILED;
+                }
+
+                if ((flags & MAP_JIT) && this->vm_ != nullptr)
+                {
+                    // Same trailing guard page as below.
+                    const size_t code_size = rounded > host_page_size_apple ? rounded - host_page_size_apple : rounded;
+                    void* result = ::mmap(reinterpret_cast<void*>(slot), code_size, PROT_READ | PROT_WRITE, (flags & ~MAP_JIT) | MAP_FIXED,
+                                          fd, offset);
+                    if (result == MAP_FAILED)
+                    {
+                        this->free_list_.push_back({.addr = slot, .size = rounded});
+                        return MAP_FAILED;
+                    }
+
+                    this->vm_->map(slot, code_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+                    return result;
                 }
 
                 if (flags & MAP_JIT)
@@ -1244,7 +1366,12 @@ namespace sogen::fex
                 }
 
                 // Non-executable: commit directly over the reserved region.
-                return ::mmap(reinterpret_cast<void*>(slot), rounded, prot, flags | MAP_FIXED, fd, offset);
+                void* result = ::mmap(reinterpret_cast<void*>(slot), rounded, prot, flags | MAP_FIXED, fd, offset);
+                if (this->vm_ != nullptr && result != MAP_FAILED && prot != PROT_NONE)
+                {
+                    this->vm_->map(slot, rounded, prot);
+                }
+                return result;
             }
 
             int release(void* addr, size_t length)
@@ -1257,6 +1384,11 @@ namespace sogen::fex
                 const size_t rounded = host_page_align_up_apple(length);
 
                 std::lock_guard<std::mutex> guard(this->lock_);
+                if (this->vm_ != nullptr)
+                {
+                    this->vm_->unmap(reinterpret_cast<uint64_t>(addr), rounded);
+                }
+
                 // Return the region to the reserved (PROT_NONE) state so it stays part of the arena's
                 // contiguous reservation, and record it for reuse. Arena VA is never returned to the OS.
                 void* r = ::mmap(addr, rounded, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -1365,7 +1497,7 @@ namespace sogen::fex
         };
 
       public:
-        fex_x86_64_emulator()
+        explicit fex_x86_64_emulator(const execution_mode mode)
         {
 #ifdef __linux__
             if (static_cast<size_t>(::getpagesize()) != page_size)
@@ -1375,7 +1507,17 @@ namespace sogen::fex
                 throw std::runtime_error("FEX backend requires 4KB host pages on Linux");
             }
 #endif
-#ifndef __APPLE__
+#ifdef __APPLE__
+            if (mode == execution_mode::hypervisor)
+            {
+                this->vm_ = &hvf::vm::get();
+            }
+#else
+            if (mode == execution_mode::hypervisor)
+            {
+                throw std::runtime_error("FEX hypervisor mode is only available on macOS");
+            }
+
             this->reserve_guest_arena();
 #endif
             this->initialize_context();
@@ -1391,8 +1533,20 @@ namespace sogen::fex
             utils::reset_object_with_delayed_destruction(this->basic_block_hooks_);
             utils::reset_object_with_delayed_destruction(this->instruction_hooks_);
 
+#ifdef __APPLE__
+            this->running_vcpu_ = nullptr;
+            this->vcpu_.reset();
+            if (this->vm_stack_ != nullptr)
+            {
+                FEXCore::Allocator::munmap(this->vm_stack_, vm_stack_size);
+            }
+#endif
+
             if (this->thread_ != nullptr && this->context_)
             {
+#ifdef __APPLE__
+                this->mirror_in_vm(reinterpret_cast<uint64_t>(this->thread_), sizeof(*this->thread_), PROT_NONE);
+#endif
                 this->context_->DestroyThread(this->thread_);
                 this->thread_ = nullptr;
             }
@@ -1400,7 +1554,10 @@ namespace sogen::fex
             // Release everything we claimed in the shared host == guest address space.
             for (const auto& [address, size] : this->claimed_host_ranges_)
             {
-                this->for_each_host_span(address, size, [](const uint64_t host_address, const size_t span_size, size_t) {
+                this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+#ifdef __APPLE__
+                    this->mirror_in_vm(host_address, span_size, PROT_NONE);
+#endif
                     ::munmap(reinterpret_cast<void*>(host_address), span_size);
                 });
             }
@@ -1458,11 +1615,18 @@ namespace sogen::fex
                 this->create_thread();
             }
 
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                this->prepare_vcpu();
+            }
+#endif
+
             this->stop_requested_ = false;
             // Re-arm InterruptFaultPage for this quantum - see request_thread_stop's doc comment; a
             // prior stop() may have left it protected to force the last quantum's ExecuteThread to
             // return, and it must be writable again before the JIT's per-block-entry store runs.
-            ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+            this->arm_interrupt_page();
 
             // ExecuteThread runs the translated guest until the thread is asked to stop (which the
             // syscall bridge does when a hook calls stop()), or the guest faults/exits.
@@ -1472,7 +1636,7 @@ namespace sogen::fex
             // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
             for (;;)
             {
-                this->context_->ExecuteThread(this->thread_);
+                this->execute_thread();
 
                 const bool hook_dispatched = this->dispatch_pending_hook_if_any();
                 const bool interrupt_page_unwind = this->interrupt_page_unwind_.exchange(false);
@@ -1491,7 +1655,7 @@ namespace sogen::fex
 
                 if (interrupt_page_unwind)
                 {
-                    ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+                    this->arm_interrupt_page();
                 }
             }
         }
@@ -1720,6 +1884,12 @@ namespace sogen::fex
 
         std::string get_name() const override
         {
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                return "FEX (HVF)";
+            }
+#endif
             return "FEX";
         }
 
@@ -2425,7 +2595,12 @@ namespace sogen::fex
 #endif
 
             this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
-                ::mprotect(reinterpret_cast<void*>(host_address), span_size, to_prot(permissions));
+                ::mprotect(reinterpret_cast<void*>(host_address), span_size, this->host_protection(to_prot(permissions)));
+#ifdef __APPLE__
+                // The remap replaced whatever pages the VM mapped here.
+                this->mirror_in_vm(host_address, span_size, PROT_NONE);
+                this->mirror_in_vm(host_address, span_size, this->host_protection(to_prot(permissions)));
+#endif
             });
             // owned=false: the memory belongs to the caller; we must not munmap it on teardown.
             this->erase_region_range(address, size);
@@ -3130,7 +3305,8 @@ namespace sogen::fex
             {
                 // The page stays claimed while it is accessible, so only its protection changes.
                 const auto declared = this->shadow_permission_apple(host_page).value_or(memory_permission::none);
-                ::mprotect(reinterpret_cast<void*>(host_page), host_page_size_apple, to_prot_apple(enable ? declared | added : declared));
+                ::mprotect(reinterpret_cast<void*>(host_page), host_page_size_apple,
+                           this->host_protection(to_prot_apple(enable ? declared | added : declared)));
             }
 #else
             // The range can span several regions_ entries with different declared permissions, so
@@ -3326,6 +3502,7 @@ namespace sogen::fex
                     // and be clobbered by a later recommit's MAP_FIXED. Replacing the mapping rather
                     // than mprotect'ing it discards the old contents, so a recommit sees the zeroed
                     // pages MEM_COMMIT requires. release_guest_address_range drops the claim for good.
+                    this->mirror_in_vm(host_page_addr, host_page_size_apple, PROT_NONE);
                     this->remap_host_claim(host_page_addr, host_page_size_apple, PROT_NONE);
                 }
                 return;
@@ -3336,10 +3513,13 @@ namespace sogen::fex
                 this->claim_host_range(host_page_addr, host_page_size_apple);
             }
 
-            if (::mprotect(reinterpret_cast<void*>(host_page_addr), host_page_size_apple, to_prot_apple(*effective)) != 0)
+            const int prot = this->host_protection(to_prot_apple(*effective));
+            if (::mprotect(reinterpret_cast<void*>(host_page_addr), host_page_size_apple, prot) != 0)
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
             }
+
+            this->mirror_in_vm(host_page_addr, host_page_size_apple, prot);
         }
 
         std::optional<memory_permission> shadow_permission_apple(const uint64_t host_page_addr) const
@@ -3384,7 +3564,7 @@ namespace sogen::fex
             // Must happen before the first FEXCore-internal allocation (CreateNewContext allocates the
             // CodeBuffer and dispatcher) and before reserved_host_ranges() is first queried, so the
             // whole arena is off-limits to guest allocations.
-            fex_internal_arena::instance().install();
+            fex_internal_arena::instance().install(this->vm_);
 #endif
 
             // libc++abi's default terminate handler prints nothing useful for an uncaught exception.
@@ -3440,6 +3620,14 @@ namespace sogen::fex
             // floating point on x87 then spend a large part of their time in softfloat, so host doubles are used instead.
             FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION, "1");
 
+#ifdef __APPLE__
+            // In the VM, every block the dispatcher's inline L2 probe finds is a VM exit saved.
+            if (this->vm_ != nullptr)
+            {
+                FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLEL2CACHE, "0");
+            }
+#endif
+
             // Piggybacks on FEXCore's GdbServer flag, whose only effect inside FEXCore (ContextImpl::
             // InitCore) is setting Config.NeedsPendingInterruptFaultCheck, making the JIT emit a
             // `str zr, [InterruptFaultPage]` at every block entry - the mechanism request_thread_stop()
@@ -3453,6 +3641,12 @@ namespace sogen::fex
             const FEXCore::HostFeatures features = fetch_host_features_linux();
 #endif
             this->context_ = FEXCore::Context::Context::CreateNewContext(features);
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                this->context_->SetHardwareTSOSupport(true);
+            }
+#endif
 
             this->syscall_handler_ = std::make_unique<fex_syscall_handler>(*this);
             this->context_->SetSyscallHandler(this->syscall_handler_.get());
@@ -4247,20 +4441,32 @@ namespace sogen::fex
         void create_thread()
         {
             // Seed the FEX thread from the staged CPUState the loader populated before the first start().
-            this->thread_ =
+            auto* thread =
                 this->context_->CreateThread(this->staged_state_.rip, this->staged_state_.gregs[detail::greg_rsp], &this->staged_state_);
+
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                this->vm_->map(reinterpret_cast<uint64_t>(thread), sizeof(*thread), PROT_READ | PROT_WRITE);
+                this->redirect_host_calls(thread->CurrentFrame->Pointers);
+            }
+            else
+            {
+                // See exit_function_link_jit_write_wrapper: the call-site patch must happen with this
+                // thread's JIT write-protection disabled.
+                g_original_exit_function_link = thread->CurrentFrame->Pointers.ExitFunctionLink;
+                thread->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
+            }
+#endif
+
+            // Published only now: request_thread_stop() runs on the quantum timer's thread and, in hypervisor mode,
+            // changes the protection of this thread's interrupt page in the VM, which needs the mapping above.
+            this->thread_ = thread;
 
             // FEXCore's core does not set up the call-ret shadow stack; on Linux that is embedder glue
             // in ThreadManager::CreateThread, replicated here. Without it the first x86 CALL in compiled
             // code dereferences a null callret_sp and crashes.
             this->ensure_callret_stack(this->thread_->CurrentFrame->State);
-
-#ifdef __APPLE__
-            // See exit_function_link_jit_write_wrapper: the call-site patch must happen with this
-            // thread's JIT write-protection disabled.
-            g_original_exit_function_link = this->thread_->CurrentFrame->Pointers.ExitFunctionLink;
-            this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
-#endif
         }
 
         // FEXCore's call-ret shadow stack has no notion of "logical guest thread" - callret_sp is just a
@@ -4297,6 +4503,9 @@ namespace sogen::fex
                 {
                     throw std::runtime_error("FEX backend failed to make the call-ret stack writable");
                 }
+#ifdef __APPLE__
+                this->mirror_in_vm(reinterpret_cast<uint64_t>(callret_stack_base), callret_stack_size, PROT_READ | PROT_WRITE);
+#endif
 
                 state._pad1 = reinterpret_cast<uint64_t>(callret_stack_base);
                 // Leave headroom for underflows without hitting the guard page immediately, matching
@@ -4469,8 +4678,311 @@ namespace sogen::fex
                 return;
             }
 
+#ifdef __APPLE__
+            // In the VM only the stage-2 protection counts, and the kick stops a guest that is not entering blocks.
+            if (this->vm_ != nullptr)
+            {
+                this->vm_->protect(reinterpret_cast<uint64_t>(this->thread_->InterruptFaultPage), sizeof(this->thread_->InterruptFaultPage),
+                                   PROT_READ);
+                if (auto* cpu = this->running_vcpu_.load())
+                {
+                    cpu->kick();
+                }
+                return;
+            }
+#endif
+
             ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_NONE);
         }
+
+        void arm_interrupt_page() const
+        {
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                this->vm_->protect(reinterpret_cast<uint64_t>(this->thread_->InterruptFaultPage), sizeof(this->thread_->InterruptFaultPage),
+                                   PROT_READ | PROT_WRITE);
+                return;
+            }
+#endif
+
+            ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+        }
+
+        void execute_thread()
+        {
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                vm_exit_handler handler{*this};
+                this->vcpu_->run(this->signal_delegator_->GetConfig().DispatcherBegin,
+                                 reinterpret_cast<uint64_t>(this->thread_->CurrentFrame),
+                                 reinterpret_cast<uint64_t>(this->vm_stack_) + vm_stack_size, handler);
+                return;
+            }
+#endif
+
+            this->context_->ExecuteThread(this->thread_);
+        }
+
+        // In hypervisor mode only the VM runs JIT output, and no host-executable frame may reach its stage 2 (see
+        // address_space::map_stage2), so the host never maps guest memory executable.
+        int host_protection(const int prot) const
+        {
+#ifdef __APPLE__
+            if (this->vm_ != nullptr)
+            {
+                return prot & ~PROT_EXEC;
+            }
+#endif
+            return prot;
+        }
+
+#ifdef __APPLE__
+        // The stack the dispatcher runs on inside the VM, in place of the host thread's.
+        static constexpr size_t vm_stack_size = 8ULL << 20;
+
+        class vcpu_fault_context final : public fault_context
+        {
+          public:
+            vcpu_fault_context(hvf::vcpu& cpu, const std::optional<bool> is_write)
+                : cpu_(cpu),
+                  is_write_(is_write)
+            {
+            }
+
+            uint64_t pc() const override
+            {
+                return this->cpu_.pc();
+            }
+
+            void set_pc(const uint64_t value) override
+            {
+                this->cpu_.set_pc(value);
+            }
+
+            void set_sp(const uint64_t value) override
+            {
+                this->cpu_.set_sp(value);
+            }
+
+            uint64_t gpr(const uint32_t index) const override
+            {
+                return this->cpu_.gpr(index);
+            }
+
+            void set_gpr(const uint32_t index, const uint64_t value) override
+            {
+                this->cpu_.set_gpr(index, value);
+            }
+
+            bool set_vector(const uint32_t index, const __uint128_t value) override
+            {
+                this->cpu_.set_vector(index, &value);
+                return true;
+            }
+
+            std::optional<bool> is_write() const override
+            {
+                return this->is_write_;
+            }
+
+            // FEXCore expects x0-x30 followed by SP, as a signal context lays them out.
+            std::optional<int32_t> handle_unaligned_access(FEXCore::Core::InternalThreadState* thread) override
+            {
+                std::array<uint64_t, 32> gprs{};
+                for (uint32_t i = 0; i < 31; ++i)
+                {
+                    gprs[i] = this->cpu_.gpr(i);
+                }
+                gprs[31] = this->cpu_.sp();
+
+                const auto skip = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
+                    thread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, this->pc(), gprs.data());
+
+                for (uint32_t i = 0; i < 31; ++i)
+                {
+                    this->cpu_.set_gpr(i, gprs[i]);
+                }
+                return skip;
+            }
+
+          private:
+            hvf::vcpu& cpu_;
+            std::optional<bool> is_write_;
+        };
+
+        class vm_exit_handler final : public hvf::vcpu_exit_handler
+        {
+          public:
+            explicit vm_exit_handler(fex_x86_64_emulator& emulator)
+                : emulator_(emulator)
+            {
+            }
+
+            bool on_stage2_fault(hvf::vcpu& cpu, const uint64_t address, const uint64_t syndrome) override
+            {
+                return this->emulator_.handle_stage2_fault(cpu, address, syndrome);
+            }
+
+            bool on_exception(hvf::vcpu& cpu) override
+            {
+                return this->emulator_.handle_vm_exception(cpu);
+            }
+
+          private:
+            fex_x86_64_emulator& emulator_;
+        };
+
+        static constexpr uint32_t esr_class_instruction_abort_lower_el = 0x20;
+        static constexpr uint32_t esr_class_instruction_abort_same_el = 0x21;
+        static constexpr uint32_t esr_class_data_abort_lower_el = 0x24;
+        static constexpr uint32_t esr_class_data_abort_same_el = 0x25;
+        static constexpr uint64_t esr_write_not_read = 1ULL << 6;
+
+        static uint32_t esr_class(const uint64_t syndrome)
+        {
+            return static_cast<uint32_t>((syndrome >> 26) & 0x3F);
+        }
+
+        void mirror_in_vm(const uint64_t address, const size_t size, const int prot) const
+        {
+            if (this->vm_ == nullptr)
+            {
+                return;
+            }
+
+            if (prot == PROT_NONE)
+            {
+                this->vm_->unmap(address, size);
+            }
+            else
+            {
+                this->vm_->map(address, size, prot);
+            }
+        }
+
+        // The JIT's host calls become stubs that leave the VM, and its constants come from the image copy.
+        void redirect_host_calls(FEXCore::Core::JITPointers& pointers) const
+        {
+            const auto redirect = [this](uint64_t& slot, const bool uses_vector_registers) {
+                if (slot != 0)
+                {
+                    slot = this->vm_->add_host_call(slot, uses_vector_registers);
+                }
+            };
+
+            for (auto* slot : {&pointers.PrintValue, &pointers.PrintVectorValue, &pointers.PrintMsgValue,
+                               &pointers.ThreadRemoveCodeEntryFromJIT, &pointers.CPUIDFunction, &pointers.XCRFunction,
+                               &pointers.SyscallHandlerFunc, &pointers.ExitFunctionLink, &pointers.MonoBackpatcherWrite, &pointers.LUDIV,
+                               &pointers.LDIV, &pointers.SleepFunc, &pointers.CompileBlockFunc, &pointers.CompileSingleStepFunc})
+            {
+                redirect(*slot, false);
+            }
+
+            for (auto& fallback : pointers.FallbackHandlerPointers)
+            {
+                redirect(fallback.Func, true);
+            }
+
+            const auto& image = copy_fexcore_image(*this->vm_);
+            for (auto& constant : pointers.NamedVectorConstantPointers)
+            {
+                constant = image.rebase(constant);
+            }
+            for (auto& constant : pointers.IndexedNamedVectorConstantPointers)
+            {
+                constant = image.rebase(constant);
+            }
+        }
+
+        // Hypervisor.framework only lets the thread that created a vCPU run it.
+        void prepare_vcpu()
+        {
+            if (!this->vcpu_ || !this->vcpu_->runs_on_current_thread())
+            {
+                this->running_vcpu_ = nullptr;
+                this->vcpu_.reset();
+                this->vcpu_ = std::make_unique<hvf::vcpu>(*this->vm_);
+                this->running_vcpu_ = this->vcpu_.get();
+            }
+
+            if (this->vm_stack_ == nullptr)
+            {
+                void* stack = FEXCore::Allocator::mmap(nullptr, vm_stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (stack == MAP_FAILED)
+                {
+                    throw std::runtime_error("FEX backend failed to allocate the VM stack");
+                }
+                this->vm_stack_ = stack;
+            }
+        }
+
+        bool handle_stage2_fault(hvf::vcpu& cpu, const uint64_t address, const uint64_t syndrome)
+        {
+            if (this->thread_ == nullptr)
+            {
+                return false;
+            }
+
+            const bool is_data = esr_class(syndrome) == esr_class_data_abort_lower_el;
+            vcpu_fault_context context{cpu, is_data ? std::optional{(syndrome & esr_write_not_read) != 0} : std::nullopt};
+            if (is_data && this->is_interrupt_page(address))
+            {
+                this->handle_interrupt_page_fault(context);
+                return true;
+            }
+
+            return this->handle_vm_memory_fault(context, address);
+        }
+
+        // Addresses the VM does not map fault at EL1: the call-ret guard pages, MMIO, and the null load of
+        // FEXCore's SIGSEGV trampoline among them. HLT and BRK from the other trampolines are undefined
+        // instructions and breakpoints there.
+        bool handle_vm_exception(hvf::vcpu& cpu)
+        {
+            if (this->thread_ == nullptr)
+            {
+                return false;
+            }
+
+            const auto syndrome = cpu.sys_reg(HV_SYS_REG_ESR_EL1);
+            const auto exception_class = esr_class(syndrome);
+            if (exception_class != esr_class_data_abort_same_el && exception_class != esr_class_instruction_abort_same_el)
+            {
+                vcpu_fault_context context{cpu, std::nullopt};
+                return this->host_pc_in_dispatcher(context.pc()) && this->handle_generated_exception(context);
+            }
+
+            const bool is_data = exception_class == esr_class_data_abort_same_el;
+            const auto fault_address = cpu.sys_reg(HV_SYS_REG_FAR_EL1);
+            vcpu_fault_context context{cpu, is_data ? std::optional{(syndrome & esr_write_not_read) != 0} : std::nullopt};
+
+            if (this->handle_callret_stack_fault(context, fault_address))
+            {
+                return true;
+            }
+
+            if (const auto handled = this->try_handle_mmio_fault(context, fault_address))
+            {
+                return *handled;
+            }
+
+            return this->handle_vm_memory_fault(context, fault_address);
+        }
+
+        bool handle_vm_memory_fault(fault_context& context, const uint64_t fault_address)
+        {
+            const uint64_t pc = context.pc();
+            if (this->host_pc_in_dispatcher(pc))
+            {
+                return this->handle_generated_exception(context);
+            }
+
+            return this->context_->IsAddressInCodeBuffer(this->thread_, pc) &&
+                   this->handle_general_memory_violation(context, fault_address);
+        }
+#endif
 
         emulator_hook* make_hook()
         {
@@ -4481,6 +4993,13 @@ namespace sogen::fex
 
         fextl::unique_ptr<FEXCore::Context::Context> context_{};
         FEXCore::Core::InternalThreadState* thread_ = nullptr;
+
+#ifdef __APPLE__
+        hvf::vm* vm_{};
+        std::unique_ptr<hvf::vcpu> vcpu_{};
+        std::atomic<hvf::vcpu*> running_vcpu_{};
+        void* vm_stack_{};
+#endif
 
         std::unique_ptr<fex_syscall_handler> syscall_handler_{};
         // Does no fault handling; the plain base only carries the dispatcher config
@@ -4779,8 +5298,8 @@ namespace sogen::fex
         return std::nullopt;
     }
 
-    std::unique_ptr<x86_64_emulator> create_x86_64_emulator()
+    std::unique_ptr<x86_64_emulator> create_x86_64_emulator(const execution_mode mode)
     {
-        return std::make_unique<fex_x86_64_emulator>();
+        return std::make_unique<fex_x86_64_emulator>(mode);
     }
 } // namespace sogen::fex

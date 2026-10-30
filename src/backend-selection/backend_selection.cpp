@@ -37,6 +37,12 @@ namespace sogen
     namespace
     {
 #if !defined(_M_ARM64) || SOGEN_ENABLE_RUST_CODE
+        bool fex_hypervisor_requested()
+        {
+            const auto* env = getenv("EMULATOR_FEX_HVF");
+            return env && (env == "1"sv || env == "true"sv);
+        }
+
         std::unique_ptr<x86_64_emulator> create_backend(backend_type backend, [[maybe_unused]] const size_t vcpu_count)
         {
             switch (backend)
@@ -68,7 +74,8 @@ namespace sogen
 
 #if defined(SOGEN_ENABLE_FEX)
             case backend_type::fex:
-                return fex::create_x86_64_emulator();
+                return fex::create_x86_64_emulator(fex_hypervisor_requested() ? fex::execution_mode::hypervisor
+                                                                              : fex::execution_mode::in_process);
 #endif
 
             default:
@@ -213,7 +220,7 @@ namespace sogen
 
         {
             const auto* env = getenv("EMULATOR_FEX");
-            if (env && (env == "1"sv || env == "true"sv))
+            if ((env && (env == "1"sv || env == "true"sv)) || fex_hypervisor_requested())
             {
                 backend = backend_type::fex;
             }

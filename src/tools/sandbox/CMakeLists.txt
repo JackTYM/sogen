@@ -43,3 +43,4 @@ else()
 endif()
 
 sogen_strip_target(sandbox)
+sogen_enable_hypervisor_entitlement(sandbox)

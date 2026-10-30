@@ -2,13 +2,18 @@
 
 #include <gtest/gtest.h>
 
+#include <fex_x86_64_emulator.hpp>
 #include <hvf_address_space.hpp>
 #include <hvf_guest_runtime.hpp>
+#include <memory_manager.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <sys/mman.h>
@@ -155,6 +160,46 @@ namespace sogen::test
             uint32_t instruction{};
             std::memcpy(&instruction, reinterpret_cast<const void*>(address + (index * sizeof(instruction))), sizeof(instruction));
             return instruction;
+        }
+
+        std::unique_ptr<x86_64_emulator> create_hypervisor_emulator(std::string& failure)
+        {
+            try
+            {
+                return fex::create_x86_64_emulator(fex::execution_mode::hypervisor);
+            }
+            catch (const std::exception& e)
+            {
+                failure = e.what();
+                return {};
+            }
+        }
+
+        // A long-mode code segment and RX code at the returned address, followed by hlt.
+        uint64_t prepare_guest_code(x86_64_emulator& emu, memory_manager& memory, const std::vector<uint8_t>& code)
+        {
+            constexpr size_t page = 0x1000;
+            const uint64_t code_address = memory.allocate_memory(page, memory_permission::read_write);
+            const uint64_t gdt = memory.allocate_memory(page, memory_permission::read_write);
+            if (code_address == 0 || gdt == 0)
+            {
+                return 0;
+            }
+
+            constexpr uint16_t long_mode_code_selector = 0x08;
+            constexpr uint64_t long_mode_code_descriptor = 0x00AF9B000000FFFF;
+            emu.write_memory<uint64_t>(gdt + long_mode_code_selector, long_mode_code_descriptor);
+            emu.load_gdt(gdt, page);
+            emu.reg<uint16_t>(x86_register::cs, long_mode_code_selector);
+
+            memory.write_memory(code_address, code.data(), code.size());
+            if (!memory.protect_memory(code_address, page, memory_permission::read_exec))
+            {
+                return 0;
+            }
+
+            emu.reg(x86_register::rip, code_address);
+            return code_address;
         }
 
         class FexHvfAddressSpaceTest : public testing::Test
@@ -505,6 +550,147 @@ namespace sogen::test
         EXPECT_EQ(first[1], 1000U);
         EXPECT_EQ(second[0], 26U);
         EXPECT_EQ(second[1], 2600U);
+    }
+
+    TEST(FexHvfModeTest, GuestRunsInTheVmUntilHlt)
+    {
+        std::string failure{};
+        const auto emu = create_hypervisor_emulator(failure);
+        if (!emu)
+        {
+            GTEST_SKIP() << failure;
+        }
+
+        EXPECT_EQ(emu->get_name(), "FEX (HVF)");
+
+        memory_manager memory{*emu};
+        memory.reserve_host_memory_ranges();
+        // mov rax, rbx; add rax, rcx; hlt
+        ASSERT_NE(prepare_guest_code(*emu, memory, {0x48, 0x89, 0xD8, 0x48, 0x01, 0xC8, 0xF4}), 0U);
+
+        int interrupt = -1;
+        emu->hook_interrupt([&](cpu_interface& cpu, const int vector) {
+            interrupt = vector;
+            cpu.stop();
+        });
+
+        emu->reg(x86_register::rbx, 40);
+        emu->reg(x86_register::rcx, 2);
+        emu->start(0);
+
+        EXPECT_EQ(interrupt, 13);
+        EXPECT_EQ(emu->reg(x86_register::rax), 42U);
+    }
+
+    TEST(FexHvfModeTest, GuestStoreToReadOnlyMemoryIsReportedAsWrite)
+    {
+        std::string failure{};
+        const auto emu = create_hypervisor_emulator(failure);
+        if (!emu)
+        {
+            GTEST_SKIP() << failure;
+        }
+
+        memory_manager memory{*emu};
+        memory.reserve_host_memory_ranges();
+        const uint64_t target = memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(target, 0U);
+        ASSERT_TRUE(memory.protect_memory(target, 0x1000, memory_permission::read));
+        // mov [rax], rbx; hlt
+        ASSERT_NE(prepare_guest_code(*emu, memory, {0x48, 0x89, 0x18, 0xF4}), 0U);
+
+        bool observed = false;
+        uint64_t observed_address = 0;
+        memory_operation observed_operation = memory_operation::read;
+        memory_violation_type observed_type = memory_violation_type::unmapped;
+        emu->hook_memory_violation(
+            [&](cpu_interface& cpu, const uint64_t address, size_t, const memory_operation operation, const memory_violation_type type) {
+                observed = true;
+                observed_address = address;
+                observed_operation = operation;
+                observed_type = type;
+                cpu.stop();
+                return memory_violation_continuation::stop;
+            });
+
+        emu->reg(x86_register::rax, target);
+        emu->reg(x86_register::rbx, 0x1122334455667788ULL);
+        emu->start(0);
+
+        EXPECT_TRUE(observed);
+        EXPECT_EQ(observed_address, target);
+        EXPECT_EQ(observed_operation, memory_operation::write);
+        EXPECT_EQ(observed_type, memory_violation_type::protection);
+    }
+
+    TEST(FexHvfModeTest, MisalignedAtomicOnHostAliasedMemoryIsEmulated)
+    {
+        std::string failure{};
+        const auto emu = create_hypervisor_emulator(failure);
+        if (!emu)
+        {
+            GTEST_SKIP() << failure;
+        }
+
+        constexpr size_t host_page_size = 0x4000;
+        void* const host_buffer = ::mmap(nullptr, host_page_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        ASSERT_NE(host_buffer, MAP_FAILED);
+
+        memory_manager memory{*emu};
+        memory.reserve_host_memory_ranges();
+        const uint64_t target = memory.allocate_host_memory(host_page_size, host_buffer, memory_permission::read_write);
+        ASSERT_NE(target, 0U);
+        // lock xadd [rax], rbx; hlt
+        ASSERT_NE(prepare_guest_code(*emu, memory, {0xF0, 0x48, 0x0F, 0xC1, 0x18, 0xF4}), 0U);
+
+        constexpr uint64_t operand_offset = 0x3C;
+        const auto operand = static_cast<uint8_t*>(host_buffer) + operand_offset;
+        const uint64_t initial_value = 0x10;
+        std::memcpy(operand, &initial_value, sizeof(initial_value));
+
+        bool violation_observed = false;
+        emu->hook_memory_violation([&](cpu_interface& cpu, uint64_t, size_t, memory_operation, memory_violation_type) {
+            violation_observed = true;
+            cpu.stop();
+            return memory_violation_continuation::stop;
+        });
+        emu->hook_interrupt([](cpu_interface& cpu, int) { cpu.stop(); });
+
+        emu->reg(x86_register::rax, target + operand_offset);
+        emu->reg(x86_register::rbx, 1);
+        emu->start(0);
+
+        uint64_t final_value{};
+        std::memcpy(&final_value, operand, sizeof(final_value));
+        EXPECT_FALSE(violation_observed);
+        EXPECT_EQ(final_value, initial_value + 1);
+        EXPECT_EQ(emu->reg(x86_register::rbx), initial_value);
+
+        ::munmap(host_buffer, host_page_size);
+    }
+
+    TEST(FexHvfModeTest, EmulatorCanBeCreatedAgainAfterDestruction)
+    {
+        for (int round = 0; round < 2; ++round)
+        {
+            std::string failure{};
+            const auto emu = create_hypervisor_emulator(failure);
+            if (!emu)
+            {
+                GTEST_SKIP() << failure;
+            }
+
+            memory_manager memory{*emu};
+            memory.reserve_host_memory_ranges();
+            memory.reserve_host_memory_ranges();
+            // inc rax; hlt
+            ASSERT_NE(prepare_guest_code(*emu, memory, {0x48, 0xFF, 0xC0, 0xF4}), 0U);
+            emu->hook_interrupt([](cpu_interface& cpu, int) { cpu.stop(); });
+            emu->reg(x86_register::rax, 41);
+            emu->start(0);
+
+            EXPECT_EQ(emu->reg(x86_register::rax), 42U);
+        }
     }
 }
 
