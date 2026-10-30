@@ -108,15 +108,17 @@
 
 #if SOGEN_FEX_HYPERVISOR
 // The host side of a call FEX's code makes from inside the VM: calls `function` with the AAPCS64 argument registers
-// x0-x7 and q0-q7 from the frame and stores the x0, x1 and q0-q3 it returns back into it.
+// x0-x7 and q0-q7 and the FPCR from the frame and stores the x0, x1 and q0-q3 it returns back into it.
 struct sogen_fex_host_call_frame
 {
     std::array<uint64_t, 8> x;
     alignas(16) std::array<__uint128_t, 8> v;
     uint64_t function;
+    uint64_t fpcr;
 };
 
-static_assert(offsetof(sogen_fex_host_call_frame, v) == 64 && offsetof(sogen_fex_host_call_frame, function) == 192);
+static_assert(offsetof(sogen_fex_host_call_frame, v) == 64 && offsetof(sogen_fex_host_call_frame, function) == 192 &&
+              offsetof(sogen_fex_host_call_frame, fpcr) == 200);
 
 extern "C" void sogen_fex_host_call(sogen_fex_host_call_frame* frame);
 
@@ -127,8 +129,11 @@ __asm__(".text\n"
         "_sogen_fex_host_call:\n"
         "    stp x29, x30, [sp, #-32]!\n"
         "    mov x29, sp\n"
-        "    str x19, [sp, #16]\n"
+        "    stp x19, x20, [sp, #16]\n"
         "    mov x19, x0\n"
+        "    mrs x20, fpcr\n"
+        "    ldr x16, [x19, #200]\n"
+        "    msr fpcr, x16\n"
         "    ldp q0, q1, [x19, #64]\n"
         "    ldp q2, q3, [x19, #96]\n"
         "    ldp q4, q5, [x19, #128]\n"
@@ -139,10 +144,11 @@ __asm__(".text\n"
         "    ldp x4, x5, [x19, #32]\n"
         "    ldp x6, x7, [x19, #48]\n"
         "    blr x16\n"
+        "    msr fpcr, x20\n"
         "    stp x0, x1, [x19, #0]\n"
         "    stp q0, q1, [x19, #64]\n"
         "    stp q2, q3, [x19, #96]\n"
-        "    ldr x19, [sp, #16]\n"
+        "    ldp x19, x20, [sp, #16]\n"
         "    ldp x29, x30, [sp], #32\n"
         "    ret\n");
 #endif
@@ -5216,6 +5222,7 @@ namespace sogen::fex
                                   sizeof(call.v[reg]));
             }
             call.function = this->host_calls_[index];
+            call.fpcr = cpu.reg(arm64_register::fpcr);
             sogen_fex_host_call(&call);
 
             cpu.reg(arm64_register::x0, call.x[0]);
