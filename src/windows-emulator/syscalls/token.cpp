@@ -614,6 +614,46 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtPrivilegeCheck(const syscall_context& c, const handle client_token, const emulator_pointer required_privileges,
+                                         const emulator_object<BOOLEAN> result)
+        {
+            struct privilege_set_header
+            {
+                ULONG privilege_count;
+                ULONG control;
+            };
+
+            constexpr ULONG privilege_set_all_necessary = 1;
+            constexpr uint64_t luid_and_attributes_size = 12;
+
+            const auto header = emulator_object<privilege_set_header>{c.emu, required_privileges}.try_read();
+            if (!header || !result)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            std::array<std::byte, luid_and_attributes_size> privilege{};
+            const auto privileges = required_privileges + sizeof(privilege_set_header);
+            for (uint64_t index = 0; index < header->privilege_count; ++index)
+            {
+                if (!c.win_emu.memory.try_read_memory(privileges + (index * luid_and_attributes_size), privilege.data(), privilege.size()))
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+            }
+
+            if (client_token != CURRENT_PROCESS_TOKEN && client_token != DUMMY_IMPERSONATION_TOKEN &&
+                client_token != ANONYMOUS_IMPERSONATION_TOKEN)
+            {
+                const auto object_handle = c.proc.resolve_object_pseudo_handle(client_token, c.vcpu.active_thread);
+                auto* store = c.proc.get_handle_store(object_handle);
+                return store && store->get_object(object_handle) ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_INVALID_HANDLE;
+            }
+
+            const BOOLEAN granted = header->privilege_count == 0 && (header->control & privilege_set_all_necessary) != 0;
+            return result.try_write(granted) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
+        }
+
         NTSTATUS handle_NtQuerySecurityAttributesToken(const syscall_context& c, const handle token_handle,
                                                        const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> attributes,
                                                        const ULONG number_of_attributes, const uint64_t buffer, const ULONG buffer_length,
