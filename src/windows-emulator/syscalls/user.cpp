@@ -1654,6 +1654,7 @@ namespace sogen
                                           emulator_pointer bits);
         hdc create_gdi_window_dc(const syscall_context& c, hwnd window);
         uint32_t handle_NtGdiDeleteObjectApp(const syscall_context& c, uint32_t handle_value);
+        uint32_t count_process_gdi_objects(const syscall_context& c);
         bool set_gdi_region_rect(const syscall_context& c, handle region, const RECT& rect);
         BOOL handle_NtGdiFlush(const syscall_context& c);
         BOOL handle_NtGdiPatBlt(const syscall_context& c, hdc dc, LONG x, LONG y, LONG width, LONG height, DWORD rop);
@@ -6661,6 +6662,107 @@ namespace sogen
             default:
                 return fail(error_invalid_parameter);
             }
+        }
+
+        DWORD handle_NtUserGetGuiResources(const syscall_context& c, const handle process, const DWORD flags)
+        {
+            constexpr uint64_t gr_global = ~1ULL;
+            constexpr DWORD gr_gdi_objects = 0;
+            constexpr DWORD gr_user_objects = 1;
+            constexpr DWORD gr_gdi_objects_peak = 2;
+            constexpr DWORD gr_user_objects_peak = 4;
+            constexpr uint32_t error_invalid_parameter = 87;
+
+            if (flags > gr_user_objects_peak || (!c.proc.is_current_process_handle(process) && process.bits != gr_global))
+            {
+                set_guest_last_error(c, error_invalid_parameter);
+                return 0;
+            }
+
+            const auto window_count = std::ranges::count_if(c.proc.windows, [&](const auto& entry) {
+                return entry.second.thread_id != 0 && entry.second.handle != c.proc.default_desktop_window_handle.bits;
+            });
+            const auto gdi_objects = count_process_gdi_objects(c);
+            const auto user_objects =
+                static_cast<uint32_t>(static_cast<size_t>(window_count) + c.proc.menus.size() + c.proc.accelerator_tables.size());
+            c.proc.gdi_objects_peak = std::max(c.proc.gdi_objects_peak, gdi_objects);
+            c.proc.user_objects_peak = std::max(c.proc.user_objects_peak, user_objects);
+
+            switch (flags)
+            {
+            case gr_gdi_objects:
+                return gdi_objects;
+            case gr_user_objects:
+                return user_objects;
+            case gr_gdi_objects_peak:
+                return c.proc.gdi_objects_peak;
+            case gr_user_objects_peak:
+                return c.proc.user_objects_peak;
+            default:
+                return 0;
+            }
+        }
+
+        BOOL handle_NtUserGetWindowDisplayAffinity(const syscall_context& c, const hwnd window, const emulator_object<DWORD> affinity)
+        {
+            constexpr uint32_t error_invalid_parameter = 87;
+            constexpr uint32_t error_no_access = 998;
+            constexpr uint32_t error_invalid_window_handle = 1400;
+            constexpr DWORD wda_none = 0;
+
+            const auto* win = c.proc.windows.get(window);
+            if (!win)
+            {
+                set_guest_last_error(c, error_invalid_window_handle);
+                return FALSE;
+            }
+
+            if (win->parent_handle != c.proc.default_desktop_window_handle.bits)
+            {
+                set_guest_last_error(c, error_invalid_parameter);
+                return FALSE;
+            }
+
+            if (!affinity || !affinity.try_write(wda_none))
+            {
+                set_guest_last_error(c, error_no_access);
+                return FALSE;
+            }
+
+            return TRUE;
+        }
+
+        BOOL handle_NtUserShowOwnedPopups(const syscall_context& c, const hwnd owner, const BOOL show)
+        {
+            if (!c.proc.windows.get(owner))
+            {
+                return FALSE;
+            }
+
+            const auto has_visible_popup = std::ranges::any_of(c.proc.windows, [&](const auto& entry) {
+                return entry.second.owner_handle == owner && (entry.second.style & WS_VISIBLE) != 0;
+            });
+
+            if (!show && has_visible_popup)
+            {
+                c.win_emu.log.error("NtUserShowOwnedPopups: hiding visible owned popups is not supported\n");
+                c.emu.stop();
+                return FALSE;
+            }
+
+            return TRUE;
+        }
+
+        BOOL handle_NtUserGetCurrentInputMessageSource(const syscall_context& c, const emulator_pointer source)
+        {
+            struct input_message_source
+            {
+                uint32_t device_type;
+                uint32_t origin_id;
+            };
+
+            constexpr input_message_source unavailable{.device_type = 0, .origin_id = 0};
+            return source != 0 && c.win_emu.memory.try_write_memory(source, &unavailable, sizeof(unavailable)) ? TRUE : FALSE;
         }
 
         uint64_t handle_NtUserQueryWindow(const syscall_context& c, const hwnd window_handle, const uint32_t query_type)

@@ -1996,6 +1996,44 @@ namespace sogen
             return dc;
         }
 
+        uint32_t count_process_gdi_objects(const syscall_context& c)
+        {
+            const auto table = c.proc.peb64.read().GdiSharedHandleTable;
+            if (table == 0)
+            {
+                return 0;
+            }
+
+            std::unordered_set<uint32_t> system_owned{c.proc.gdi_memory_dc_default_bitmap_handle};
+            for (uint32_t index = 0; index < std::extent_v<decltype(GDI_SHARED_MEMORY64::Objects)>; ++index)
+            {
+                system_owned.insert(static_cast<uint32_t>(read_gdi_object_slot(c, index)));
+            }
+            c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& server_info) {
+                for (const auto brush : server_info.ahbrSystem)
+                {
+                    system_owned.insert(static_cast<uint32_t>(brush));
+                }
+            });
+
+            std::vector<GDI_HANDLE_ENTRY64> entries(GDI_MAX_HANDLE_COUNT - k_gdi_first_dynamic_handle);
+            c.emu.read_memory(table + (static_cast<uint64_t>(k_gdi_first_dynamic_handle) * sizeof(GDI_HANDLE_ENTRY64)), entries.data(),
+                              entries.size() * sizeof(GDI_HANDLE_ENTRY64));
+
+            uint32_t count = 0;
+            for (size_t i = 0; i < entries.size(); ++i)
+            {
+                const auto index = k_gdi_first_dynamic_handle + static_cast<uint32_t>(i);
+                const auto handle_value = (static_cast<uint32_t>(entries[i].Unique) << 16) | index;
+                if (entries[i].Type != 0 && !system_owned.contains(handle_value))
+                {
+                    ++count;
+                }
+            }
+
+            return count;
+        }
+
         hdc handle_NtGdiOpenDCW(const syscall_context& c)
         {
             return ensure_default_hdc(c);
