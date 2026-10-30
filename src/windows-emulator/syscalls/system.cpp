@@ -264,6 +264,18 @@ namespace sogen
                     return STATUS_SUCCESS;
                 }
 
+                if (static_cast<uint32_t>(request) > RelationProcessorModule)
+                {
+                    c.win_emu.log.error("Unsupported processor relationship: 0x%X\n", static_cast<uint32_t>(request));
+
+                    if (return_length)
+                    {
+                        return_length.write(0);
+                    }
+
+                    return STATUS_UNSUCCESSFUL;
+                }
+
                 c.win_emu.log.error("Unsupported processor relationship: 0x%X\n", request);
                 c.emu.stop();
                 return STATUS_NOT_SUPPORTED;
