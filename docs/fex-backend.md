@@ -72,6 +72,53 @@ build or run at all): from an ARM64 Clang host (Apple Silicon macOS or ARM64 Lin
 `cmake --preset=release` picks this backend up automatically once `deps/FEX` is checked out (see the
 root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requires a 4KB host page.
 
+## Hypervisor mode (`EMULATOR_FEX_HVF=1`)
+
+On Apple Silicon the FEX backend can run its JIT output inside a Hypervisor.framework VM whose vCPU
+has `ACTLR_EL1.EnTSO` set, so the hardware provides x86's memory ordering and FEXCore stops emitting
+its software TSO sequences. `EMULATOR_FEX_HVF=1` selects the FEX backend in this mode; the sandbox and
+`--backend fex` honor it too. It is off by default, and when it is requested but unusable the
+emulator refuses to start and says why, instead of silently running in-process.
+
+Requirements: macOS 15 or newer on Apple Silicon, `kern.hv_support`, and the
+`com.apple.security.hypervisor` entitlement. The build signs the analyzer, the sandbox and the test
+binaries with it.
+
+How it works (`src/backends/fex-emulator/hvf/`):
+
+- Everything the JIT output touches is mapped into the VM at its own host address: guest memory,
+  FEXCore's arena allocations (code buffers, lookup caches, call-ret stacks), the thread state and a
+  dedicated dispatcher stack. Stage 1 translates each 4KB page to a guest-physical address and allows
+  everything; stage 2 maps it onto the host page and holds the protection, so every permission fault
+  leaves the VM. Each host mapping change on the Apple path is mirrored there.
+- The vCPU runs FEXCore's dispatcher at EL1. Calls from JIT code into host functions go through
+  `JITPointers`, which point at stubs that leave the VM; the host runs the function with the vCPU's
+  argument registers and resumes the guest with the result. VM exits for faults are handled by the
+  same code as the in-process signal handler.
+- The quantum timer stops the guest by revoking stage-2 write access to the interrupt page, the
+  equivalent of the in-process `mprotect`, and kicks the vCPU.
+- FEXCore's L2 lookup cache is enabled, since a block the dispatcher finds there is a VM exit saved.
+- This needs two changes in `deps/FEX`: the dispatcher loads `CompileBlock`, `CompileSingleStep`,
+  `SleepThread` and its context from `JITPointers`, and `VirtualDontNeed` replaces pages through the
+  allocator's `mmap` hook, so the VM learns about the new pages.
+
+**Never let a host-executable page reach the VM.** Apple Silicon's SPTM halts the whole machine,
+rather than failing the call, when a frame the host maps executable is used through a guest's stage-2
+tables. In this mode code buffers are plain writable host memory that only the VM executes, guest
+memory is never mapped executable on the host, and libFEXCore's own image is replaced in the VM by a
+read-only copy of it. `address_space` checks the host protection of every range before it reaches
+stage 2 and throws instead.
+
+Limits:
+
+- One vCPU, like the in-process mode, and no WoW64 on macOS.
+- Hypervisor.framework allows one VM per process, so this mode cannot be combined with the HVF ARM64
+  backend in one process, and a process cannot switch FEX between in-process and hypervisor
+  execution once it has created a FEX emulator.
+- Every host call (syscalls, block compilation, x87 fallbacks) is a VM exit, so guests that make
+  many of them can run slower than in-process.
+- CI runners cannot create VMs, so CI only builds this mode and runs its bookkeeping tests.
+
 ## Known limitations
 
 - **On Darwin, a protection fault from a plain `STR`/`STUR` store can be misclassified as a read.**
