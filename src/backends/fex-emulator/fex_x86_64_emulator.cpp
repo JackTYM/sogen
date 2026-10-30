@@ -4296,15 +4296,22 @@ namespace sogen::fex
             if (fault_addr != pc)
             {
                 const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-#ifdef __linux__
                 // The emulation decoder below is intentionally limited to the ordered STLR-family
                 // instructions that can fault for alignment. Ordinary translated STR/STUR stores must
                 // still be reported as writes on real protection faults, so use the kernel-provided
                 // AArch64 ESR WnR bit for access classification instead of broadening that decoder.
                 constexpr uint64_t esr_write_not_read = 1ULL << 6;
+#ifdef __linux__
                 if (const auto* esr = find_aarch64_context<esr_context>(uctx, ESR_MAGIC))
                 {
                     operation = (esr->esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
+                }
+                else
+#elif defined(__APPLE__)
+                constexpr uint64_t data_abort_from_el0 = 0x24;
+                if (const uint64_t esr = uctx->uc_mcontext->__es.__esr; (esr >> 26) == data_abort_from_el0)
+                {
+                    operation = (esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
                 }
                 else
 #endif
@@ -5191,7 +5198,7 @@ namespace sogen::fex
                 return false;
             }
 
-            return this->deliver_host_signal(cpu, signal, code, address);
+            return this->deliver_host_signal(cpu, signal, code, exception);
         }
 
         void perform_host_call(arm64_cpu& cpu, const size_t index)
@@ -5223,8 +5230,9 @@ namespace sogen::fex
             cpu.reg(arm64_register::pc, cpu.reg(arm64_register::x30));
         }
 
-        bool deliver_host_signal(arm64_cpu& cpu, const int signal, const int code, const uint64_t address)
+        bool deliver_host_signal(arm64_cpu& cpu, const int signal, const int code, const hvf::el0_exception& exception)
         {
+            const auto address = exception.fault_address;
             __darwin_mcontext64 machine{};
             ucontext_t context{};
             context.uc_mcontext = &machine;
@@ -5245,6 +5253,7 @@ namespace sogen::fex
             machine.__ns.__fpsr = cpu.reg<uint32_t>(arm64_register::fpsr);
             machine.__ns.__fpcr = cpu.reg<uint32_t>(arm64_register::fpcr);
             machine.__es.__far = address;
+            machine.__es.__esr = static_cast<uint32_t>(exception.syndrome);
 
             siginfo_t info{};
             info.si_signo = signal;
