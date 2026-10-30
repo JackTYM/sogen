@@ -8,3 +8,4 @@ list(SORT SRC_FILES)
 add_library(fex-hvf STATIC ${SRC_FILES})
 
 target_include_directories(fex-hvf INTERFACE "${CMAKE_CURRENT_LIST_DIR}")
+target_link_libraries(fex-hvf PUBLIC "-framework Hypervisor")

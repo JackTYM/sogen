@@ -3,9 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <hvf_address_space.hpp>
+#include <hvf_guest_runtime.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -111,6 +113,49 @@ namespace sogen::test
                 return 0;
             }
         };
+
+        using vector128 = uint64_t __attribute__((vector_size(16)));
+
+        struct gpr_pair
+        {
+            uint64_t first;
+            uint64_t second;
+        };
+
+        struct indirect_result
+        {
+            uint64_t values[4];
+        };
+
+        struct vector_pair
+        {
+            vector128 first;
+            vector128 second;
+        };
+
+        gpr_pair combine_gprs(const uint64_t a0, const uint64_t a1, const uint64_t a2, const uint64_t a3, const uint64_t a4,
+                              const uint64_t a5, const uint64_t a6, const uint64_t a7)
+        {
+            return {.first = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7, .second = a0 ^ a7};
+        }
+
+        indirect_result make_indirect_result(const uint64_t a0, const uint64_t a1)
+        {
+            return {.values = {a0, a1, a0 + a1, a0 * a1}};
+        }
+
+        vector_pair combine_vectors(const vector128 v0, const vector128 v1, const vector128 v2, const vector128 v3, const vector128 v4,
+                                    const vector128 v5, const vector128 v6, const vector128 v7)
+        {
+            return {.first = v0 + v1 + v2 + v3, .second = v4 + v5 + v6 + v7};
+        }
+
+        uint32_t instruction_at(const uint64_t address, const size_t index = 0)
+        {
+            uint32_t instruction{};
+            std::memcpy(&instruction, reinterpret_cast<const void*>(address + (index * sizeof(instruction))), sizeof(instruction));
+            return instruction;
+        }
 
         class FexHvfAddressSpaceTest : public testing::Test
         {
@@ -334,6 +379,132 @@ namespace sogen::test
 
         this->stage2.host_executable = false;
         EXPECT_EQ(this->map_and_get_ipa(base, stage2_page_size), ipa);
+    }
+
+    TEST(FexHvfGuestRuntimeTest, HostCallIdsAreTheHvcImmediate)
+    {
+        EXPECT_EQ(fex::hvf::encode_hvc(0), 0xD4000002U);
+        EXPECT_EQ(fex::hvf::encode_hvc(0x101), 0xD4002022U);
+        EXPECT_EQ(fex::hvf::encode_hvc(0x1FF), 0xD4003FE2U);
+    }
+
+    TEST(FexHvfGuestRuntimeTest, EveryVectorEntryLeavesTheVmWithItsOwnId)
+    {
+        const fex::hvf::guest_runtime runtime{};
+
+        for (size_t entry = 0; entry < fex::hvf::vector_count; ++entry)
+        {
+            const auto address = runtime.vector_table() + (entry * fex::hvf::guest_runtime::vector_stride);
+            EXPECT_EQ(instruction_at(address), fex::hvf::encode_hvc(static_cast<uint16_t>(fex::hvf::first_vector_call + entry)));
+        }
+    }
+
+    TEST(FexHvfGuestRuntimeTest, ExitAndTlbFlushStubsLeaveTheVm)
+    {
+        const fex::hvf::guest_runtime runtime{};
+
+        EXPECT_EQ(instruction_at(runtime.exit_stub()), fex::hvf::encode_hvc(fex::hvf::exit_call));
+
+        const auto flush = runtime.tlb_flush_stub();
+        EXPECT_EQ(instruction_at(flush, 0), 0xD508831FU);
+        EXPECT_EQ(instruction_at(flush, 1), 0xD5033B9FU);
+        EXPECT_EQ(instruction_at(flush, 2), 0xD5033FDFU);
+        EXPECT_EQ(instruction_at(flush, 3), fex::hvf::encode_hvc(fex::hvf::tlb_flush_done_call));
+    }
+
+    TEST(FexHvfGuestRuntimeTest, HostCallStubsLeaveTheVmAndReturn)
+    {
+        const fex::hvf::guest_runtime runtime{};
+
+        for (const size_t index : {size_t{0}, size_t{1}, fex::hvf::max_host_calls - 1})
+        {
+            const auto stub = runtime.host_call_stub(index);
+            EXPECT_GE(stub, runtime.exit_stub());
+            EXPECT_LE(stub + 8, runtime.address() + fex::hvf::guest_runtime::size);
+            EXPECT_EQ(instruction_at(stub, 0), fex::hvf::encode_hvc(static_cast<uint16_t>(index)));
+            EXPECT_EQ(instruction_at(stub, 1), 0xD65F03C0U);
+        }
+
+        EXPECT_EQ(runtime.host_call_stub(1) - runtime.host_call_stub(0), 8U);
+    }
+
+    TEST(FexHvfGuestRuntimeTest, HostCallsAreSharedPerFunctionAndRegisterUse)
+    {
+        fex::hvf::host_call_table table{};
+
+        EXPECT_EQ(table.add(0x1000, false), 0U);
+        EXPECT_EQ(table.add(0x2000, false), 1U);
+        EXPECT_EQ(table.add(0x1000, false), 0U);
+        EXPECT_EQ(table.add(0x1000, true), 2U);
+
+        const auto call = table.get(2);
+        ASSERT_TRUE(call.has_value());
+        EXPECT_EQ(call->function, 0x1000U);
+        EXPECT_TRUE(call->uses_vector_registers);
+        EXPECT_FALSE(table.get(3).has_value());
+    }
+
+    TEST(FexHvfGuestRuntimeTest, HostCallTableRefusesMoreThanTheStubCount)
+    {
+        fex::hvf::host_call_table table{};
+        for (uint64_t i = 0; i < fex::hvf::max_host_calls; ++i)
+        {
+            table.add(0x1000 + i, false);
+        }
+
+        EXPECT_THROW(table.add(0x1000, true), std::runtime_error);
+        EXPECT_EQ(table.add(0x1000, false), 0U);
+    }
+
+    TEST(FexHvfHostCallTest, ArgumentRegistersAreReplayedAndResultRegistersCaptured)
+    {
+        fex::hvf::host_call_registers registers{};
+        for (uint32_t i = 0; i < 8; ++i)
+        {
+            registers.x[i] = 1ULL << (i * 4);
+        }
+
+        fex::hvf::sogen_fex_hvf_call_host(&registers, reinterpret_cast<uint64_t>(&combine_gprs));
+
+        EXPECT_EQ(registers.x[0], 0x11111111U);
+        EXPECT_EQ(registers.x[1], 0x10000001U);
+    }
+
+    TEST(FexHvfHostCallTest, IndirectResultRegisterIsReplayed)
+    {
+        indirect_result result{};
+        fex::hvf::host_call_registers registers{};
+        registers.x[0] = 6;
+        registers.x[1] = 7;
+        registers.x[8] = reinterpret_cast<uint64_t>(&result);
+
+        fex::hvf::sogen_fex_hvf_call_host(&registers, reinterpret_cast<uint64_t>(&make_indirect_result));
+
+        EXPECT_EQ(result.values[0], 6U);
+        EXPECT_EQ(result.values[1], 7U);
+        EXPECT_EQ(result.values[2], 13U);
+        EXPECT_EQ(result.values[3], 42U);
+    }
+
+    TEST(FexHvfHostCallTest, VectorArgumentsAreReplayedAndVectorResultsCaptured)
+    {
+        fex::hvf::host_call_registers registers{};
+        for (uint32_t i = 0; i < 8; ++i)
+        {
+            const vector128 value{i + 1, (i + 1) * 100};
+            std::memcpy(registers.q[i].data(), &value, sizeof(value));
+        }
+
+        fex::hvf::sogen_fex_hvf_call_host(&registers, reinterpret_cast<uint64_t>(&combine_vectors));
+
+        vector128 first{};
+        vector128 second{};
+        std::memcpy(&first, registers.q[0].data(), sizeof(first));
+        std::memcpy(&second, registers.q[1].data(), sizeof(second));
+        EXPECT_EQ(first[0], 10U);
+        EXPECT_EQ(first[1], 1000U);
+        EXPECT_EQ(second[0], 26U);
+        EXPECT_EQ(second[1], 2600U);
     }
 }
 
