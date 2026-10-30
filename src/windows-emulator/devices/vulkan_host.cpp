@@ -29,7 +29,9 @@
 #include <ranges>
 
 #define VK_NO_PROTOTYPES
+#define VK_ENABLE_BETA_EXTENSIONS
 #include <vulkan/vulkan_core.h>
+#include <vulkan/vulkan_beta.h>
 
 #include <gpu_bridge_protocol.hpp>
 #include <vk_feature_chain.hpp>
@@ -366,8 +368,7 @@ namespace sogen
             });
         }
 
-        // VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME lives in vulkan_beta.h behind VK_ENABLE_BETA_EXTENSIONS.
-        static constexpr std::string_view portability_subset_extension_name = "VK_KHR_portability_subset";
+        static constexpr std::string_view portability_subset_extension_name = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
 
         static bool is_portability_device(const instance_data& instance, physical_device_data& device)
         {
@@ -4560,6 +4561,30 @@ namespace sogen
             }
         }
 
+        // The bridge does not marshal the portability features, so the guest cannot enable this one, and
+        // VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465 requires it for the component swizzles
+        // DXVK maps formats such as A8 and L8 through.
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_features{};
+        portability_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+        bool image_view_format_swizzle = false;
+        if (portability && instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDevicePortabilitySubsetFeaturesKHR supported_portability{};
+            supported_portability.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+            VkPhysicalDeviceFeatures2 supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            supported.pNext = &supported_portability;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported);
+
+            if (supported_portability.imageViewFormatSwizzle)
+            {
+                portability_features.imageViewFormatSwizzle = VK_TRUE;
+                feature_tail->pNext = reinterpret_cast<VkBaseOutStructure*>(&portability_features);
+                feature_tail = reinterpret_cast<VkBaseOutStructure*>(&portability_features);
+                image_view_format_swizzle = true;
+            }
+        }
+
         VkDeviceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
@@ -4568,7 +4593,7 @@ namespace sogen
         create_info.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
         // Enabled features ride the pNext chain (VkPhysicalDeviceFeatures2 + the chained structs); a
         // chain present means pEnabledFeatures must stay null.
-        if (has_feature_chain || placed_map_alignment != 0 || present_fences)
+        if (has_feature_chain || placed_map_alignment != 0 || present_fences || image_view_format_swizzle)
         {
             create_info.pNext = &features2;
         }
