@@ -6,6 +6,9 @@ namespace sogen::syscalls
     NTSTATUS handle_NtClose(const syscall_context& c, handle h);
     NTSTATUS handle_NtOpenEvent(const syscall_context& c, emulator_object<uint64_t> event_handle, ACCESS_MASK desired_access,
                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
+    NTSTATUS handle_NtQueryEvent(const syscall_context& c, handle event_handle, uint32_t event_information_class,
+                                 emulator_object<EVENT_BASIC_INFORMATION> event_information, uint32_t event_information_length,
+                                 emulator_object<uint32_t> return_length);
     NTSTATUS handle_NtCreateSemaphore(const syscall_context& c, emulator_object<handle> semaphore_handle, ACCESS_MASK desired_access,
                                       emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, LONG initial_count,
                                       LONG maximum_count);
@@ -90,5 +93,43 @@ namespace sogen::test
         const emulator_object<uint64_t> output{this->emu->memory, this->storage + 0x800};
 
         EXPECT_EQ(STATUS_OBJECT_NAME_NOT_FOUND, syscalls::handle_NtOpenEvent(this->context(), output, 0, attributes));
+    }
+
+    TEST_F(NamedObjectOpenTest, MemoryConditionEventsOpenWithTheStateWindowsReports)
+    {
+        constexpr std::array<std::pair<std::u16string_view, LONG>, 9> conditions{{
+            {u"\\KernelObjects\\LowMemoryCondition", 0},
+            {u"\\KernelObjects\\HighMemoryCondition", 1},
+            {u"\\KernelObjects\\LowPagedPoolCondition", 0},
+            {u"\\KernelObjects\\HighPagedPoolCondition", 1},
+            {u"\\KernelObjects\\LowNonPagedPoolCondition", 0},
+            {u"\\KernelObjects\\HighNonPagedPoolCondition", 1},
+            {u"\\KernelObjects\\LowCommitCondition", 1},
+            {u"\\KernelObjects\\HighCommitCondition", 0},
+            {u"\\KernelObjects\\MaximumCommitCondition", 0},
+        }};
+
+        constexpr ACCESS_MASK query_access = SYNCHRONIZE | 0x0001;
+        const emulator_object<uint64_t> output{this->emu->memory, this->storage + 0x800};
+        const emulator_object<EVENT_BASIC_INFORMATION> information{this->emu->memory, this->storage + 0x900};
+        const emulator_object<uint32_t> returned{this->emu->memory, this->storage + 0x980};
+
+        for (const auto& [name, state] : conditions)
+        {
+            const auto attributes = this->named_attributes(name);
+            ASSERT_EQ(STATUS_SUCCESS, syscalls::handle_NtOpenEvent(this->context(), output, query_access, attributes)) << u16_to_u8(name);
+            const auto event = make_handle(output.read());
+
+            ASSERT_EQ(STATUS_SUCCESS,
+                      syscalls::handle_NtQueryEvent(this->context(), event, 0, information, sizeof(EVENT_BASIC_INFORMATION), returned));
+            EXPECT_EQ(NotificationEvent, information.read().EventType) << u16_to_u8(name);
+            EXPECT_EQ(state, information.read().EventState) << u16_to_u8(name);
+            EXPECT_EQ(sizeof(EVENT_BASIC_INFORMATION), returned.read());
+
+            EXPECT_EQ(STATUS_SUCCESS, syscalls::handle_NtClose(this->context(), event));
+        }
+
+        const auto bogus = this->named_attributes(u"\\KernelObjects\\BogusCondition");
+        EXPECT_EQ(STATUS_OBJECT_NAME_NOT_FOUND, syscalls::handle_NtOpenEvent(this->context(), output, query_access, bogus));
     }
 }

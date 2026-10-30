@@ -7,6 +7,41 @@ namespace sogen
 
     namespace syscalls
     {
+        namespace
+        {
+            struct memory_condition_event
+            {
+                std::u16string_view name;
+                bool signaled;
+            };
+
+            // Signal states Windows 11 reports while the system is under no memory pressure.
+            constexpr std::array<memory_condition_event, 9> memory_condition_events{{
+                {.name = u"\\KernelObjects\\LowMemoryCondition", .signaled = false},
+                {.name = u"\\KernelObjects\\HighMemoryCondition", .signaled = true},
+                {.name = u"\\KernelObjects\\LowPagedPoolCondition", .signaled = false},
+                {.name = u"\\KernelObjects\\HighPagedPoolCondition", .signaled = true},
+                {.name = u"\\KernelObjects\\LowNonPagedPoolCondition", .signaled = false},
+                {.name = u"\\KernelObjects\\HighNonPagedPoolCondition", .signaled = true},
+                {.name = u"\\KernelObjects\\LowCommitCondition", .signaled = true},
+                {.name = u"\\KernelObjects\\HighCommitCondition", .signaled = false},
+                {.name = u"\\KernelObjects\\MaximumCommitCondition", .signaled = false},
+            }};
+
+            std::optional<bool> memory_condition_state(const std::u16string_view name)
+            {
+                for (const auto& condition : memory_condition_events)
+                {
+                    if (condition.name == name)
+                    {
+                        return condition.signaled;
+                    }
+                }
+
+                return std::nullopt;
+            }
+        }
+
         NTSTATUS handle_NtSetEvent(const syscall_context& c, const uint64_t handle, const emulator_object<LONG> previous_state)
         {
             if (handle == DBWIN_DATA_READY)
@@ -220,6 +255,16 @@ namespace sogen
                     event_handle.write(c.proc.events.make_handle(entry.first).bits);
                     return STATUS_SUCCESS;
                 }
+            }
+
+            if (const auto signaled = memory_condition_state(name))
+            {
+                event e{};
+                e.type = NotificationEvent;
+                e.signaled = *signaled;
+                e.name = name;
+                event_handle.write(c.proc.events.store(std::move(e)).bits);
+                return STATUS_SUCCESS;
             }
 
             return STATUS_OBJECT_NAME_NOT_FOUND;
