@@ -57,12 +57,11 @@ hypervisor mode keeps FEX's compiler on the host and runs its dispatcher and gen
 **Feasibility spike.** `fex-hvf-spike-test` runs `mov rax, 1; add rax, 2; syscall` through FEX
 inside the VM: the dispatcher's block-cache miss exits to the host, `ContextImpl::CompileBlock` runs there, the
 compiled block runs in the VM, and the syscall exits with RAX = 3 and RIP at the instruction (100 of 100 runs).
-No FEX change was needed:
 
-- Generated code reaches host C++ through `CpuStateFrame::Pointers` and four literals at the end of the
-  dispatcher (CTX, SleepThread, CompileBlock, CompileSingleStep). Each is replaced by an address the VM does not
-  map, so the call arrives as an instruction abort; the host performs it with the vCPU's argument registers and
-  resumes at LR.
+- Generated code, including the dispatcher's calls to SleepThread, CompileBlock and CompileSingleStep, reaches
+  host C++ through `CpuStateFrame::Pointers`. Each target is replaced by an address the VM does not map, so the
+  call arrives as an instruction abort; the host performs it with the vCPU's argument registers and resumes at
+  LR.
 - Guest memory and FEX's own memory (thread state, lookup caches, code buffer) are mapped into the VM at their
   host addresses, FEX's memory on first touch.
 - The host never runs generated code, so FEX's executable buffers are allocated as plain data and the VM's

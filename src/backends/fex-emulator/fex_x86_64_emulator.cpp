@@ -5012,8 +5012,8 @@ namespace sogen::fex
             FEXCore::Allocator::dontneed = &drop_from_hypervisor;
         }
 
-        // Every call from translated code into host C++ goes through a JITPointers slot or the dispatcher's literal
-        // pool; each target is replaced by an address the VM does not map. Slot 0 is the dispatcher's return to us.
+        // Every call from translated code into host C++ goes through a JITPointers slot; each target is replaced by an
+        // address the VM does not map. Slot 0 is the dispatcher's return to us.
         void prepare_vm_thread()
         {
             auto& pointers = this->thread_->CurrentFrame->Pointers;
@@ -5027,27 +5027,16 @@ namespace sogen::fex
                 slot = host_call_base + host_call_stride * (this->host_calls_.size() - 1);
             };
 
-            for (auto* slot :
-                 {&pointers.PrintValue, &pointers.PrintVectorValue, &pointers.PrintMsgValue, &pointers.ThreadRemoveCodeEntryFromJIT,
-                  &pointers.CPUIDFunction, &pointers.XCRFunction, &pointers.SyscallHandlerFunc, &pointers.ExitFunctionLink,
-                  &pointers.MonoBackpatcherWrite, &pointers.LUDIV, &pointers.LDIV})
+            for (auto* slot : {&pointers.PrintValue, &pointers.PrintVectorValue, &pointers.PrintMsgValue,
+                               &pointers.ThreadRemoveCodeEntryFromJIT, &pointers.CPUIDFunction, &pointers.XCRFunction,
+                               &pointers.SyscallHandlerFunc, &pointers.ExitFunctionLink, &pointers.MonoBackpatcherWrite, &pointers.LUDIV,
+                               &pointers.LDIV, &pointers.SleepFunc, &pointers.CompileBlockFunc, &pointers.CompileSingleStepFunc})
             {
                 redirect(*slot);
             }
             for (auto& fallback : pointers.FallbackHandlerPointers)
             {
                 redirect(fallback.Func);
-            }
-
-            // The dispatcher ends with its literal pool: CTX, SleepThread, CompileBlock, CompileSingleStep.
-            auto* literals = reinterpret_cast<uint64_t*>(this->signal_delegator_->GetConfig().DispatcherEnd) - 4;
-            if (literals[0] != reinterpret_cast<uint64_t>(this->context_.get()))
-            {
-                throw std::runtime_error("FEX dispatcher literal pool not found");
-            }
-            for (size_t index = 1; index < 4; ++index)
-            {
-                redirect(literals[index]);
             }
         }
 

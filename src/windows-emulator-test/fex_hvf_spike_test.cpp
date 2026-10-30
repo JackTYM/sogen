@@ -226,14 +226,10 @@ namespace sogen::test
         redirect(pointers.MonoBackpatcherWrite, host_call::mono_backpatcher_write);
         redirect(pointers.LUDIV, host_call::ludiv);
         redirect(pointers.LDIV, host_call::ldiv);
-
-        // The dispatcher ends with its literal pool: CTX, SleepThread, CompileBlock, CompileSingleStep.
+        redirect(pointers.SleepFunc, host_call::sleep_thread);
+        redirect(pointers.CompileBlockFunc, host_call::compile_block);
+        redirect(pointers.CompileSingleStepFunc, host_call::compile_single_step);
         const auto& dispatcher = signal_delegator.GetConfig();
-        auto* literals = reinterpret_cast<uint64_t*>(dispatcher.DispatcherEnd) - 4;
-        ASSERT_EQ(literals[0], reinterpret_cast<uint64_t>(context.get())) << "The dispatcher literal pool was not found";
-        redirect(literals[1], host_call::sleep_thread);
-        redirect(literals[2], host_call::compile_block);
-        redirect(literals[3], host_call::compile_single_step);
 
         // Declared after FEX's objects so the VM is destroyed before the memory it maps is released.
         auto vm = hvf::create_arm64_emulator(1);
