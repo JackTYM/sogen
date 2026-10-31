@@ -5079,6 +5079,18 @@ namespace sogen::fex
             return address >= this->fex_image_.start && address < this->fex_image_.end;
         }
 
+        static bool is_host_accessible(const uint64_t block)
+        {
+            mach_vm_address_t address = block;
+            mach_vm_size_t size = 0;
+            vm_region_basic_info_data_64_t info{};
+            mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object_name = MACH_PORT_NULL;
+            return mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info),
+                                  &info_count, &object_name) == KERN_SUCCESS &&
+                   address <= block && info.protection != VM_PROT_NONE;
+        }
+
         // FEX's own memory enters the VM the first time translated code touches it. Data is shared. Constants in
         // FEXCore's image share 16 KiB pages with executable code, which the VM must not map, so they are copied.
         bool map_fex_memory(const uint64_t address)
@@ -5088,6 +5100,11 @@ namespace sogen::fex
                 return false;
             }
             const auto block = host_page_align_down_apple(address);
+            // FEX's guard pages are PROT_NONE; sharing them would hide the faults FEX recovers from.
+            if (!is_host_accessible(block))
+            {
+                return false;
+            }
             if (hvf::can_share_host_memory(block))
             {
                 hvf::share_host_memory(*this->vm_, block, host_page_size_apple, memory_permission::all);
