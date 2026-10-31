@@ -172,6 +172,11 @@ CALL :collect c_850.nls
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 
+CALL :collect_file "%WINDIR%\UUS\X86", UusBrain.dll, %EMU_WINDIR%\UUS\X86
+CALL :collect_file "%WINDIR%\UUS\X86", wuapicore.dll, %EMU_WINDIR%\UUS\X86
+CALL :collect_file "%WINDIR%\UUS\X86", wupscore.dll, %EMU_WINDIR%\UUS\X86
+CALL :collect_file "%WINDIR%\UUS\X86", wutrust.dll, %EMU_WINDIR%\UUS\X86
+
 EXIT /B 0
 
 :normpath
