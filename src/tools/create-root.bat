@@ -164,6 +164,12 @@ CALL :collect xapofx1_5.dll
 CALL :collect xinput1_3.dll
 CALL :collect xinput1_4.dll
 CALL :collect xinput9_1_0.dll
+dir /s /b "%WINDIR%\UUS" 2>nul
+echo UUSPROBE_END_UUS
+dir /s /b "%WINDIR%\*wuapicore.dll" 2>nul
+echo UUSPROBE_END_WUAPI
+dir /s /b "%WINDIR%\*UusBrain.dll" 2>nul
+echo UUSPROBE_END_BRAIN
 
 CALL :collect locale.nls
 CALL :collect c_1252.nls
