@@ -164,6 +164,8 @@ CALL :collect xapofx1_5.dll
 CALL :collect xinput1_3.dll
 CALL :collect xinput1_4.dll
 CALL :collect xinput9_1_0.dll
+CALL :collect wbemcomn.dll
+CALL :collect msiexec.exe
 
 CALL :collect locale.nls
 CALL :collect c_1252.nls
