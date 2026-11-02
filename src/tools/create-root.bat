@@ -164,6 +164,14 @@ CALL :collect xapofx1_5.dll
 CALL :collect xinput1_3.dll
 CALL :collect xinput1_4.dll
 CALL :collect xinput9_1_0.dll
+MKDIR %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", wbemcore.dll, %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", wbemess.dll, %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", wbemprox.dll, %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", wbemsvc.dll, %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", fastprox.dll, %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", esscli.dll, %EMU_SYSDIR%\wbem
+CALL :collect_file "%WINDIR%\System32\wbem", wmisvc.dll, %EMU_SYSDIR%\wbem
 
 CALL :collect locale.nls
 CALL :collect c_1252.nls
