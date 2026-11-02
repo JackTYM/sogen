@@ -164,6 +164,12 @@ CALL :collect xapofx1_5.dll
 CALL :collect xinput1_3.dll
 CALL :collect xinput1_4.dll
 CALL :collect xinput9_1_0.dll
+CALL :collect msvcp120_clr0400.dll
+CALL :collect msvcp140_clr0400.dll
+CALL :collect msvcr100_clr0400.dll
+CALL :collect ucrtbase_clr0400.dll
+CALL :collect vcruntime140_clr0400.dll
+CALL :collect vcruntime140_1_clr0400.dll
 
 CALL :collect locale.nls
 CALL :collect c_1252.nls
