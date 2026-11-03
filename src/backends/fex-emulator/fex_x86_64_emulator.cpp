@@ -4772,8 +4772,14 @@ namespace sogen::fex
         void create_thread(fex_vcpu& vcpu)
         {
             // Seed the FEX thread from the staged CPUState the loader populated before the first start().
-            vcpu.thread_ =
+            auto* const thread =
                 this->context_->CreateThread(vcpu.staged_state_.rip, vcpu.staged_state_.gregs[detail::greg_rsp], &vcpu.staged_state_);
+
+            // invalidate_code_range reads every vCPU's thread_ under the code invalidation mutex.
+            {
+                const auto invalidation = this->lock_code_invalidation();
+                vcpu.thread_ = thread;
+            }
 
             // FEXCore's core does not set up the call-ret shadow stack; on Linux that is embedder glue
             // in ThreadManager::CreateThread, replicated here. Without it the first x86 CALL in compiled
@@ -4853,30 +4859,6 @@ namespace sogen::fex
             }
         }
 
-        void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
-                                      size_t size) const
-        {
-            if (context == nullptr)
-            {
-                return;
-            }
-
-#ifdef __APPLE__
-            // Invalidating a range can synchronously delink already-linked call sites (AddBlockLink's
-            // delinker callbacks), writing into a MAP_JIT buffer - the same per-thread write-protect
-            // requirement as exit_function_link_jit_write_wrapper.
-            ::pthread_jit_write_protect_np(0);
-#endif
-            context->InvalidateCodeBuffersCodeRange(address, size);
-            if (thread != nullptr)
-            {
-                context->InvalidateThreadCachedCodeRange(thread, address, size);
-            }
-#ifdef __APPLE__
-            ::pthread_jit_write_protect_np(1);
-#endif
-        }
-
         // InvalidateCodeBuffersCodeRange/InvalidateThreadCachedCodeRange both require the caller to already hold
         // GetCodeInvalidationMutex() exclusively (see FEXCore's own ThreadManager::InvalidateGuestCodeRange, the canonical
         // caller on Linux) - without it, CompileBlock's shared lock deadlocks permanently the first time this runs. FEXCore
@@ -4899,7 +4881,27 @@ namespace sogen::fex
 
         void invalidate_code_range(uint64_t address, size_t size)
         {
-            this->invalidate_code_range_in(this->context_.get(), this->vcpu_.thread_, address, size);
+            if (this->context_)
+            {
+#ifdef __APPLE__
+                // Invalidating a range can synchronously delink already-linked call sites (AddBlockLink's
+                // delinker callbacks), writing into a MAP_JIT buffer - the same per-thread write-protect
+                // requirement as exit_function_link_jit_write_wrapper.
+                ::pthread_jit_write_protect_np(0);
+#endif
+                this->context_->InvalidateCodeBuffersCodeRange(address, size);
+                for (auto& vcpu : this->vcpus())
+                {
+                    if (vcpu.thread_ != nullptr)
+                    {
+                        this->context_->InvalidateThreadCachedCodeRange(vcpu.thread_, address, size);
+                    }
+                }
+#ifdef __APPLE__
+                ::pthread_jit_write_protect_np(1);
+#endif
+            }
+
             this->code_pages_.erase(this->code_pages_.lower_bound(address & ~(page_size - 1)),
                                     this->code_pages_.lower_bound(address + size));
         }
@@ -4920,6 +4922,11 @@ namespace sogen::fex
                 executable = executable || (permissions & memory_permission::exec) != memory_permission::none;
             });
             return executable || this->range_has_code(address, size);
+        }
+
+        std::span<fex_vcpu> vcpus()
+        {
+            return {&this->vcpu_, 1};
         }
 
         emulator_hook* make_hook()
