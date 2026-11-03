@@ -100,6 +100,7 @@
 #include <FEXCore/Utils/LongJump.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/AllocatorHooks.h>
+#include <FEXCore/Utils/ArchHelpers/Arm64.h>
 
 #ifdef __APPLE__
 #include "hvf/hvf_vm.hpp"
@@ -4709,6 +4710,25 @@ namespace sogen::fex
             std::atomic_thread_fence(std::memory_order_seq_cst);
         }
 
+        const bool unaligned_patch_disabled = std::getenv("EMULATOR_FEX_NO_UNALIGNED_PATCH") != nullptr;
+        std::atomic<uint64_t> unaligned_patched_count{0};
+        std::atomic<uint64_t> unaligned_emulated_count{0};
+
+        void count_unaligned_fault(std::atomic<uint64_t>& counter, const char* kind)
+        {
+            const auto n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (!std::has_single_bit(n))
+            {
+                return;
+            }
+            char buf[96];
+            const int len = snprintf(buf, sizeof(buf), "[unaligned] %s=%llu\n", kind, static_cast<unsigned long long>(n));
+            if (len > 0)
+            {
+                ::write(STDERR_FILENO, buf, static_cast<size_t>(len) < sizeof(buf) ? static_cast<size_t>(len) : sizeof(buf));
+            }
+        }
+
         void write_memory_single_copy_atomic(const uint64_t addr, const void* data, const uint32_t size)
         {
             if (contained_in_atomic_window(addr, size))
@@ -4752,6 +4772,27 @@ namespace sogen::fex
         }
 
         const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+
+        // FEXCore rewrites a faulting access in its own code into a half-barrier sequence, so it does not trap
+        // again. Emulating each access instead traps on every execution.
+        auto* const active_thread = this->active_thread_.load();
+        if (!unaligned_patch_disabled && active_thread != nullptr && this->active_context_ &&
+            this->active_context_->IsAddressInCodeBuffer(active_thread, pc))
+        {
+            ::pthread_jit_write_protect_np(0);
+            auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
+            const auto skip = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
+                active_thread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc, gprs);
+            ::pthread_jit_write_protect_np(1);
+            if (skip)
+            {
+                count_unaligned_fault(unaligned_patched_count, "patched");
+                arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + *skip));
+                return true;
+            }
+        }
+
+        count_unaligned_fault(unaligned_emulated_count, "emulated");
         const auto insn = *reinterpret_cast<const uint32_t*>(pc);
 
         const std::unique_lock lock(this->emulator_.tables_mutex_);
