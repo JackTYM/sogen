@@ -565,6 +565,83 @@ namespace sogen::test
         EXPECT_EQ(violation.operation, memory_operation::read);
         EXPECT_EQ(violation.type, memory_violation_type::protection);
     }
+
+    TEST(FexRegisterTest, ThreadSwitchedOutMidCallResumesWithItsOwnState)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        memory_manager memory{*emu};
+        memory.reserve_host_memory_ranges();
+        constexpr size_t page_size = 0x1000;
+        const uint64_t code = memory.allocate_memory(page_size, memory_permission::read_write);
+        const uint64_t gdt = memory.allocate_memory(page_size, memory_permission::read_write);
+        const uint64_t stack = memory.allocate_memory(page_size, memory_permission::read_write);
+        ASSERT_NE(code, 0u);
+        ASSERT_NE(gdt, 0u);
+        ASSERT_NE(stack, 0u);
+
+        constexpr uint16_t long_mode_code_selector = 0x08;
+        constexpr uint64_t long_mode_code_descriptor = 0x00AF9B000000FFFF;
+        emu->write_memory<uint64_t>(gdt + long_mode_code_selector, long_mode_code_descriptor);
+        emu->load_gdt(gdt, page_size);
+        emu->reg<uint16_t>(x86_register::cs, long_mode_code_selector);
+
+        constexpr uint64_t first_entry = 0x00;
+        constexpr uint64_t first_return = 0x05;
+        constexpr uint64_t first_callee = 0x10;
+        constexpr uint64_t second_entry = 0x20;
+        constexpr uint64_t second_end = 0x31;
+        constexpr uint64_t second_rbx = 0xBBBBBBBBBBBBBBBBULL;
+
+        std::array<uint8_t, 0x41> guest_code{};
+        // First thread: call first_callee; syscall. The callee: syscall; ret.
+        constexpr std::array<uint8_t, 7> first_caller = {0xE8, 0x0B, 0x00, 0x00, 0x00, 0x0F, 0x05};
+        constexpr std::array<uint8_t, 3> first_callee_code = {0x0F, 0x05, 0xC3};
+        // Second thread: mov rbx, second_rbx; call 0x40; syscall. The callee at 0x40: ret.
+        constexpr std::array<uint8_t, 17> second_caller = {0x48, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
+                                                           0xBB, 0xE8, 0x11, 0x00, 0x00, 0x00, 0x0F, 0x05};
+        std::ranges::copy(first_caller, guest_code.begin() + first_entry);
+        std::ranges::copy(first_callee_code, guest_code.begin() + first_callee);
+        std::ranges::copy(second_caller, guest_code.begin() + second_entry);
+        guest_code.back() = 0xC3;
+        memory.write_memory(code, guest_code.data(), guest_code.size());
+        ASSERT_TRUE(memory.protect_memory(code, page_size, memory_permission::read_exec));
+
+        emu->hook_instruction(x86_hookable_instructions::syscall, [](cpu_interface& cpu, uint64_t) {
+            cpu.stop();
+            return instruction_hook_continuation::skip_instruction;
+        });
+
+        const uint64_t second_stack = stack + page_size;
+        emu->reg(x86_register::rip, code + second_entry);
+        emu->reg(x86_register::rsp, second_stack);
+        const auto second_thread = emu->save_registers();
+
+        const uint64_t first_stack = stack + (page_size / 2);
+        constexpr uint64_t first_rbx = 0x1111111111111111ULL;
+        emu->reg(x86_register::rip, code + first_entry);
+        emu->reg(x86_register::rsp, first_stack);
+        emu->reg(x86_register::rbx, first_rbx);
+        emu->start(0);
+        ASSERT_EQ(emu->reg(x86_register::rip), code + first_callee + 2);
+        const auto first_thread = emu->save_registers();
+
+        emu->restore_registers(second_thread);
+        emu->start(0);
+        EXPECT_EQ(emu->reg(x86_register::rip), code + second_end);
+        EXPECT_EQ(emu->reg(x86_register::rsp), second_stack);
+        EXPECT_EQ(emu->reg(x86_register::rbx), second_rbx);
+
+        emu->restore_registers(first_thread);
+        emu->start(0);
+        EXPECT_EQ(emu->reg(x86_register::rip), code + first_return + 2);
+        EXPECT_EQ(emu->reg(x86_register::rsp), first_stack);
+        EXPECT_EQ(emu->reg(x86_register::rbx), first_rbx);
+    }
 #endif
 
     TEST(FexRegisterTest, ExtendedGprSubRegisterWrites)
