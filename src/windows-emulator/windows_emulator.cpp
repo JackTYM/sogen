@@ -1671,6 +1671,8 @@ namespace sogen
             return;
         }
 
+        alpc::close_all_ports(*this);
+
         this->process_control_server_->notify_exit(static_cast<int32_t>(exit_status.value_or(STATUS_UNSUCCESSFUL)));
     }
 

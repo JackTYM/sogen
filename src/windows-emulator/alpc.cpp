@@ -265,6 +265,24 @@ namespace sogen::alpc
 
                 client->connection_status = payload.status;
                 client->connection_max_message_length = payload.max_message_length;
+
+                // Without ALPC_MSGFLG_SYNC_REQUEST NtAlpcConnectPort has already returned the handle, and the
+                // server's answer arrives as an LPC_CONNECTION_REPLY message queued on the client port.
+                if (client->asynchronous_connect)
+                {
+                    if (!NT_SUCCESS(payload.status))
+                    {
+                        client->disconnected = true;
+                        notify_completion_port(win_emu, *client);
+                        return true;
+                    }
+
+                    auto m = make_message(payload.sender_message_id, client_id);
+                    m.type = LPC_CONNECTION_REPLY;
+                    enqueue_message(win_emu, *client, std::move(m));
+                    return true;
+                }
+
                 client->connection_reply = make_message(payload.sender_message_id, client_id);
                 client->connection_reply->type = LPC_REPLY;
                 return true;
@@ -1050,9 +1068,11 @@ namespace sogen::alpc
         p.flags = port_attributes ? c.emu.read_memory<uint32_t>(port_attributes) : 0;
         p.max_message_length = read_max_message_length(c, port_attributes);
         p.connection_id = (static_cast<uint64_t>(c.proc.process_id) << 32) | ++s.next_connection_serial;
+        p.asynchronous_connect = (flags & msgflg_sync_request) == 0;
 
         const auto id = new_port_id(s);
         const auto connection_id = p.connection_id;
+        const auto asynchronous = p.asynchronous_connect;
         s.ports.emplace(id, std::move(p));
         s.client_ports[connection_id] = id;
 
@@ -1068,7 +1088,18 @@ namespace sogen::alpc
 
         (void)in_message_attributes;
 
+        if (asynchronous)
+        {
+            const auto h = c.proc.ports.store(port_container::guest_alpc(std::u16string(name), id));
+            write_size_parameter(c.win_emu, port_handle_out, (flags & msgflg_wow64_call) != 0, h.bits);
+        }
+
         route(c.win_emu, {.port_name = std::u16string(name), .connection_id = connection_id, .to_server = true, .payload = payload});
+
+        if (asynchronous)
+        {
+            return STATUS_SUCCESS;
+        }
 
         return park(c, pending_wait{
                            .kind = wait_kind::connect,
@@ -1137,7 +1168,7 @@ namespace sogen::alpc
             const auto h = c.proc.ports.store(port_container::guest_alpc(listener->name, id));
             if (port_handle_out)
             {
-                c.emu.write_memory(port_handle_out, &h, sizeof(h));
+                write_size_parameter(c.win_emu, port_handle_out, (flags & msgflg_wow64_call) != 0, h.bits);
             }
         }
 
@@ -1376,7 +1407,7 @@ namespace sogen::alpc
                 }
 
                 const auto h = win_emu.process.ports.store(port_container::guest_alpc(p->name, wait.port_id));
-                win_emu.emu().write_memory(wait.port_handle_out, &h, sizeof(h));
+                write_size_parameter(win_emu, wait.port_handle_out, wait.wow64_layout, h.bits);
                 p->connection_reply.reset();
                 return STATUS_SUCCESS;
             }
@@ -1657,6 +1688,20 @@ namespace sogen::alpc
         }
 
         s.ports.erase(port_id);
+    }
+
+    void close_all_ports(windows_emulator& win_emu)
+    {
+        std::vector<uint64_t> port_ids{};
+        for (const auto& port_id : win_emu.process.alpc.ports | std::views::keys)
+        {
+            port_ids.push_back(port_id);
+        }
+
+        for (const auto port_id : port_ids)
+        {
+            close_port(win_emu, port_id);
+        }
     }
 
     bool has_queued_message(const process_context& proc, const uint64_t port_id)
