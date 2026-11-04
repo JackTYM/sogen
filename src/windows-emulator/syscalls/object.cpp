@@ -294,7 +294,10 @@ namespace sogen
                     {
                         alpc::close_port(c.win_emu, port->alpc_port_id());
                     }
-                    port->get_internal_port()->release_sections(c.win_emu);
+                    else
+                    {
+                        port->get_internal_port()->release_sections(c.win_emu);
+                    }
                     port->release_completion_port(c.proc);
                     const auto port_key = static_cast<uint32_t>(h.bits & 0xFFFFFFFF);
                     if (const auto views = c.proc.pending_alpc_reply_views.find(port_key); views != c.proc.pending_alpc_reply_views.end())
