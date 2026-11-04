@@ -721,7 +721,7 @@ namespace sogen
                                           emulator_pointer instance, emulator_object<CLSMENUNAME<EmulatorTraits<Emu64>>> class_menu_name);
         BOOL handle_NtUserGetClassInfoEx(const syscall_context& c, hinstance /*instance*/,
                                          emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
-                                         emulator_object<EMU_WNDCLASSEX> wnd_class_ex, emulator_pointer menu_name, BOOL /*ansi*/);
+                                         emulator_object<EMU_WNDCLASSEX> wnd_class_ex, emulator_object<uint64_t> menu_name, BOOL ansi);
         int handle_NtUserGetClassName(const syscall_context& c, hwnd win_hwnd, BOOL real,
                                       emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name);
         uint64_t handle_NtUserSetWindowsHookEx(const syscall_context& c, hinstance instance,

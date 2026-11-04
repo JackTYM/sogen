@@ -3395,8 +3395,8 @@ namespace sogen
 
         BOOL handle_NtUserGetClassInfoEx(const syscall_context& c, const hinstance /*instance*/,
                                          const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
-                                         const emulator_object<EMU_WNDCLASSEX> wnd_class_ex, const emulator_pointer /*menu_name*/,
-                                         const BOOL /*ansi*/)
+                                         const emulator_object<EMU_WNDCLASSEX> wnd_class_ex, const emulator_object<uint64_t> menu_name,
+                                         const BOOL ansi)
         {
             std::u16string name_str = read_unicode_string_or_atom(c, class_name);
 
@@ -3430,6 +3430,12 @@ namespace sogen
                 // this syscall, then narrows the result back into the guest's buffer itself after we
                 // return - so this pointer is always native-shaped here, even for a WOW64 process.
                 wnd_class_ex.write(it->second.wnd_class);
+            }
+
+            if (menu_name)
+            {
+                const auto& class_menu_name = it->second.menu_name;
+                menu_name.write(ansi ? class_menu_name.pszClientAnsiMenuName : class_menu_name.pwszClientUnicodeMenuName);
             }
 
             return TRUE;
