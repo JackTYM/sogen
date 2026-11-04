@@ -5620,8 +5620,9 @@ namespace sogen
                             info.ValueType, info.PhysicalAdapterIndex);
                 }
 
-                std::vector<uint8_t> zeros(query.PrivateDriverDataSize, 0);
-                c.emu.write_memory(query.pPrivateDriverData, zeros.data(), zeros.size());
+                const auto output_fields_offset = offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, OutputValueSize);
+                std::vector<uint8_t> zeros(query.PrivateDriverDataSize - output_fields_offset, 0);
+                c.emu.write_memory(query.pPrivateDriverData + output_fields_offset, zeros.data(), zeros.size());
 
                 const auto is_adapterkey_query =
                     info.QueryType == static_cast<UINT32>(D3DDDI_QUERYREGISTRY_TYPE::D3DDDI_QUERYREGISTRY_ADAPTERKEY);
