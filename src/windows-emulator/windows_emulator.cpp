@@ -2105,7 +2105,14 @@ namespace sogen
 
     void windows_emulator::on_instruction_execution(vcpu_context& vcpu, const uint64_t address)
     {
-        auto& thread = vcpu.thread();
+        if (!vcpu.active_thread)
+        {
+            vcpu.switch_thread = true;
+            vcpu.cpu.stop();
+            return;
+        }
+
+        auto& thread = *vcpu.active_thread;
 
         if (try_complete_guest_function(vcpu, address))
         {
