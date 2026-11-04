@@ -592,6 +592,24 @@ namespace sogen
             return {.window = top_level, .x = x, .y = y};
         }
 
+        bool has_descendant_with_class(const process_context& process, const hwnd ancestor, const std::u16string& class_name)
+        {
+            for (const auto& child : process.windows | std::views::values)
+            {
+                if (child.parent_handle != ancestor)
+                {
+                    continue;
+                }
+
+                if (child.class_name == class_name || has_descendant_with_class(process, child.handle, class_name))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         bool has_pending_host_wait(const process_context& process)
         {
             for (const auto& thread_entry : process.threads)
@@ -3971,9 +3989,11 @@ namespace sogen
         return true;
     }
 
-    // SOGEN_INJECT_INPUT=<window class>@<seconds>:<action>[;...] where <action> is <x>,<y> (left click),
-    // key=<name> (Tab, Enter, Escape, Backspace, Space or a single character) or text=<characters>.
+    // SOGEN_INJECT_INPUT=[?]<window class>[+<child class>][~<text>]@<seconds>:<action>[;...] where <action> is <x>,<y>
+    // (left click), key=<name> (Tab, Enter, Escape, Backspace, Space or a single character) or text=<characters>.
     // text-file types the content of the file named by SOGEN_INJECT_TEXT_FILE, keeping it off command lines.
+    // +<child class> waits until the window has a descendant of that class. ~<text> waits until a file write of this
+    // process contains <text> (UTF-8 or UTF-16LE) after the previous step; a leading ? marks the step optional.
     void windows_emulator::parse_scheduled_input(const std::string_view specification)
     {
         static const std::map<std::string, uint16_t, std::less<>> named_keys{
@@ -4001,7 +4021,25 @@ namespace sogen
             }
 
             scheduled_input input{};
-            input.window_class = u8_to_u16(std::string(entry.substr(0, at)));
+            auto class_spec = std::string(entry.substr(0, at));
+            if (class_spec.starts_with('?'))
+            {
+                input.optional = true;
+                class_spec.erase(0, 1);
+            }
+
+            if (const auto text_separator = class_spec.find('~'); text_separator != std::string::npos)
+            {
+                input.ready_written_text = class_spec.substr(text_separator + 1);
+                class_spec.resize(text_separator);
+            }
+
+            const auto ready_separator = class_spec.find('+');
+            input.window_class = u8_to_u16(class_spec.substr(0, ready_separator));
+            if (ready_separator != std::string::npos)
+            {
+                input.ready_child_class = u8_to_u16(class_spec.substr(ready_separator + 1));
+            }
             input.delay =
                 std::chrono::milliseconds(static_cast<int64_t>(std::stod(std::string(entry.substr(at + 1, colon - at - 1))) * 1000.0));
 
@@ -4086,6 +4124,40 @@ namespace sogen
         }
     }
 
+    void windows_emulator::observe_file_write_for_scheduled_input(const std::string_view data)
+    {
+        const auto contains_text = [&](const std::string& text) {
+            const auto wide = u8_to_u16(text);
+            const std::string_view wide_bytes(reinterpret_cast<const char*>(wide.data()), wide.size() * sizeof(char16_t));
+            return data.find(text) != std::string_view::npos || data.find(wide_bytes) != std::string_view::npos;
+        };
+
+        const auto head = std::ranges::find_if(this->scheduled_inputs_, [](const scheduled_input& input) { return !input.delivered; });
+        for (auto input = head; input != this->scheduled_inputs_.end(); ++input)
+        {
+            if (!input->ready_written_text.empty() && !input->ready_text_written && contains_text(input->ready_written_text))
+            {
+                input->ready_text_written = true;
+                this->log.info("[inject-input] step %zu: text '%s' written\n", static_cast<size_t>(input - this->scheduled_inputs_.begin()),
+                               input->ready_written_text.c_str());
+
+                for (auto skipped = head; skipped != input; ++skipped)
+                {
+                    skipped->delivered = true;
+                    this->log.info("[inject-input] step %zu: optional step skipped\n",
+                                   static_cast<size_t>(skipped - this->scheduled_inputs_.begin()));
+                }
+
+                return;
+            }
+
+            if (!input->optional)
+            {
+                return;
+            }
+        }
+    }
+
     void windows_emulator::deliver_keyboard_input(const hwnd window, const std::span<const keyboard_input_request> events)
     {
         if (this->process.focus_window != 0 && syscalls::is_foreign_window_handle(this->process, this->process.focus_window))
@@ -4138,6 +4210,16 @@ namespace sogen
                 return;
             }
 
+            if (!input.ready_child_class.empty() && !has_descendant_with_class(this->process, target->handle, input.ready_child_class))
+            {
+                return;
+            }
+
+            if (!input.ready_written_text.empty() && !input.ready_text_written)
+            {
+                return;
+            }
+
             const auto now = std::chrono::steady_clock::now();
             if (!input.window_seen || input.seen_window != target->handle)
             {
@@ -4157,13 +4239,15 @@ namespace sogen
             switch (input.type)
             {
             case scheduled_input::kind::click: {
-                const auto point = pack_point(input.x, input.y);
-                this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s)\n", input.x, input.y,
-                               static_cast<unsigned long long>(window), class_name.c_str());
+                const auto routed = route_pointer(this->process, window, input.x, input.y);
+                const auto point = pack_point(routed.x, routed.y);
+                this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s) routed to 0x%llx at %d,%d\n", input.x, input.y,
+                               static_cast<unsigned long long>(window), class_name.c_str(), static_cast<unsigned long long>(routed.window),
+                               routed.x, routed.y);
 
-                this->deliver_ui_event(ui_event{.window = window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
-                this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
-                this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = routed.window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = routed.window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = routed.window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
                 break;
             }
 

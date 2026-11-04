@@ -511,6 +511,10 @@ namespace sogen
 
             kind type{};
             std::u16string window_class{};
+            std::u16string ready_child_class{};
+            std::string ready_written_text{};
+            bool ready_text_written{};
+            bool optional{};
             std::chrono::milliseconds delay{};
             int32_t x{};
             int32_t y{};
@@ -828,6 +832,7 @@ namespace sogen
         void take_focus_from_parent(hwnd window, hwnd previous_focus);
         void release_focus_to_parent(hwnd window, hwnd new_focus);
         void inject_scheduled_input();
+        void observe_file_write_for_scheduled_input(std::string_view data);
         void handle_ui_event_locked(const ui_event& event);
         void update_key_state(const ui_event& event);
         ui_event resolve_injected_event(const ui_event& event) const;

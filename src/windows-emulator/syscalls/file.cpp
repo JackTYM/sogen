@@ -1912,6 +1912,7 @@ namespace sogen
 
             const auto bytes_written = f->handle.write(std::as_bytes(std::span(temp_buffer)));
             const auto flushed = f->handle.flush();
+            c.win_emu.observe_file_write_for_scheduled_input(temp_buffer);
             const auto status = flushed && bytes_written == temp_buffer.size() ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 
             if (io_status_block)
