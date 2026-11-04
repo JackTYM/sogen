@@ -118,8 +118,11 @@ namespace sogen::fex
         constexpr uint64_t low_guest_window_size = 0x100000000ULL;
 
         // Guest memory above 4GB is placed in one window that every process reserves at the same address, so a saved
-        // process finds its addresses free again in a new one. Android's 39-bit address space leaves this range alone.
-#ifndef __APPLE__
+        // process finds its addresses free again in a new one. Android's 39-bit address space leaves this range alone. macOS
+        // on arm64 maps nothing for a process below 0x7000000000, so its arena lies higher.
+#ifdef __APPLE__
+        constexpr uint64_t guest_arena_base = 0x10000000000ULL;
+#else
         constexpr uint64_t guest_arena_base = 0x1000000000ULL;
 #endif
         constexpr uint64_t guest_arena_size = 0x4000000000ULL;
@@ -1745,9 +1748,8 @@ namespace sogen::fex
                 throw std::runtime_error("FEX backend requires 4KB host pages on Linux");
             }
 #endif
-#ifndef __APPLE__
             this->reserve_guest_arena();
-#else
+#ifdef __APPLE__
             report_missing_watchpoints_once();
 #endif
             this->initialize_context();
@@ -2202,6 +2204,11 @@ namespace sogen::fex
 #ifdef __APPLE__
         std::vector<host_reserved_range> reserved_host_ranges() const override
         {
+            if (this->guest_arena_ != 0)
+            {
+                return this->ranges_outside_guest_arena(0, MACH_VM_MAX_ADDRESS);
+            }
+
             // Enumerates everything currently mapped in this process via the Mach VM region API, the
             // Darwin equivalent of walking /proc/self/maps.
             std::vector<host_reserved_range> ranges;
@@ -2286,6 +2293,11 @@ namespace sogen::fex
             // long session. The arena and the __PAGEZERO gap are captured by the first full scan at
             // startup and never released, so the only thing a rescan of an otherwise-free window adds is
             // a foreign mapping in a gap an earlier guest unmap returned to the OS.
+            if (this->guest_arena_ != 0)
+            {
+                return this->ranges_outside_guest_arena(address, address + size);
+            }
+
             std::vector<host_reserved_range> ranges;
 
             const mach_vm_address_t window_start = address;
@@ -3183,6 +3195,46 @@ namespace sogen::fex
             }
 
             this->guest_arena_ = guest_arena_base;
+        }
+#else
+        // Without the arena, guest memory still works but cannot be saved. Darwin has no MAP_FIXED_NOREPLACE, but it
+        // places a mapping at its hint whenever that range is free.
+        void reserve_guest_arena()
+        {
+            void* arena =
+                ::mmap(reinterpret_cast<void*>(guest_arena_base), guest_arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (arena == MAP_FAILED)
+            {
+                return;
+            }
+
+            if (reinterpret_cast<uint64_t>(arena) != guest_arena_base)
+            {
+                ::munmap(arena, guest_arena_size);
+                return;
+            }
+
+            this->guest_arena_ = guest_arena_base;
+        }
+
+        // Above the low window, the guest only gets the arena.
+        std::vector<host_reserved_range> ranges_outside_guest_arena(uint64_t start, const uint64_t end) const
+        {
+            if (this->low_guest_window_ != 0)
+            {
+                start = std::max(start, low_guest_window_size);
+            }
+
+            std::vector<host_reserved_range> ranges{};
+            const auto add_unavailable = [&](const uint64_t from, const uint64_t to) {
+                if (from < to)
+                {
+                    ranges.push_back({.address = from, .size = static_cast<size_t>(to - from)});
+                }
+            };
+            add_unavailable(start, std::min(end, this->guest_arena_));
+            add_unavailable(std::max(start, this->guest_arena_ + guest_arena_size), end);
+            return ranges;
         }
 #endif
 
