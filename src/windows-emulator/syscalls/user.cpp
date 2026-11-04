@@ -8441,6 +8441,9 @@ namespace sogen
         {
             constexpr uint32_t k_spi_get_icontitle_logfont = 0x1F;
             constexpr uint32_t k_spi_get_nonclientmetrics = 0x29;
+            constexpr uint32_t k_spi_get_mouse_hover_time = 0x0066;
+            constexpr uint32_t k_spi_get_keyboard_cues = 0x100A;
+            constexpr uint32_t k_spi_get_flat_menu = 0x1022;
             constexpr uint32_t k_default_dpi = 96;
 
             // The metrics and logfonts a Windows 11 desktop reports at 96 DPI.
@@ -8457,6 +8460,31 @@ namespace sogen
                                                      const emulator_pointer value, const uint32_t /*win_ini*/, const uint32_t dpi)
         {
             const auto effective_dpi = dpi != 0 ? dpi : k_default_dpi;
+
+            if (value != 0)
+            {
+                std::optional<uint32_t> scalar{};
+                switch (action)
+                {
+                case k_spi_get_mouse_hover_time:
+                    scalar = 400;
+                    break;
+                case k_spi_get_keyboard_cues:
+                    scalar = FALSE;
+                    break;
+                case k_spi_get_flat_menu:
+                    scalar = TRUE;
+                    break;
+                default:
+                    break;
+                }
+
+                if (scalar)
+                {
+                    c.emu.write_memory(value, &*scalar, sizeof(*scalar));
+                    return TRUE;
+                }
+            }
 
             if (action == k_spi_get_icontitle_logfont)
             {
