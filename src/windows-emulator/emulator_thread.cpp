@@ -641,11 +641,6 @@ namespace sogen
 
         // Initialize 64-bit TEB first
         this->teb64->access([&](TEB64& teb_obj) {
-            // Skips GetCurrentNlsCache
-            // This hack can be removed once this is fixed:
-            // https://github.com/momo5502/emulator/issues/128
-            reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
-
             // See nls_cache_placeholder's doc comment.
             teb_obj.NlsCache = nls_cache_addr;
 

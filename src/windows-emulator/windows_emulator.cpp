@@ -30,6 +30,67 @@ namespace sogen
 
     namespace
     {
+        enum class user_stack_fault
+        {
+            outside_stack,
+            grown,
+            overflow,
+        };
+
+        // Mirrors MiCheckForUserStackOverflow: a guard page hit inside the TEB's
+        // [DeallocationStack, StackBase) range is ordinary stack growth that the kernel resolves without
+        // delivering any exception, by committing the next guard page below and lowering StackLimit.
+        template <typename Teb>
+        user_stack_fault grow_user_stack(memory_manager& memory, emulator_object<Teb>& teb, const uint64_t address)
+        {
+            constexpr uint64_t page_size = 0x1000;
+
+            const auto teb_obj = teb.read();
+            const uint64_t stack_base = teb_obj.NtTib.StackBase;
+            const uint64_t deallocation_stack = teb_obj.DeallocationStack;
+            if (address < deallocation_stack || address >= stack_base)
+            {
+                return user_stack_fault::outside_stack;
+            }
+
+            const auto guard_size = std::max(page_size, page_align_up(teb_obj.GuaranteedStackBytes, page_size));
+            const auto next_guard = page_align_down(address, page_size) - guard_size;
+            if (next_guard <= deallocation_stack + page_size)
+            {
+                return user_stack_fault::overflow;
+            }
+
+            const nt_memory_permission guard_permission{memory_permission::read_write, memory_permission_ext::guard};
+            const auto committed = memory.get_region_info(next_guard).is_committed
+                                       ? memory.protect_memory(next_guard, static_cast<size_t>(guard_size), guard_permission)
+                                       : memory.commit_memory(next_guard, static_cast<size_t>(guard_size), guard_permission);
+            if (!committed)
+            {
+                return user_stack_fault::overflow;
+            }
+
+            teb.access([&](Teb& t) { t.NtTib.StackLimit = static_cast<decltype(t.NtTib.StackLimit)>(next_guard); });
+            return user_stack_fault::grown;
+        }
+
+        user_stack_fault grow_thread_stack(memory_manager& memory, emulator_thread& thread, const uint64_t address)
+        {
+            if (thread.teb64)
+            {
+                if (const auto result = grow_user_stack(memory, *thread.teb64, address); result != user_stack_fault::outside_stack)
+                {
+                    return result;
+                }
+            }
+
+            if (thread.teb32)
+            {
+                return grow_user_stack(memory, *thread.teb32, address);
+            }
+
+            return user_stack_fault::outside_stack;
+        }
+
         // TEMPDIAG: remove before finalizing. Dumps every thread's wait-state fields once the
         // idle loop has been spinning for a while with nothing ready, so a captured freeze
         // explains itself in the log instead of requiring live debugger inspection.
@@ -2707,6 +2768,22 @@ namespace sogen
                 if (within_stack_guard_buffer && !at_true_bottom)
                 {
                     return memory_violation_continuation::restart;
+                }
+
+                if (!is_stack_guard)
+                {
+                    const auto stack_fault = grow_thread_stack(this->memory, thread, *guarded_address);
+
+                    if (stack_fault == user_stack_fault::grown)
+                    {
+                        return memory_violation_continuation::restart;
+                    }
+
+                    if (stack_fault == user_stack_fault::overflow)
+                    {
+                        dispatch_stack_overflow(*this, vcpu, *guarded_address, operation);
+                        return memory_violation_continuation::resume;
+                    }
                 }
 
                 if (is_stack_guard)
