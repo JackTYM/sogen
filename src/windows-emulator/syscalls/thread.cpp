@@ -152,19 +152,6 @@ namespace sogen
                 }
             }
 
-            void set_thread_impersonation_token(emulator_thread& thread, const handle token)
-            {
-                thread.impersonation_token = token;
-                if (thread.teb64)
-                {
-                    thread.teb64->access([&](TEB64& teb) { teb.IsImpersonating = token != 0; });
-                }
-                if (thread.teb32)
-                {
-                    thread.teb32->access([&](TEB32& teb) { teb.IsImpersonating = token != 0; });
-                }
-            }
-
             NTSTATUS get_unresolved_handle_status(const handle h, const handle_types::type expected_type)
             {
                 return h.value.type == expected_type || h.value.type == handle_types::reserved ? STATUS_INVALID_HANDLE
@@ -375,7 +362,7 @@ namespace sogen
                 {
                     return token == CURRENT_PROCESS_TOKEN ? STATUS_BAD_TOKEN_TYPE : STATUS_INVALID_HANDLE;
                 }
-                set_thread_impersonation_token(*thread, token);
+                thread->set_impersonation_token(token);
 
                 return STATUS_SUCCESS;
             }
@@ -1064,7 +1051,7 @@ namespace sogen
             {
                 return STATUS_INVALID_HANDLE;
             }
-            set_thread_impersonation_token(*thread, ANONYMOUS_IMPERSONATION_TOKEN);
+            thread->set_impersonation_token(ANONYMOUS_IMPERSONATION_TOKEN);
             return STATUS_SUCCESS;
         }
 

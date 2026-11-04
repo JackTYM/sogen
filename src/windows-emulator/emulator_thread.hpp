@@ -438,6 +438,20 @@ namespace sogen
 
         uint64_t current_ip{0};
         handle impersonation_token{};
+
+        void set_impersonation_token(const handle token)
+        {
+            this->impersonation_token = token;
+            if (this->teb64)
+            {
+                this->teb64->access([&](TEB64& teb) { teb.IsImpersonating = token != 0; });
+            }
+            if (this->teb32)
+            {
+                this->teb32->access([&](TEB32& teb) { teb.IsImpersonating = token != 0; });
+            }
+        }
+
         uint64_t previous_ip{0};
 
         std::u16string name{};
