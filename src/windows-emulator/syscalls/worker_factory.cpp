@@ -227,6 +227,16 @@ namespace sogen
 
         namespace
         {
+            struct worker_factory_deferred_work
+            {
+                uint64_t alpc_send_message;
+                uint64_t alpc_send_message_port;
+                ULONG alpc_send_message_flags;
+                ULONG flags;
+            };
+
+            constexpr ULONG worker_factory_deferred_work_send_pending = 0x1;
+
             std::u16string read_object_name(const syscall_context& c,
                                             const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
             {
@@ -589,17 +599,17 @@ namespace sogen
 
             if (deferred_work)
             {
-                // WORKER_FACTORY_DEFERRED_WORK: a threadpool callback's reply (TpCallbackSendAlpcMessageOnCompletion)
-                // is handed to the kernel here and sent before the worker waits for its next packet.
-                const auto message = c.emu.read_memory<uint64_t>(deferred_work);
-                if (message)
+                // A threadpool callback's reply (TpCallbackSendAlpcMessageOnCompletion) is handed to the kernel here
+                // and sent before the worker waits for its next packet. Only the pending bit in Flags marks the message
+                // as unsent: ntdll frees the message and clears that bit, but never the pointer, both after this wait
+                // and when TpCallbackSendPendingAlpcMessage sends it itself.
+                const auto work = c.emu.read_memory<worker_factory_deferred_work>(deferred_work);
+                if ((work.flags & worker_factory_deferred_work_send_pending) != 0)
                 {
-                    const auto port = make_handle(c.emu.read_memory<uint64_t>(deferred_work + 0x08));
-                    const auto flags = c.emu.read_memory<ULONG>(deferred_work + 0x10);
-                    c.emu.write_memory<uint64_t>(deferred_work, 0);
                     const emulator_object<LARGE_INTEGER> no_timeout{c.emu, 0};
                     handle_NtAlpcSendWaitReceivePort(
-                        c, port, flags, emulator_object<PORT_MESSAGE64>{c.emu, message}, emulator_object<ALPC_MESSAGE_ATTRIBUTES>{c.emu, 0},
+                        c, make_handle(work.alpc_send_message_port), work.alpc_send_message_flags,
+                        emulator_object<PORT_MESSAGE64>{c.emu, work.alpc_send_message}, emulator_object<ALPC_MESSAGE_ATTRIBUTES>{c.emu, 0},
                         emulator_object<PORT_MESSAGE64>{c.emu, 0}, emulator_object<EmulatorTraits<Emu64>::SIZE_T>{c.emu, 0},
                         emulator_object<ALPC_MESSAGE_ATTRIBUTES>{c.emu, 0}, no_timeout);
                 }
