@@ -957,7 +957,6 @@ namespace sogen
         uint32_t handle_NtGdiGetDeviceCaps(const syscall_context& c, hdc dc, uint32_t index);
         uint32_t handle_NtGdiGetDeviceCapsAll(const syscall_context& c, hdc dc, emulator_pointer caps);
         COLORREF handle_NtGdiGetNearestColor(const syscall_context& c, hdc dc, COLORREF color);
-        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& c, hdc dc, emulator_pointer rect, uint32_t flags);
         uint32_t handle_NtGdiComputeXformCoefficients(const syscall_context& c, hdc dc);
         BOOL handle_NtGdiFlush(const syscall_context& c);
         uint64_t handle_NtGdiCreateSolidBrush(const syscall_context& c, uint32_t color, uint64_t unused);
@@ -1005,6 +1004,8 @@ namespace sogen
         BOOL handle_NtGdiGetDCDword(const syscall_context& c, hdc dc, uint32_t index, emulator_pointer result);
         BOOL handle_NtGdiGetAndSetDCDword(const syscall_context& c, hdc dc, uint32_t method, uint32_t value, emulator_pointer result);
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, hdc dc, int x, int y, emulator_pointer prev);
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& c, hdc dc, emulator_pointer bounds, uint32_t flags);
+        uint32_t handle_NtGdiGetBoundsRect(const syscall_context& c, hdc dc, emulator_pointer bounds, uint32_t flags);
         BOOL handle_NtGdiSetBitmapDimension(const syscall_context& c, handle bitmap, LONG width, LONG height, emulator_pointer prev_size);
         uint64_t handle_NtGdiHfontCreate(const syscall_context& c, emulator_pointer logfont, uint32_t angle);
         uint32_t handle_NtGdiExtGetObjectW(const syscall_context& c, uint32_t handle_value, uint32_t size, emulator_pointer buffer);
@@ -1894,7 +1895,6 @@ namespace sogen
         add_handler(NtGdiGetDeviceCaps);
         add_handler(NtGdiGetDeviceCapsAll);
         add_handler(NtGdiGetNearestColor);
-        add_handler(NtGdiSetBoundsRect);
         add_handler(NtGdiComputeXformCoefficients);
         add_handler(NtGdiFlush);
         add_handler(NtGdiCreateSolidBrush);
@@ -1920,6 +1920,8 @@ namespace sogen
         add_handler(NtGdiGetDCDword);
         add_handler(NtGdiGetAndSetDCDword);
         add_handler(NtGdiSetBrushOrg);
+        add_handler(NtGdiSetBoundsRect);
+        add_handler(NtGdiGetBoundsRect);
         add_handler(NtGdiSetBitmapDimension);
         add_handler(NtGdiHfontCreate);
         add_handler(NtGdiExtGetObjectW);

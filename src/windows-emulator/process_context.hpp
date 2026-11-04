@@ -28,13 +28,13 @@ namespace sogen
 
     struct fake_environment_config;
 
-#define PEB_SEGMENT_SIZE        (20 << 20) // 20 MB
-#define GS_SEGMENT_SIZE         (1 << 20)  // 1 MB
+#define PEB_SEGMENT_SIZE             (20 << 20) // 20 MB
+#define GS_SEGMENT_SIZE              (1 << 20)  // 1 MB
 
-#define STACK_SIZE              0x40000ULL // 256KB
+#define STACK_SIZE                   0x40000ULL // 256KB
 
-#define GDT_LIMIT               0x1000
-#define GDT_ENTRY_SIZE          0x8
+#define GDT_LIMIT                    0x1000
+#define GDT_ENTRY_SIZE               0x8
 
 // TODO: Get rid of that
 #define WOW64_NATIVE_STACK_SIZE      0x40000ULL
@@ -155,6 +155,76 @@ namespace sogen
         };
     }
 
+    struct gdi_bounds_state
+    {
+        static constexpr uint32_t reset_flag = 0x1;
+        static constexpr uint32_t accumulate_flag = 0x2;
+        static constexpr uint32_t enable_flag = 0x4;
+        static constexpr uint32_t disable_flag = 0x8;
+
+        RECT bounds{};
+        bool enabled{};
+
+        bool empty() const
+        {
+            return this->bounds.left >= this->bounds.right || this->bounds.top >= this->bounds.bottom;
+        }
+
+        uint32_t flags() const
+        {
+            return (this->enabled ? enable_flag : disable_flag) | (this->empty() ? reset_flag : accumulate_flag);
+        }
+
+        void update(const uint32_t update_flags, const RECT* const rect)
+        {
+            if (update_flags & reset_flag)
+            {
+                this->bounds = {};
+            }
+
+            if ((update_flags & accumulate_flag) && rect)
+            {
+                const RECT normalized{std::min(rect->left, rect->right), std::min(rect->top, rect->bottom),
+                                      std::max(rect->left, rect->right), std::max(rect->top, rect->bottom)};
+
+                if (normalized.left < normalized.right && normalized.top < normalized.bottom)
+                {
+                    if (this->empty())
+                    {
+                        this->bounds = normalized;
+                    }
+                    else
+                    {
+                        this->bounds = {std::min(this->bounds.left, normalized.left), std::min(this->bounds.top, normalized.top),
+                                        std::max(this->bounds.right, normalized.right), std::max(this->bounds.bottom, normalized.bottom)};
+                    }
+                }
+            }
+
+            if (update_flags & enable_flag)
+            {
+                this->enabled = true;
+            }
+
+            if (update_flags & disable_flag)
+            {
+                this->enabled = false;
+            }
+        }
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->bounds);
+            buffer.write(this->enabled);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->bounds);
+            buffer.read(this->enabled);
+        }
+    };
+
     struct gdi_dc_state
     {
         uint32_t selected_bitmap{};
@@ -166,6 +236,7 @@ namespace sogen
         uint32_t map_mode{1}; // MM_TEXT, the real GDI default for a freshly created DC
         // Retrieved with GetDC and friends, which hand out the desktop window's DC for no window.
         bool is_window_dc{};
+        gdi_bounds_state bounds{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -177,6 +248,7 @@ namespace sogen
             buffer.write(this->is_memory_dc);
             buffer.write(this->map_mode);
             buffer.write(this->is_window_dc);
+            this->bounds.serialize(buffer);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -189,6 +261,7 @@ namespace sogen
             buffer.read(this->is_memory_dc);
             buffer.read(this->map_mode);
             buffer.read(this->is_window_dc);
+            this->bounds.deserialize(buffer);
         }
     };
 

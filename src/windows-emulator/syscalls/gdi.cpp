@@ -3439,6 +3439,40 @@ namespace sogen
             return TRUE;
         }
 
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& c, const hdc dc, const emulator_pointer bounds, const uint32_t flags)
+        {
+            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            RECT rect{};
+            const auto has_rect = bounds != 0 && c.win_emu.memory.try_read_memory(bounds, &rect, sizeof(rect));
+
+            const auto previous_flags = it->second.bounds.flags();
+            it->second.bounds.update(flags, has_rect ? &rect : nullptr);
+            return previous_flags;
+        }
+
+        uint32_t handle_NtGdiGetBoundsRect(const syscall_context& c, const hdc dc, const emulator_pointer bounds, const uint32_t flags)
+        {
+            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            const auto previous_flags = it->second.bounds.flags();
+            if (bounds != 0)
+            {
+                c.emu.write_memory(bounds, &it->second.bounds.bounds, sizeof(RECT));
+            }
+
+            it->second.bounds.update(flags & gdi_bounds_state::reset_flag, nullptr);
+            return previous_flags;
+        }
+
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, const hdc dc, const int /*x*/, const int /*y*/, const emulator_pointer prev)
         {
             if (dc == 0)
@@ -7030,11 +7064,6 @@ namespace sogen
         COLORREF handle_NtGdiGetNearestColor(const syscall_context&, const hdc, const COLORREF color)
         {
             return static_cast<COLORREF>(color & 0x00FFFFFFu);
-        }
-
-        uint32_t handle_NtGdiSetBoundsRect(const syscall_context&, const hdc, const emulator_pointer, const uint32_t)
-        {
-            return 0;
         }
 
         uint32_t handle_NtGdiGetGlyphIndicesW(const syscall_context& c, const hdc dc, const emulator_pointer text, const int32_t char_count,
