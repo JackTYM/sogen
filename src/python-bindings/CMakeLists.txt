@@ -1,4 +1,4 @@
-find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
+find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
 
 if(NOT TARGET Python::Module)
   add_library(Python::Module INTERFACE IMPORTED)
@@ -25,9 +25,21 @@ if(MSVC)
   if(TARGET nanobind-static)
     target_compile_options(nanobind-static PRIVATE /wd4714)
   endif()
+  # nanobind adds /MP unconditionally; it only has an effect under MSBuild and clang-tidy rejects it as unused.
+  if(NOT CMAKE_GENERATOR MATCHES "Visual Studio")
+    sogen_target_remove_compile_options(sogen /MP)
+  endif()
 elseif(UNIX AND NOT APPLE)
   # Override the global -z defs / --no-undefined for the Python extension.
   target_link_options(sogen PRIVATE -Wl,-z,undefs)
+  # A static build is one ELF image carrying its own C++ runtime, which must not stand in for
+  # another extension's in the same process, so it exports only the entry point. Shared builds keep
+  # their exports: EMULATOR_INTERFACE types share their RTTI across the backend libraries.
+  if(SOGEN_BUILD_STATIC)
+    set(SOGEN_PYTHON_EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/sogen.def")
+    target_link_options(sogen PRIVATE -Wl,--exclude-libs,ALL "-Wl,--version-script=${SOGEN_PYTHON_EXPORTS}")
+    set_property(TARGET sogen APPEND PROPERTY LINK_DEPENDS "${SOGEN_PYTHON_EXPORTS}")
+  endif()
 endif()
 
 nanobind_add_stub(
@@ -62,3 +74,10 @@ if(SOGEN_ENABLE_FEX)
 endif()
 
 sogen_targets_set_folder("bindings" sogen sogen_stub)
+
+if(NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME arm64-python-bindings
+    COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=$<TARGET_FILE_DIR:sogen>"
+      "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_arm64.py")
+  set_tests_properties(arm64-python-bindings PROPERTIES TIMEOUT 30)
+endif()

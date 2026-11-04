@@ -69,8 +69,9 @@ namespace sogen
         }
 
         constexpr nt_memory_permission(memory_permission common)
-            : common(common),
-              extended(memory_permission_ext::none)
+            : common(common & memory_permission::all),
+              extended((common & memory_permission::guard) == memory_permission::guard ? memory_permission_ext::guard
+                                                                                       : memory_permission_ext::none)
         {
         }
 
@@ -96,9 +97,13 @@ namespace sogen
 
         nt_memory_permission& operator=(memory_permission const& y)
         {
-            this->common = y;
-            this->extended = memory_permission_ext::none;
+            *this = nt_memory_permission{y};
             return *this;
+        }
+
+        constexpr memory_permission flattened() const
+        {
+            return this->common | (this->is_guarded() ? memory_permission::guard : memory_permission::none);
         }
 
         constexpr bool is_guarded() const

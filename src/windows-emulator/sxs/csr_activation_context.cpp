@@ -81,12 +81,12 @@ namespace sogen
             {
                 const auto file_handle = win_emu.emu().read_memory<handle>(message + msg_manifest_file_handle);
                 const auto* file = win_emu.process.files.get(file_handle);
-                if (!file || file->host_path.empty())
+                if (!file || !file->is_file())
                 {
                     return std::nullopt;
                 }
 
-                return sxs::read_host_file(file->host_path);
+                return sxs::read_guest_file(win_emu.file_sys, file->handle.path());
             }
 
             return std::nullopt;

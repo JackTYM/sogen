@@ -9,6 +9,7 @@
 #include <variant>
 #include <array>
 #include <limits>
+#include <utility>
 #include "common/utils/buffer_accessor.hpp"
 
 #include "primitives.hpp"
@@ -64,6 +65,7 @@
 
 #define IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE 0x0040
 #define IMAGE_DLLCHARACTERISTICS_NX_COMPAT    0x0100
+#define IMAGE_FILE_LARGE_ADDRESS_AWARE        0x0020
 #define IMAGE_FILE_DLL                        0x2000
 
 #ifndef OS_WINDOWS
@@ -101,8 +103,14 @@
 #define IMAGE_FILE_MACHINE_CEE         0xC0EE
 #endif
 
-#define PROCESSOR_ARCHITECTURE_INTEL 0
-#define PROCESSOR_ARCHITECTURE_AMD64 9
+#ifndef OS_WINDOWS
+#define IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA 0x0020
+#endif
+
+#define PROCESSOR_ARCHITECTURE_INTEL         0
+#define PROCESSOR_ARCHITECTURE_IA32_ON_WIN64 10
+#define PROCESSOR_ARCHITECTURE_AMD64         9
+#define PROCESSOR_ARCHITECTURE_ARM64         12
 
 namespace sogen
 {
@@ -135,9 +143,11 @@ namespace sogen
         AXP64 = ALPHA64,
         TRICORE = 0x0520, // Infineon
         CEF = 0x0CEF,
-        EBC = 0x0EBC,   // EFI Byte Code
-        AMD64 = 0x8664, // AMD64 (K8)
-        M32R = 0x9041,  // M32R little-endian
+        EBC = 0x0EBC,     // EFI Byte Code
+        AMD64 = 0x8664,   // AMD64 (K8)
+        M32R = 0x9041,    // M32R little-endian
+        ARM64EC = 0xA641, // ARM64EC hybrid image with x64-compatible code ranges
+        ARM64 = 0xAA64,   // ARM64 Little-Endian
         CEE = 0xC0EE,
     };
 
@@ -517,6 +527,12 @@ namespace sogen
             pe64
         };
 
+        struct pe_format
+        {
+            pe_arch architecture{};
+            PEMachineType machine{};
+        };
+
         template <typename T>
         inline uint64_t get_first_section_offset(const PENTHeaders_t<T>& nt_headers, const uint64_t nt_headers_offset)
         {
@@ -562,7 +578,7 @@ namespace sogen
             return section_header;
         }
 
-        inline std::variant<pe_arch, std::error_code> get_pe_arch(const std::filesystem::path& file)
+        inline std::variant<pe_format, std::error_code> get_pe_format(const std::filesystem::path& file)
         {
             std::ifstream f(file, std::ios::binary);
             if (!f)
@@ -601,18 +617,19 @@ namespace sogen
 
             if (magic == PEOptionalHeader_t<std::uint32_t>::k_Magic)
             {
-                return pe_arch::pe32;
+                return pe_format{.architecture = pe_arch::pe32, .machine = file_header.Machine};
             }
             if (magic == PEOptionalHeader_t<std::uint64_t>::k_Magic)
             {
-                return pe_arch::pe64;
+                return pe_format{.architecture = pe_arch::pe64, .machine = file_header.Machine};
             }
 
             return std::make_error_code(std::errc::executable_format_error);
         }
 
         template <typename MemoryReader>
-        inline std::variant<pe_arch, std::error_code> get_pe_arch(MemoryReader&& read_memory, uint64_t base_address, uint64_t image_size)
+        inline std::variant<pe_format, std::error_code> get_pe_format(MemoryReader&& read_memory, uint64_t base_address,
+                                                                      uint64_t image_size)
         {
             auto read = [&](const uint64_t offset, void* destination, const size_t size) -> bool {
                 if (offset > image_size || static_cast<uint64_t>(size) > image_size - offset)
@@ -662,14 +679,35 @@ namespace sogen
 
             if (magic == PEOptionalHeader_t<std::uint32_t>::k_Magic)
             {
-                return pe_arch::pe32;
+                return pe_format{.architecture = pe_arch::pe32, .machine = file_header.Machine};
             }
             if (magic == PEOptionalHeader_t<std::uint64_t>::k_Magic)
             {
-                return pe_arch::pe64;
+                return pe_format{.architecture = pe_arch::pe64, .machine = file_header.Machine};
             }
 
             return std::make_error_code(std::errc::executable_format_error);
+        }
+
+        inline std::variant<pe_arch, std::error_code> get_pe_arch(const std::filesystem::path& file)
+        {
+            const auto result = get_pe_format(file);
+            if (const auto* format = std::get_if<pe_format>(&result))
+            {
+                return format->architecture;
+            }
+            return std::get<std::error_code>(result);
+        }
+
+        template <typename MemoryReader>
+        inline std::variant<pe_arch, std::error_code> get_pe_arch(MemoryReader&& read_memory, uint64_t base_address, uint64_t image_size)
+        {
+            const auto result = get_pe_format(std::forward<MemoryReader>(read_memory), base_address, image_size);
+            if (const auto* format = std::get_if<pe_format>(&result))
+            {
+                return format->architecture;
+            }
+            return std::get<std::error_code>(result);
         }
 
         template <typename T>

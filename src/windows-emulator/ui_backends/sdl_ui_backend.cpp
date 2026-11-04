@@ -1,7 +1,14 @@
 #include "../std_include.hpp"
+#include "surface_alpha.hpp"
+#include "window_geometry.hpp"
+#include "../vulkan_handle_utils.hpp"
 #include <platform/ui_backend.hpp>
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+
+#include <future>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -29,6 +36,64 @@ namespace sogen
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
         }
 #endif
+
+        // X11 can run without a window manager to process SDL's SetKeyboardFocus request. Use XSetInputFocus
+        // instead, but only when no external X11 client owns the focus.
+        void apply_x11_focus_fallback(SDL_Window* window)
+        {
+            const auto* driver = SDL_GetCurrentVideoDriver();
+            if (!driver || std::string_view{driver} != "x11")
+            {
+                return;
+            }
+
+            using x_window = uintptr_t;
+            using x_get_input_focus = int (*)(void*, x_window*, int*);
+            using x_set_input_focus = int (*)(void*, x_window, int, x_window);
+            using x_flush = int (*)(void*);
+
+            static auto* x11 = [] {
+                if (auto* library = SDL_LoadObject("libX11.so.6"))
+                {
+                    return library;
+                }
+                return SDL_LoadObject("libX11.so");
+            }();
+            static auto get_input_focus = x11 ? reinterpret_cast<x_get_input_focus>(SDL_LoadFunction(x11, "XGetInputFocus")) : nullptr;
+            static auto set_input_focus = x11 ? reinterpret_cast<x_set_input_focus>(SDL_LoadFunction(x11, "XSetInputFocus")) : nullptr;
+            static auto flush = x11 ? reinterpret_cast<x_flush>(SDL_LoadFunction(x11, "XFlush")) : nullptr;
+            if (!get_input_focus || !set_input_focus || !flush)
+            {
+                return;
+            }
+
+            const auto properties = SDL_GetWindowProperties(window);
+            auto* display = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
+            const auto xwindow = static_cast<x_window>(SDL_GetNumberProperty(properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
+            if (display && xwindow != 0)
+            {
+                x_window focused_window{};
+                int revert_to{};
+                get_input_focus(display, &focused_window, &revert_to);
+                constexpr x_window no_focus = 0;
+                constexpr x_window pointer_root = 1;
+                constexpr int revert_to_pointer_root = 1;
+
+                auto* focused_sdl_window = SDL_GetKeyboardFocus();
+                const auto focused_sdl_properties = focused_sdl_window ? SDL_GetWindowProperties(focused_sdl_window) : 0;
+                const bool own_window_has_focus =
+                    focused_sdl_properties &&
+                    SDL_GetPointerProperty(focused_sdl_properties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr) == display &&
+                    static_cast<x_window>(SDL_GetNumberProperty(focused_sdl_properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0)) ==
+                        focused_window;
+
+                if (focused_window == no_focus || focused_window == pointer_root || own_window_has_focus)
+                {
+                    set_input_focus(display, xwindow, revert_to_pointer_root, 0);
+                    flush(display);
+                }
+            }
+        }
 
         std::string make_host_window_title(const std::u16string_view title)
         {
@@ -619,11 +684,28 @@ namespace sogen
                 ui_surface_format texture_format{ui_surface_format::bgra8};
                 bool has_surface{};
                 std::vector<layer_state> layers{};
+                bool translucent{};
+                std::vector<uint32_t> blended_pixels{};
+            };
+
+            struct pending_key_release
+            {
+                hwnd window{};
+                uint32_t message{};
+                uint64_t virtual_key{};
+                uint64_t scan_code{};
+                size_t scancode_index{};
+                std::chrono::steady_clock::time_point due{};
             };
 
             ~sdl_ui_backend() override
             {
                 this->reset();
+
+                if (this->vulkan_library_loaded_)
+                {
+                    SDL_Vulkan_UnloadLibrary();
+                }
 
                 if (this->initialized_)
                 {
@@ -641,9 +723,12 @@ namespace sogen
 
                 this->windows_.clear();
                 this->guest_by_window_id_.clear();
+                this->cursor_capture_ = {};
+                this->captured_window_id_ = 0;
                 this->active_window_ = 0;
                 this->mouse_button_state_ = 0;
                 this->key_down_.fill(false);
+                this->pending_key_releases_.clear();
 
                 if (this->initialized_)
                 {
@@ -654,6 +739,11 @@ namespace sogen
             void set_event_sink(event_sink sink) override
             {
                 this->sink_ = std::move(sink);
+            }
+
+            void set_snapshot_request_sink(const std::function<void()>& sink) override
+            {
+                this->snapshot_request_sink_ = sink;
             }
 
             void pump_events() override
@@ -667,12 +757,13 @@ namespace sogen
                     }
                 }
 
+                this->drain_commands();
                 if (!this->ensure_initialized())
                 {
                     return;
                 }
 
-                this->drain_commands();
+                this->deliver_pending_key_releases();
 
                 SDL_Event event{};
                 while (SDL_PollEvent(&event))
@@ -718,23 +809,54 @@ namespace sogen
                         this->set_window_active(this->resolve_guest(event.window.windowID), false);
                         break;
 
+                    // A host window sits where its guest window's frame is, so a user move moves the guest window.
+                    case SDL_EVENT_WINDOW_MOVED:
+                        if (const auto guest = this->resolve_guest(event.window.windowID); guest != 0)
+                        {
+                            const auto position = (static_cast<uint64_t>(static_cast<uint16_t>(event.window.data2)) << 16) |
+                                                  static_cast<uint16_t>(event.window.data1);
+                            this->track_host_window_move(guest, event.window.data1, event.window.data2);
+                            this->post_event(guest, WM_MOVE, 0, position, std::nullopt,
+                                             std::pair<int32_t, int32_t>{event.window.data1, event.window.data2});
+                        }
+                        break;
+
                     // The guest renders at its own fixed resolution; the host window can be any size. On a
                     // host resize/expose, re-present the last frame so the letterbox (aspect-preserving fit
                     // with black bars) updates immediately, even if the guest has not produced a new frame.
                     case SDL_EVENT_WINDOW_RESIZED:
                     case SDL_EVENT_WINDOW_MAXIMIZED:
                     case SDL_EVENT_WINDOW_RESTORED:
-                    case SDL_EVENT_WINDOW_EXPOSED:
-                        if (auto* state = this->resolve_window(this->resolve_guest(event.window.windowID)))
+                    case SDL_EVENT_WINDOW_EXPOSED: {
+                        const auto guest = this->resolve_guest(event.window.windowID);
+                        if (auto* state = this->resolve_window(guest))
                         {
                             render_window(*state);
+                            if (event.type != SDL_EVENT_WINDOW_EXPOSED)
+                            {
+                                this->post_host_resize(guest, *state);
+                            }
                         }
+                        this->apply_cursor_capture();
                         break;
+                    }
 
                     case SDL_EVENT_KEY_DOWN: {
                         const auto guest = this->resolve_guest(event.key.windowID);
                         if (guest == 0)
                         {
+                            break;
+                        }
+
+                        const auto modifiers = event.key.mod;
+                        if (event.key.key == SDLK_S && (modifiers & SDL_KMOD_CTRL) != 0 && (modifiers & SDL_KMOD_ALT) != 0 &&
+                            (modifiers & SDL_KMOD_SHIFT) != 0 && this->snapshot_request_sink_)
+                        {
+                            if (!event.key.repeat)
+                            {
+                                this->snapshot_request_sink_();
+                            }
+                            this->snapshot_key_held_ = true;
                             break;
                         }
 
@@ -749,6 +871,7 @@ namespace sogen
 
                         if (scancode_index < key_down_.size())
                         {
+                            this->deliver_pending_key_releases(scancode_index);
                             was_down = was_down || key_down_[scancode_index];
                         }
 
@@ -766,6 +889,7 @@ namespace sogen
 
                         if (scancode_index < key_down_.size())
                         {
+                            this->record_key_press_start(scancode_index);
                             key_down_[scancode_index] = true;
                         }
 
@@ -779,6 +903,12 @@ namespace sogen
                         const auto guest = this->resolve_guest(event.key.windowID);
                         if (guest == 0)
                         {
+                            break;
+                        }
+
+                        if (event.key.key == SDLK_S && this->snapshot_key_held_)
+                        {
+                            this->snapshot_key_held_ = false;
                             break;
                         }
 
@@ -799,13 +929,16 @@ namespace sogen
                             break;
                         }
 
+                        const uint32_t message = (is_alt || vk == VK_F10 || alt_context) ? WM_SYSKEYUP : WM_KEYUP;
                         const auto scancode_index = static_cast<size_t>(event.key.scancode);
                         if (scancode_index < key_down_.size())
                         {
+                            if (this->enforce_minimum_key_press_duration(guest, message, vk, scan, scancode_index))
+                            {
+                                break;
+                            }
                             key_down_[scancode_index] = false;
                         }
-
-                        const uint32_t message = (is_alt || vk == VK_F10 || alt_context) ? WM_SYSKEYUP : WM_KEYUP;
 
                         this->post_event(guest, message, vk, scan);
                         break;
@@ -827,10 +960,15 @@ namespace sogen
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
+                                if (auto* state = this->resolve_window(guest); state && state->window)
+                                {
+                                    apply_x11_focus_fallback(state->window);
+                                }
                                 this->set_window_active(guest, true);
                                 this->mouse_button_state_ |= sdl_mouse_button_to_mk(event.button.button);
                                 this->post_event(guest, message, mouse_button_wparam(this->mouse_button_state_, event.button.button),
-                                                 this->map_window_point(guest, event.button.x, event.button.y));
+                                                 this->map_window_point(guest, event.button.x, event.button.y),
+                                                 this->relative_motion(event.button.windowID, 0.0f, 0.0f));
                             }
                         }
                         break;
@@ -842,7 +980,8 @@ namespace sogen
                             {
                                 this->mouse_button_state_ &= static_cast<uint16_t>(~sdl_mouse_button_to_mk(event.button.button));
                                 this->post_event(guest, message, mouse_button_wparam(this->mouse_button_state_, event.button.button),
-                                                 this->map_window_point(guest, event.button.x, event.button.y));
+                                                 this->map_window_point(guest, event.button.x, event.button.y),
+                                                 this->relative_motion(event.button.windowID, 0.0f, 0.0f));
                             }
                         }
                         break;
@@ -853,16 +992,19 @@ namespace sogen
                             this->set_window_active(guest, true);
 
                             const auto point = this->map_window_point(guest, event.wheel.mouse_x, event.wheel.mouse_y);
+                            const auto relative = this->relative_motion(event.wheel.windowID, 0.0f, 0.0f);
 
                             if (const auto delta_y = sdl_wheel_delta(event.wheel.y); delta_y != 0)
                             {
                                 this->post_event(guest, WM_MOUSEWHEEL,
-                                                 make_high_word_wparam(this->mouse_button_state_, static_cast<uint16_t>(delta_y)), point);
+                                                 make_high_word_wparam(this->mouse_button_state_, static_cast<uint16_t>(delta_y)), point,
+                                                 relative);
                             }
                             if (const auto delta_x = sdl_wheel_delta(event.wheel.x); delta_x != 0)
                             {
                                 this->post_event(guest, WM_MOUSEHWHEEL,
-                                                 make_high_word_wparam(this->mouse_button_state_, static_cast<uint16_t>(delta_x)), point);
+                                                 make_high_word_wparam(this->mouse_button_state_, static_cast<uint16_t>(delta_x)), point,
+                                                 relative);
                             }
                         }
                         break;
@@ -873,7 +1015,8 @@ namespace sogen
                             this->set_window_active(guest, true);
                             this->mouse_button_state_ = sdl_mouse_mask_to_mk(event.motion.state);
                             this->post_event(guest, WM_MOUSEMOVE, low_word(this->mouse_button_state_),
-                                             this->map_window_point(guest, event.motion.x, event.motion.y));
+                                             this->map_window_point(guest, event.motion.x, event.motion.y),
+                                             this->relative_motion(event.motion.windowID, event.motion.xrel, event.motion.yrel));
                         }
                         break;
 
@@ -881,6 +1024,82 @@ namespace sogen
                         break;
                     }
                 }
+            }
+
+            std::vector<std::string> vulkan_instance_extensions() override
+            {
+                return this->run_sync([this] {
+                    std::vector<std::string> extensions;
+                    if (!this->ensure_initialized())
+                    {
+                        return extensions;
+                    }
+                    if (!this->vulkan_library_loaded_)
+                    {
+                        if (!SDL_Vulkan_LoadLibrary(nullptr))
+                        {
+                            return extensions;
+                        }
+                        this->vulkan_library_loaded_ = true;
+                    }
+
+                    Uint32 count{};
+                    const auto* names = SDL_Vulkan_GetInstanceExtensions(&count);
+                    if (!names)
+                    {
+                        return extensions;
+                    }
+
+                    extensions.reserve(count);
+                    for (Uint32 i = 0; i < count; ++i)
+                    {
+                        extensions.emplace_back(names[i]);
+                    }
+                    return extensions;
+                });
+            }
+
+            uint64_t create_vulkan_surface(const hwnd window, const uint64_t instance) override
+            {
+                return this->run_sync([this, window, instance] {
+                    auto* state = this->resolve_window(window);
+                    if (state && !state->window)
+                    {
+                        state = this->resolve_window(this->get_top_level_ancestor(window));
+                    }
+                    if (!state || !state->window)
+                    {
+                        return uint64_t{};
+                    }
+
+                    if (state->texture)
+                    {
+                        SDL_DestroyTexture(state->texture);
+                        state->texture = nullptr;
+                    }
+                    if (state->renderer)
+                    {
+                        SDL_DestroyRenderer(state->renderer);
+                        state->renderer = nullptr;
+
+                        // The renderer has already presented into the window. On Windows that binds the window to a
+                        // DXGI flip-model swapchain, and it keeps showing that swapchain's last frame instead of
+                        // anything presented through a Vulkan surface. Present into a fresh window instead.
+                        if (!this->recreate_host_window(*state))
+                        {
+                            return uint64_t{};
+                        }
+                    }
+
+                    VkSurfaceKHR surface{};
+                    if (!SDL_Vulkan_CreateSurface(state->window, reinterpret_cast<VkInstance>(instance), nullptr, &surface))
+                    {
+                        state->renderer = SDL_CreateRenderer(state->window, nullptr);
+                        render_window(*state);
+                        return uint64_t{};
+                    }
+                    return pack_vulkan_handle(surface);
+                });
             }
 
             void create_window(const ui_window_desc& desc) override
@@ -903,7 +1122,72 @@ namespace sogen
                     return;
                 }
 
+                auto flags = host_window_flags(desc);
+                const auto width = std::max<int>(1, static_cast<int>(desc.rect.right - desc.rect.left) - desc.client_insets.left -
+                                                        desc.client_insets.right);
+                const auto height = std::max<int>(1, static_cast<int>(desc.rect.bottom - desc.rect.top) - desc.client_insets.top -
+                                                         desc.client_insets.bottom);
+                auto* window = create_host_window(desc, flags, width, height);
+                if (!window && (flags & SDL_WINDOW_VULKAN) != 0)
+                {
+                    flags &= ~SDL_WINDOW_VULKAN;
+                    window = create_host_window(desc, flags, width, height);
+                }
+                if (!window)
+                {
+                    std::fprintf(stderr, "sogen: SDL_CreateWindow failed: %s\n", SDL_GetError());
+                    return;
+                }
+
+                auto* renderer = SDL_CreateRenderer(window, nullptr);
+                if (!renderer && (flags & SDL_WINDOW_VULKAN) != 0)
+                {
+                    SDL_DestroyWindow(window);
+                    flags &= ~SDL_WINDOW_VULKAN;
+                    window = create_host_window(desc, flags, width, height);
+                    renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
+                }
+                if (!renderer)
+                {
+                    std::fprintf(stderr, "sogen: SDL_CreateRenderer failed: %s\n", SDL_GetError());
+                    if (window)
+                    {
+                        SDL_DestroyWindow(window);
+                    }
+                    return;
+                }
+
+                finish_host_window(window, desc.rect.left, desc.rect.top, flags);
+
+                auto& state = this->windows_[desc.handle];
+                state.desc = desc;
+                state.window = window;
+                state.renderer = renderer;
+                this->guest_by_window_id_[SDL_GetWindowID(window)] = desc.handle;
+                render_window(state);
+            }
+
+            // Only WS_EX_NOACTIVATE makes a window never activated. Menus and tooltips stay inactive through how they
+            // are shown (SW_SHOWNA, SWP_NOACTIVATE) or through MA_NOACTIVATE instead, and a borderless popup with
+            // WS_EX_TOOLWINDOW is the usual way to keep a window that does need the keyboard off the taskbar.
+            static bool is_never_activated(const ui_window_desc& desc)
+            {
+                return (desc.ex_style & WS_EX_NOACTIVATE) != 0;
+            }
+
+            static Uint64 host_window_flags(const ui_window_desc& desc)
+            {
                 Uint64 flags = 0;
+                // A layered window's bitmap carries alpha the host compositor has to blend, which only a transparent
+                // host window lets through.
+                if ((desc.ex_style & WS_EX_LAYERED) != 0)
+                {
+                    flags |= SDL_WINDOW_TRANSPARENT;
+                }
+                if (is_never_activated(desc))
+                {
+                    flags |= SDL_WINDOW_NOT_FOCUSABLE;
+                }
                 if (!desc.visible)
                 {
                     flags |= SDL_WINDOW_HIDDEN;
@@ -923,41 +1207,59 @@ namespace sogen
                 {
                     flags |= SDL_WINDOW_RESIZABLE;
                 }
+                return flags | SDL_WINDOW_VULKAN;
+            }
 
-                // Size the host window to the client area; we render no frame, so sizing to it keeps the present 1:1.
-                const auto width = std::max<int>(1, static_cast<int>(desc.rect.right - desc.rect.left) - desc.client_insets.left -
-                                                        desc.client_insets.right);
-                const auto height = std::max<int>(1, static_cast<int>(desc.rect.bottom - desc.rect.top) - desc.client_insets.top -
-                                                         desc.client_insets.bottom);
+            // The host window is sized to the guest client area; we render no frame, so that keeps the present 1:1.
+            static SDL_Window* create_host_window(const ui_window_desc& desc, const Uint64 flags, const int width, const int height)
+            {
                 const auto title = make_host_window_title(desc.title);
-                auto* window = SDL_CreateWindow(title.c_str(), static_cast<int>(width), static_cast<int>(height), flags);
-                if (!window)
-                {
-                    std::fprintf(stderr, "sogen: SDL_CreateWindow failed: %s\n", SDL_GetError());
-                    return;
-                }
+                return SDL_CreateWindow(title.c_str(), width, height, flags);
+            }
 
+            static void finish_host_window(SDL_Window* window, const int x, const int y, const Uint64 flags)
+            {
 #ifdef _WIN32
                 apply_application_icon(window);
 #endif
 
-                auto* renderer = SDL_CreateRenderer(window, nullptr);
-                if (!renderer)
+                SDL_SetWindowPosition(window, x, y);
+                SDL_StartTextInput(window);
+                if ((flags & SDL_WINDOW_HIDDEN) == 0)
                 {
-                    std::fprintf(stderr, "sogen: SDL_CreateRenderer failed: %s\n", SDL_GetError());
-                    SDL_DestroyWindow(window);
-                    return;
+                    apply_x11_focus_fallback(window);
+                }
+            }
+
+            bool recreate_host_window(window_state& state)
+            {
+                auto* old_window = state.window;
+                auto flags = host_window_flags(state.desc) & ~SDL_WINDOW_HIDDEN;
+                flags |= SDL_GetWindowFlags(old_window) & SDL_WINDOW_HIDDEN;
+
+                int x{};
+                int y{};
+                int width{};
+                int height{};
+                SDL_GetWindowPosition(old_window, &x, &y);
+                SDL_GetWindowSize(old_window, &width, &height);
+
+                auto* window = create_host_window(state.desc, flags, width, height);
+                if (!window)
+                {
+                    return false;
                 }
 
-                SDL_SetWindowPosition(window, desc.rect.left, desc.rect.top);
-                SDL_StartTextInput(window);
+                finish_host_window(window, x, y, flags);
 
-                auto& state = this->windows_[desc.handle];
-                state.desc = desc;
+                SDL_StopTextInput(old_window);
+                this->guest_by_window_id_.erase(SDL_GetWindowID(old_window));
+                SDL_DestroyWindow(old_window);
+
                 state.window = window;
-                state.renderer = renderer;
-                this->guest_by_window_id_[SDL_GetWindowID(window)] = desc.handle;
-                render_window(state);
+                this->guest_by_window_id_[SDL_GetWindowID(window)] = state.desc.handle;
+                this->apply_cursor_capture();
+                return true;
             }
 
             void destroy_window(const hwnd window) override
@@ -969,6 +1271,19 @@ namespace sogen
             {
                 if (const auto it = this->windows_.find(window); it != this->windows_.end())
                 {
+                    std::erase_if(this->pending_key_releases_, [this, window](const pending_key_release& release) {
+                        if (release.window != window)
+                        {
+                            return false;
+                        }
+                        if (release.scancode_index < this->key_down_.size())
+                        {
+                            this->key_down_[release.scancode_index] = false;
+                        }
+                        return true;
+                    });
+
+                    auto* focus_fallback = this->find_focus_fallback(it->second);
                     // Child (non-top-level) windows have no SDL window; only top-level windows do.
                     if (it->second.window)
                     {
@@ -977,6 +1292,10 @@ namespace sogen
                     }
                     destroy_window_resources(it->second);
                     this->windows_.erase(it);
+                    if (focus_fallback)
+                    {
+                        apply_x11_focus_fallback(focus_fallback);
+                    }
                 }
             }
 
@@ -994,6 +1313,7 @@ namespace sogen
                                               std::max<int>(1, (rect.bottom - rect.top) - insets.top - insets.bottom));
                         }
                         this->redraw_related(window);
+                        this->apply_cursor_capture();
                     }
                 });
             }
@@ -1009,10 +1329,16 @@ namespace sogen
                             if (visible)
                             {
                                 SDL_ShowWindow(state->window);
+                                apply_x11_focus_fallback(state->window);
                             }
                             else
                             {
+                                auto* focus_fallback = this->find_focus_fallback(*state);
                                 SDL_HideWindow(state->window);
+                                if (focus_fallback)
+                                {
+                                    apply_x11_focus_fallback(focus_fallback);
+                                }
                             }
                         }
                         this->redraw_related(window);
@@ -1132,21 +1458,20 @@ namespace sogen
             void set_cursor_position(const hwnd window, const int32_t screen_x, const int32_t screen_y) override
             {
                 this->queue_or_run([this, window, screen_x, screen_y] {
-                    // Top-levels are positioned at their emulated rect (SDL_SetWindowPosition), so emulated screen
-                    // coordinates map to guest client pixels by subtracting that origin.
-                    const auto top = this->get_top_level_ancestor(window);
-                    if (auto* state = this->resolve_window(top); state && state->window)
+                    if (auto* state = this->resolve_window(this->get_top_level_ancestor(window)); state && state->window)
                     {
-                        auto window_x = static_cast<float>(screen_x - state->desc.rect.left);
-                        auto window_y = static_cast<float>(screen_y - state->desc.rect.top);
-                        // The frame is letterboxed into the window, so guest pixels are not at the same position in
-                        // the host window; map through the same transform map_window_point inverts.
-                        if (state->renderer)
-                        {
-                            SDL_RenderCoordinatesToWindow(state->renderer, window_x, window_y, &window_x, &window_y);
-                        }
+                        const auto [window_x, window_y] = screen_to_window_point(*state, screen_x, screen_y);
                         SDL_WarpMouseInWindow(state->window, window_x, window_y);
                     }
+                });
+            }
+
+            void set_cursor_clip(const hwnd window, const std::optional<ui_rect>& screen_rect, const bool relative) override
+            {
+                this->queue_or_run([this, window, screen_rect, relative] {
+                    this->cursor_capture_ = cursor_capture{.window = window, .screen_rect = screen_rect, .relative = relative};
+                    this->relative_remainder_ = {};
+                    this->apply_cursor_capture();
                 });
             }
 
@@ -1166,12 +1491,8 @@ namespace sogen
             }
 
           private:
-            // SDL windows are thread-affine: only their owning thread's message pump services the
-            // cross-thread SendMessage that host calls such as SDL_ShowWindow issue, so every SDL
-            // operation must run on the one thread that calls pump_events. With multiple vCPUs the
-            // syscall handlers run on different worker threads, so operations they trigger are queued
-            // here and executed on the pump thread. Every ui_backend method returns void, so the
-            // callers never need a result and this can stay fully asynchronous.
+            // SDL windows are thread-affine. Operations from vCPU workers are queued to the UI thread;
+            // the synchronous variant is reserved for Vulkan setup that must return a native handle.
             void queue_or_run(std::function<void()> task)
             {
                 {
@@ -1186,6 +1507,38 @@ namespace sogen
                 task();
             }
 
+            template <typename Fn>
+            auto run_sync(Fn task) -> std::invoke_result_t<Fn>
+            {
+                using result_type = std::invoke_result_t<Fn>;
+                static_assert(!std::is_void_v<result_type>);
+
+                auto task_ptr = std::make_shared<Fn>(std::move(task));
+                std::future<result_type> future;
+                bool run_direct{};
+                {
+                    const std::lock_guard lock(this->command_mutex_);
+                    run_direct = !this->ui_thread_known_ || this->ui_thread_id_ == std::this_thread::get_id();
+                    if (!run_direct)
+                    {
+                        auto promise = std::make_shared<std::promise<result_type>>();
+                        future = promise->get_future();
+                        this->commands_.emplace_back([task_ptr, promise = std::move(promise)]() mutable {
+                            try
+                            {
+                                promise->set_value((*task_ptr)());
+                            }
+                            catch (...)
+                            {
+                                promise->set_exception(std::current_exception());
+                            }
+                        });
+                    }
+                }
+
+                return run_direct ? (*task_ptr)() : future.get();
+            }
+
             void drain_commands()
             {
                 std::vector<std::function<void()>> pending;
@@ -1198,6 +1551,75 @@ namespace sogen
                 {
                     task();
                 }
+            }
+
+            void deliver_pending_key_releases(const std::optional<size_t> forced_scancode = std::nullopt)
+            {
+                if (!minimum_key_press_duration_enabled())
+                {
+                    return;
+                }
+
+                const auto now = std::chrono::steady_clock::now();
+                std::erase_if(this->pending_key_releases_, [this, now, forced_scancode](const pending_key_release& release) {
+                    if (forced_scancode.has_value() ? release.scancode_index != *forced_scancode : release.due > now)
+                    {
+                        return false;
+                    }
+
+                    if (release.scancode_index < this->key_down_.size())
+                    {
+                        this->key_down_[release.scancode_index] = false;
+                    }
+                    this->post_event(release.window, release.message, release.virtual_key, release.scan_code);
+                    return true;
+                });
+            }
+
+            void record_key_press_start(const size_t scancode_index)
+            {
+                if (!minimum_key_press_duration_enabled())
+                {
+                    return;
+                }
+
+                if (!this->key_down_[scancode_index])
+                {
+                    this->key_down_since_[scancode_index] = std::chrono::steady_clock::now();
+                }
+            }
+
+            bool enforce_minimum_key_press_duration(const hwnd window, const uint32_t message, const uint64_t virtual_key,
+                                                    const uint64_t scan_code, const size_t scancode_index)
+            {
+                if (!minimum_key_press_duration_enabled())
+                {
+                    return false;
+                }
+
+                constexpr auto minimum_key_press_duration = std::chrono::milliseconds{50};
+                const auto due = this->key_down_since_[scancode_index] + minimum_key_press_duration;
+                if (std::chrono::steady_clock::now() >= due)
+                {
+                    return false;
+                }
+
+                this->pending_key_releases_.push_back({.window = window,
+                                                       .message = message,
+                                                       .virtual_key = virtual_key,
+                                                       .scan_code = scan_code,
+                                                       .scancode_index = scancode_index,
+                                                       .due = due});
+                return true;
+            }
+
+            static constexpr bool minimum_key_press_duration_enabled()
+            {
+#ifdef __ANDROID__
+                return true;
+#else
+                return false;
+#endif
             }
 
             bool ensure_initialized()
@@ -1221,6 +1643,20 @@ namespace sogen
             {
                 const auto it = this->windows_.find(window);
                 return it == this->windows_.end() ? nullptr : &it->second;
+            }
+
+            SDL_Window* find_focus_fallback(const window_state& state)
+            {
+                if (state.desc.owner != 0)
+                {
+                    const auto owner = this->get_top_level_ancestor(state.desc.owner);
+                    if (auto* owner_state = this->resolve_window(owner); owner_state && owner_state->window && owner_state->desc.visible)
+                    {
+                        return owner_state->window;
+                    }
+                }
+
+                return nullptr;
             }
 
             hwnd get_top_level_ancestor(hwnd window) const
@@ -1451,7 +1887,6 @@ namespace sogen
                                                   surface.width, surface.height);
                 if (state.texture)
                 {
-                    SDL_SetTextureBlendMode(state.texture, SDL_BLENDMODE_NONE);
                     // Nearest-neighbour keeps the guest frame crisp when the window is resized larger than the
                     // guest resolution (the letterbox fit would otherwise blur it with linear filtering). At the
                     // default 1:1 size this is identical to linear.
@@ -1476,11 +1911,37 @@ namespace sogen
                     return;
                 }
 
-                SDL_UpdateTexture(state.texture, nullptr, surface.pixels, surface.stride);
+                state.translucent = surface.layered;
+                SDL_SetTextureBlendMode(state.texture, state.translucent ? SDL_BLENDMODE_BLEND_PREMULTIPLIED : SDL_BLENDMODE_NONE);
+
+                if (!state.translucent)
+                {
+                    SDL_UpdateTexture(state.texture, nullptr, surface.pixels, surface.stride);
+                    return;
+                }
+
+                const auto width = static_cast<size_t>(surface.width);
+                const auto row_stride = static_cast<size_t>(surface.stride);
+                state.blended_pixels.resize(width * static_cast<size_t>(surface.height));
+
+                const auto* source = static_cast<const uint8_t*>(surface.pixels);
+                for (size_t row = 0; row < static_cast<size_t>(surface.height); ++row)
+                {
+                    const auto destination = std::span{state.blended_pixels}.subspan(row * width, width);
+                    memcpy(destination.data(), source + (row * row_stride), width * sizeof(uint32_t));
+                    apply_layered_blend(destination, surface.premultiplied_alpha, surface.constant_alpha);
+                }
+
+                SDL_UpdateTexture(state.texture, nullptr, state.blended_pixels.data(), static_cast<int>(width * sizeof(uint32_t)));
             }
 
             static void render_window(window_state& state)
             {
+                if (!state.renderer)
+                {
+                    return;
+                }
+
                 if (!state.layers.empty())
                 {
                     render_layered_window(state);
@@ -1494,7 +1955,7 @@ namespace sogen
                     // makes SDL_RenderCoordinatesFromWindow map host mouse positions back to guest pixels.
                     SDL_SetRenderLogicalPresentation(state.renderer, state.texture_width, state.texture_height,
                                                      SDL_LOGICAL_PRESENTATION_LETTERBOX);
-                    SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, 255);
+                    SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, state.translucent ? 0 : 255);
                     SDL_RenderClear(state.renderer);
                     SDL_RenderTexture(state.renderer, state.texture, nullptr, nullptr);
                     SDL_RenderPresent(state.renderer);
@@ -1567,6 +2028,10 @@ namespace sogen
                     {
                         return;
                     }
+                    if (const auto* state = this->resolve_window(window); state && is_never_activated(state->desc))
+                    {
+                        return;
+                    }
                     this->active_window_ = window;
                     this->post_event(window, WM_SETFOCUS, 0, 0);
                     this->post_event(window, WM_ACTIVATE, WA_ACTIVE, 0);
@@ -1583,19 +2048,142 @@ namespace sogen
                 }
             }
 
-            void post_event(const hwnd window, const uint32_t message, const uint64_t w_param, const uint64_t l_param) const
+            // A window the user can resize takes the host size as its new client size, like a sizing border on Windows.
+            // Fixed-size windows keep their size and are scaled to fit.
+            void post_host_resize(const hwnd guest, const window_state& state) const
+            {
+                const auto flags = SDL_GetWindowFlags(state.window);
+                if ((flags & SDL_WINDOW_RESIZABLE) == 0 || (flags & SDL_WINDOW_MINIMIZED) != 0)
+                {
+                    return;
+                }
+
+                int width{};
+                int height{};
+                if (!SDL_GetWindowSize(state.window, &width, &height))
+                {
+                    return;
+                }
+
+                const uint64_t size = (static_cast<uint64_t>(static_cast<uint16_t>(height)) << 16) | static_cast<uint16_t>(width);
+                this->post_event(guest, WM_SIZE, (flags & SDL_WINDOW_MAXIMIZED) != 0 ? SIZE_MAXIMIZED : SIZE_RESTORED, size);
+            }
+
+            void post_event(const hwnd window, const uint32_t message, const uint64_t w_param, const uint64_t l_param,
+                            const std::optional<std::pair<int32_t, int32_t>>& relative = std::nullopt,
+                            const std::optional<std::pair<int32_t, int32_t>>& host_position = std::nullopt) const
             {
                 if (this->sink_)
                 {
-                    this->sink_(ui_event{.window = window, .message = message, .wParam = w_param, .lParam = l_param});
+                    this->sink_(ui_event{.window = window,
+                                         .message = message,
+                                         .wParam = w_param,
+                                         .lParam = l_param,
+                                         .relative_motion = relative,
+                                         .host_position = host_position});
                 }
             }
 
+            // The user moved the host window, so the frame origin this backend converts screen coordinates against has
+            // to follow, without calling SDL_SetWindowPosition again. A screen-space cursor clip is re-applied so it
+            // stays where it is on screen instead of travelling with the window.
+            void track_host_window_move(const hwnd window, const int32_t x, const int32_t y)
+            {
+                auto* state = this->resolve_window(window);
+                if (!state)
+                {
+                    return;
+                }
+
+                move_window_origin(state->desc.rect, x, y);
+                this->apply_cursor_capture();
+            }
+
+            // SDL exposes only the drawable client area, while emulated screen coordinates include the guest frame.
+            static std::pair<float, float> screen_to_window_point(const window_state& state, const int32_t screen_x, const int32_t screen_y)
+            {
+                auto [window_x, window_y] = screen_point_in_window(state.desc, screen_x, screen_y);
+                // The frame is letterboxed into the window, so guest pixels are not at the same position in
+                // the host window; map through the same transform map_window_point inverts.
+                if (state.renderer)
+                {
+                    SDL_RenderCoordinatesToWindow(state.renderer, window_x, window_y, &window_x, &window_y);
+                }
+                return {window_x, window_y};
+            }
+
+            // In relative mode the host cursor stays put and SDL reports sub-pixel motion; carry the fractions over so
+            // slow movement is not lost.
+            std::optional<std::pair<int32_t, int32_t>> relative_motion(const SDL_WindowID window_id, const float dx, const float dy)
+            {
+                auto* window = SDL_GetWindowFromID(window_id);
+                if (!window || !SDL_GetWindowRelativeMouseMode(window))
+                {
+                    this->relative_remainder_ = {};
+                    return std::nullopt;
+                }
+
+                this->relative_remainder_.first += dx;
+                this->relative_remainder_.second += dy;
+                const auto x = static_cast<int32_t>(this->relative_remainder_.first);
+                const auto y = static_cast<int32_t>(this->relative_remainder_.second);
+                this->relative_remainder_.first -= static_cast<float>(x);
+                this->relative_remainder_.second -= static_cast<float>(y);
+                return std::pair{x, y};
+            }
+
             event_sink sink_{};
+            std::function<void()> snapshot_request_sink_{};
+            bool snapshot_key_held_{};
             bool initialized_{};
+            bool vulkan_library_loaded_{};
             hwnd active_window_{};
             uint16_t mouse_button_state_{};
+            std::pair<float, float> relative_remainder_{};
+
+            struct cursor_capture
+            {
+                hwnd window{};
+                std::optional<ui_rect> screen_rect{};
+                bool relative{};
+            };
+
+            cursor_capture cursor_capture_{};
+            SDL_WindowID captured_window_id_{};
+
+            void apply_cursor_capture()
+            {
+                auto* state = this->resolve_window(this->get_top_level_ancestor(this->cursor_capture_.window));
+                auto* target = (state && state->window && this->cursor_capture_.screen_rect) ? state->window : nullptr;
+
+                if (auto* previous = SDL_GetWindowFromID(this->captured_window_id_); previous && previous != target)
+                {
+                    SDL_SetWindowMouseRect(previous, nullptr);
+                    SDL_SetWindowRelativeMouseMode(previous, false);
+                }
+
+                this->captured_window_id_ = target ? SDL_GetWindowID(target) : 0;
+                if (!target)
+                {
+                    return;
+                }
+
+                const auto& clip = *this->cursor_capture_.screen_rect;
+                const auto [left, top] = screen_to_window_point(*state, clip.left, clip.top);
+                const auto [right, bottom] = screen_to_window_point(*state, clip.right, clip.bottom);
+                const SDL_Rect rect{
+                    .x = static_cast<int>(left),
+                    .y = static_cast<int>(top),
+                    .w = std::max(1, static_cast<int>(right - left)),
+                    .h = std::max(1, static_cast<int>(bottom - top)),
+                };
+                SDL_SetWindowMouseRect(target, &rect);
+                SDL_SetWindowRelativeMouseMode(target, this->cursor_capture_.relative);
+            }
+
             std::array<bool, SDL_SCANCODE_COUNT> key_down_{};
+            std::array<std::chrono::steady_clock::time_point, SDL_SCANCODE_COUNT> key_down_since_{};
+            std::vector<pending_key_release> pending_key_releases_{};
             std::unordered_map<hwnd, window_state> windows_{};
             std::unordered_map<SDL_WindowID, hwnd> guest_by_window_id_{};
 

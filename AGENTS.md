@@ -19,15 +19,36 @@ It's very slow, so only use it at the end:
 
 ## Smoke tests
 
-Execute `analyzer.exe -s test-sample.exe` for smoke tests using the cmd in the directory of the built preset.
-E.g.: `cmd /c "cd build\release\artifacts\ && analyzer.exe -s test-sample.exe"`
+Execute `analyzer.exe --network live -s test-sample.exe` for smoke tests using the cmd in the directory of the built preset.
+E.g.: `cmd /c "cd build\release\artifacts\ && analyzer.exe --network live -s test-sample.exe"`
+The sample resolves `google.com`, which needs `--network live`.
 
 Other applications can also be executed in the emulator:
 `cmd /c "cd build\release\artifacts\ && analyzer.exe -s path/to/binary.exe arg1 arg2 ..."`
 
+## Tests
+
+More tests are not automatically better. Add a test when it is useful; no test is better than a bad test. Do not
+add tests merely to increase coverage.
+
+- A good test pins behavior with an objective oracle that is defined externally or relied on by another
+  component: Windows/NT semantics, guest-visible results, public APIs, ABIs and file formats, and architectural
+  invariants. Treat this as a guideline and use judgment: a test outside it can still make sense.
+- Do not pin developer-chosen presentation, such as the wording or contents of log and diagnostic messages or
+  output formatting, unless that output is explicitly a stable interface or is consumed by another component.
+- Avoid tests that add almost nothing: tautologies, tests that echo the implementation, pinning an incidental
+  return value in one arbitrary case, and pure wiring or forwarding checks.
+- Prefer unit tests (Google Test). They are lightweight and much faster. Use the end-to-end `test-sample.exe`
+  (run inside the emulator) only when the behavior really crosses emulator subsystems and cannot be checked
+  usefully at unit level. CI is a limited resource.
+- Tests must be deterministic and efficient. No needless sleeps or fixed delays and no timing-dependent
+  assertions. Where waiting is needed, wait for the actual condition.
+
 ## Code comments
 
-The default is **no comment**. Write code that explains itself through naming and structure instead.
+The default is **no comment**. Write code that explains itself through naming and structure instead: small,
+self-contained functions with a single responsibility, precise names for variables and functions, and good use of
+classes, RAII, containers and abstraction. Code should read like a book.
 
 A comment is only justified when it carries information that is *not recoverable from the code*, and that a
 competent developer reading this file would otherwise get wrong. In practice that means:
@@ -54,3 +75,10 @@ perfectly good change; a change that sprinkles comments over otherwise readable 
 
 - Run clang-format on changed files to ensure consistent formatting
 - Do not use shortcuts or workarounds. Always prefer clean and idiomatic solutions.
+- Never commit binary files (executables, DLLs, object files, archives, images, compiled samples). Git LFS
+  pointers and generated artifacts are not a workaround.
+
+## Pull requests
+
+- Keep one concern per pull request. Unrelated fixes, refactors or optimizations go into their own PRs.
+- Make the title and description accurately describe the complete diff. Do not leave changes undocumented.

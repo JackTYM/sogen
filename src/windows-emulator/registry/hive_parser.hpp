@@ -14,7 +14,6 @@ namespace sogen
     // The name is escaped to this private-use code point while it is part of a key path.
     inline constexpr char16_t registry_name_slash = u'\uE02F';
 
-
     struct hive_value
     {
         uint32_t type{};
@@ -22,16 +21,21 @@ namespace sogen
         std::vector<std::byte> data{};
     };
 
+    struct hive_key_class
+    {
+        int offset{-1};
+        uint16_t length{};
+        uint32_t max_sub_key_class_length{};
+    };
+
     class hive_key
     {
       public:
-        hive_key(const int subkey_block_offset, const int value_count, const int value_offsets, const int class_name_offset,
-                 const int class_name_length)
+        hive_key(const int subkey_block_offset, const int value_count, const int value_offsets, const hive_key_class& key_class)
             : subkey_block_offset_(subkey_block_offset),
               value_count_(value_count),
               value_offsets_(value_offsets),
-              class_name_offset_(class_name_offset),
-              class_name_length_(class_name_length)
+              class_(key_class)
         {
         }
 
@@ -76,6 +80,11 @@ namespace sogen
 
         std::vector<std::byte> get_class_name(std::ifstream& file) const;
 
+        uint32_t get_max_sub_key_class_length() const
+        {
+            return this->class_.max_sub_key_class_length;
+        }
+
         size_t get_sub_key_count(std::ifstream& file)
         {
             this->parse(file);
@@ -105,8 +114,7 @@ namespace sogen
         const int subkey_block_offset_{};
         const int value_count_{};
         const int value_offsets_{};
-        const int class_name_offset_{};
-        const int class_name_length_{};
+        const hive_key_class class_{};
 
         void parse_subkey_list(std::ifstream& file, int32_t block_offset, bool allow_root_index);
         void parse(std::ifstream& file);
@@ -150,17 +158,6 @@ namespace sogen
             }
 
             return target_key->get_sub_key_name(this->file_, index);
-        }
-
-        [[nodiscard]] std::vector<std::byte> get_class_name(const std::filesystem::path& key)
-        {
-            auto* target_key = this->get_sub_key(key);
-            if (!target_key)
-            {
-                return {};
-            }
-
-            return target_key->get_class_name(this->file_);
         }
 
         [[nodiscard]] const hive_value* get_value(const std::filesystem::path& key, const std::string_view name)

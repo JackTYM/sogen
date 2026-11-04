@@ -30,7 +30,7 @@ namespace sogen
 
     // Describes the object behind `resolved_handle`, moving synchronization state into the shared arena
     // if it is not there yet. Image- and file-backed sections are not shareable.
-    NTSTATUS describe_shareable_object(process_context& process, handle resolved_handle, shared_object_description& description);
+    NTSTATUS describe_shareable_object(windows_emulator& win_emu, handle resolved_handle, shared_object_description& description);
 
     // Creates a local object from a description and stores it in the process's handle table.
     NTSTATUS adopt_shareable_object(windows_emulator& win_emu, const shared_object_description& description, handle& adopted_handle);

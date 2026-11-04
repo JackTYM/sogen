@@ -16,6 +16,196 @@ namespace sogen
             constexpr std::u16string_view srm_command_port_name = u"\\SeRmCommandPort";
             constexpr std::u16string_view lsa_command_port_name = u"\\SeLsaCommandPort";
             constexpr uint64_t srm_command_port_max_message_length = 0x200;
+
+            constexpr ULONG alpc_create_port_section_secure = 0x40000;
+            constexpr ULONG alpc_view_not_secure = 0x40000;
+            constexpr ULONG alpc_sync_connect = 0x20000;
+
+            // Ports routed between emulated processes have no emulator-side port behind them; their container keeps the
+            // security context bookkeeping itself.
+            port& security_context_owner(port_container& container)
+            {
+                if (container.alpc_port_id() != 0)
+                {
+                    return container;
+                }
+
+                return *container.get_internal_port();
+            }
+        }
+
+        NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                const handle section_handle, const uint64_t section_size,
+                                                const emulator_object<handle> alpc_section_handle,
+                                                const emulator_object<uint64_t> actual_section_size)
+        {
+            if ((flags & ~alpc_create_port_section_secure) != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            auto* container = c.proc.ports.get(port_handle);
+            if (!container)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            if (container->alpc_port_id() != 0)
+            {
+                return alpc::create_port_section(c, section_size, alpc_section_handle.value(), actual_section_size.value());
+            }
+            auto* port = container->get_internal_port();
+            if (port->disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+            if (section_handle != 0)
+            {
+                return c.proc.sections.get(section_handle) ? STATUS_NOT_SUPPORTED : STATUS_INVALID_HANDLE;
+            }
+            if (!alpc_section_handle || !actual_section_size)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            uint64_t id{};
+            uint64_t size{};
+            try
+            {
+                const auto status = port->create_section(section_size, id, size);
+                if (!NT_SUCCESS(status))
+                {
+                    return status;
+                }
+                if (!alpc_section_handle.try_write(make_handle(id)) || !actual_section_size.try_write(size))
+                {
+                    port->delete_section(id);
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                return STATUS_SUCCESS;
+            }
+            catch (const std::bad_alloc&)
+            {
+                return STATUS_NO_MEMORY;
+            }
+        }
+
+        NTSTATUS handle_NtAlpcDeletePortSection(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                const handle section_handle)
+        {
+            if (flags != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            auto* container = c.proc.ports.get(port_handle);
+            if (!container)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            if (container->alpc_port_id() != 0)
+            {
+                return alpc::delete_port_section(c, section_handle.bits);
+            }
+            auto* port = container->get_internal_port();
+            return port->disconnected ? STATUS_PORT_DISCONNECTED : port->delete_section(section_handle.bits);
+        }
+
+        NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                const emulator_object<ALPC_DATA_VIEW_ATTR<EmulatorTraits<Emu64>>> view_attributes)
+        {
+            if (flags != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            auto* container = c.proc.ports.get(port_handle);
+            if (!container)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            if (container->alpc_port_id() != 0)
+            {
+                return alpc::create_section_view(c, view_attributes.value());
+            }
+            auto* port = container->get_internal_port();
+            if (port->disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+            auto attributes = view_attributes.try_read();
+            if (!attributes)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            if (attributes->Flags != 0 || attributes->ViewBase != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            try
+            {
+                uint64_t base{};
+                uint64_t size{};
+                const auto status = port->create_section_view(c.win_emu, attributes->SectionHandle, attributes->ViewSize, base, size);
+                if (!NT_SUCCESS(status))
+                {
+                    return status;
+                }
+                attributes->ViewBase = base;
+                attributes->ViewSize = size;
+                if (!view_attributes.try_write(*attributes))
+                {
+                    port->delete_section_view(c.win_emu, base);
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                return STATUS_SUCCESS;
+            }
+            catch (const std::bad_alloc&)
+            {
+                return STATUS_NO_MEMORY;
+            }
+        }
+
+        NTSTATUS handle_NtAlpcDeleteSectionView(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                const uint64_t view_base)
+        {
+            if (flags != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            auto* container = c.proc.ports.get(port_handle);
+            if (!container)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            if (container->alpc_port_id() != 0)
+            {
+                return alpc::delete_section_view(c, view_base);
+            }
+            auto* port = container->get_internal_port();
+            if (port->disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+            const auto key = static_cast<uint32_t>(port_handle.bits & 0xffffffff);
+            const auto replies = c.proc.pending_alpc_reply_views.find(key);
+            if (replies != c.proc.pending_alpc_reply_views.end())
+            {
+                const auto view = std::ranges::find_if(replies->second, [&](const auto& entry) { return entry[0] == view_base; });
+                if (view != replies->second.end())
+                {
+                    c.win_emu.memory.release_memory(view_base, static_cast<size_t>((*view)[1]));
+                    replies->second.erase(view);
+                    if (replies->second.empty())
+                    {
+                        c.proc.pending_alpc_reply_views.erase(replies);
+                    }
+                    return STATUS_SUCCESS;
+                }
+            }
+            try
+            {
+                return port->delete_section_view(c.win_emu, view_base);
+            }
+            catch (const std::bad_alloc&)
+            {
+                return STATUS_NO_MEMORY;
+            }
         }
 
         NTSTATUS handle_NtConnectPort(const syscall_context& c, const emulator_object<handle> client_port_handle,
@@ -39,8 +229,8 @@ namespace sogen
                 return alpc::connect_lpc_port(c, port_name, connection_info, connection_info_length.value(), maximum_message_length.value(),
                                               client_port_handle.value());
             }
-
             port_creation_data data{};
+            data.sequence_number = 1;
             if (client_shared_memory)
             {
                 client_shared_memory.access([&](PORT_VIEW64& view) {
@@ -80,7 +270,7 @@ namespace sogen
 
         NTSTATUS handle_NtAlpcCreatePort(const syscall_context& c, const emulator_object<handle> port_handle,
                                          const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                         const emulator_pointer port_attributes)
+                                         const emulator_object<ALPC_PORT_ATTRIBUTES<EmulatorTraits<Emu64>>> port_attributes)
         {
             if (!port_handle)
             {
@@ -103,9 +293,10 @@ namespace sogen
             c.win_emu.callbacks.on_generic_access("Creating ALPC port", port_name);
 
             handle new_handle{};
-            const auto status = alpc::create_port(c, std::move(port_name), port_attributes, new_handle);
+            const auto status = alpc::create_port(c, std::move(port_name), port_attributes.value(), new_handle);
             if (NT_SUCCESS(status))
             {
+                c.proc.ports.get(new_handle)->inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
                 port_handle.write(new_handle);
             }
 
@@ -149,9 +340,10 @@ namespace sogen
 
         NTSTATUS handle_NtAlpcConnectPort(const syscall_context& c, const emulator_object<handle> port_handle,
                                           const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> server_port_name,
-                                          const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
-                                          const emulator_pointer port_attributes, const ULONG flags,
-                                          const emulator_pointer /*required_server_sid*/, const emulator_pointer connection_message,
+                                          const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                          const emulator_object<ALPC_PORT_ATTRIBUTES<EmulatorTraits<Emu64>>> port_attributes,
+                                          const ULONG flags, const emulator_pointer /*required_server_sid*/,
+                                          const emulator_pointer connection_message,
                                           const emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
                                           const emulator_pointer out_message_attributes, const emulator_pointer in_message_attributes,
                                           const emulator_object<LARGE_INTEGER> timeout)
@@ -161,7 +353,7 @@ namespace sogen
 
             if (alpc::is_guest_port_name(c.proc, port_name))
             {
-                return alpc::connect_port(c, port_name, port_attributes, flags, connection_message, buffer_length.value(),
+                return alpc::connect_port(c, port_name, port_attributes.value(), flags, connection_message, buffer_length.value(),
                                           out_message_attributes, in_message_attributes, timeout.value(), port_handle.value());
             }
 
@@ -171,7 +363,19 @@ namespace sogen
                         u16_to_u8(port_name).c_str());
             }
 
-            port_container container{std::u16string(port_name), c.win_emu, {}};
+            port_creation_data data{};
+            data.flags = ALPC_PORFLG_ALLOW_LPC_REQUESTS;
+            if (port_attributes)
+            {
+                data.flags |= port_attributes.read().Flags;
+            }
+            data.sequence_number = 1;
+            port_container container{std::u16string(port_name), c.win_emu, data};
+            container.inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
+            if (!(flags & alpc_sync_connect))
+            {
+                container.queue_connection_reply(c.win_emu, c.proc.is_wow64_process);
+            }
 
             const auto handle = c.proc.ports.store(std::move(container));
             port_handle.write(handle);
@@ -182,11 +386,11 @@ namespace sogen
         NTSTATUS handle_NtAlpcConnectPortEx(
             const syscall_context& c, const emulator_object<handle> port_handle,
             const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> connection_port_object_attributes,
-            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*client_port_object_attributes*/,
-            const emulator_pointer port_attributes, const ULONG flags, const emulator_pointer /*server_security_requirements*/,
-            const emulator_pointer connection_message, const emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
-            const emulator_pointer out_message_attributes, const emulator_pointer in_message_attributes,
-            const emulator_object<LARGE_INTEGER> timeout)
+            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> client_port_object_attributes,
+            const emulator_object<ALPC_PORT_ATTRIBUTES<EmulatorTraits<Emu64>>> port_attributes, const ULONG flags,
+            const emulator_pointer /*server_security_requirements*/, const emulator_pointer connection_message,
+            const emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length, const emulator_pointer out_message_attributes,
+            const emulator_pointer in_message_attributes, const emulator_object<LARGE_INTEGER> timeout)
         {
             if (!connection_port_object_attributes)
             {
@@ -200,96 +404,8 @@ namespace sogen
             }
 
             emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> port_name{c.emu, attributes.ObjectName};
-            return handle_NtAlpcConnectPort(c, port_handle, port_name, connection_port_object_attributes, port_attributes, flags, {},
+            return handle_NtAlpcConnectPort(c, port_handle, port_name, client_port_object_attributes, port_attributes, flags, {},
                                             connection_message, buffer_length, out_message_attributes, in_message_attributes, timeout);
-        }
-
-        // IAudioClient::SetEventHandle (audioses!CCrossProcessBaseClientEndpoint::SetEventHandle) forwards
-        // dsound's render buffer-ready event to the audio server by sending it as an ALPC HANDLE message
-        // attribute with DesiredAccess = SYNCHRONIZE|EVENT_MODIFY_STATE (0x100002). sogen has no audio server
-        // to receive and periodically signal it, so we capture the handle here and let the per-context-switch
-        // audio-engine tick signal it (see perform_context_switch_work). Without this, dsound's event-driven
-        // render thread blocks forever, never submits a WASAPI buffer, and its DirectSound play cursor stays 0.
-        bool capture_audio_render_event(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes)
-        {
-            if (!attributes)
-            {
-                return false;
-            }
-
-            const auto header = attributes.read();
-            if (!(header.ValidAttributes & ALPC_MESSAGE_HANDLE_ATTRIBUTE))
-            {
-                return false;
-            }
-
-            const bool wow64 = c.proc.is_wow64_process;
-            uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
-            if (header.ValidAttributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
-            {
-                offset += wow64 ? 0x0c : 0x18;
-            }
-            if (header.ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
-            {
-                offset += wow64 ? 0x10 : 0x20;
-            }
-            if (header.ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
-            {
-                offset += wow64 ? 0x14 : 0x20;
-            }
-
-            const auto attr_base = attributes.value() + offset;
-            const auto handle_value = wow64 ? uint64_t{emulator_object<uint32_t>{c.emu, attr_base + 4}.read()}
-                                            : emulator_object<uint64_t>{c.emu, attr_base + 8}.read();
-            const auto desired_access =
-                wow64 ? emulator_object<ULONG>{c.emu, attr_base + 0x0c}.read() : emulator_object<ULONG>{c.emu, attr_base + 0x14}.read();
-
-            constexpr ULONG event_signal_access = 0x100002; // SYNCHRONIZE | EVENT_MODIFY_STATE
-            if ((desired_access & event_signal_access) != event_signal_access)
-            {
-                return false;
-            }
-
-            const auto h = make_handle(handle_value);
-            auto* event = c.proc.events.get(h);
-            if (!event || event->type != SynchronizationEvent)
-            {
-                return false; // only the auto-reset render event SetEventHandle forwards
-            }
-
-            auto& events = c.proc.audio_render_events;
-            if (std::none_of(events.begin(), events.end(), [&](const handle e) { return e.bits == h.bits; }))
-            {
-                events.push_back(h);
-                constexpr size_t max_tracked_events = 4;
-                if (events.size() > max_tracked_events)
-                {
-                    events.erase(events.begin(), events.end() - max_tracked_events);
-                }
-            }
-            return true;
-        }
-
-        // SetEventHandle sends its registration to a notification ALPC port whose name the real audio server
-        // hands back during stream setup; sogen never supplies one, so the client connects to an empty-named
-        // port that resolves to dummy_port and replies STATUS_NOT_SUPPORTED. That makes SetEventHandle fail,
-        // which fails CEngineRendererConnection::Initialize and drives dsound's create->fail->destroy churn --
-        // so the event-driven render thread that would wait on the captured event is never even created. Once
-        // we have captured the event, acknowledge the send with an empty successful LPC reply so the client's
-        // event-driven Initialize completes and its render thread starts.
-        void write_empty_success_reply(const emulator_object<PORT_MESSAGE64>& send_message,
-                                       const emulator_object<PORT_MESSAGE64>& receive_message)
-        {
-            if (!receive_message || !send_message)
-            {
-                return;
-            }
-
-            auto reply = lpc_port_message::read(send_message);
-            reply.native.u2.s2.Type = LPC_REPLY;
-            reply.native.u1.s1.DataLength = 0;
-            reply.native.u1.s1.TotalLength = static_cast<CSHORT>(reply.wire_size());
-            reply.write(receive_message);
         }
 
         NTSTATUS handle_NtListenPort(const syscall_context& c, const handle port_handle, const emulator_pointer connection_request)
@@ -373,14 +489,19 @@ namespace sogen
 
         NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, const handle port_handle, const ULONG /*flags*/)
         {
-            if (const auto* port = c.proc.ports.get(port_handle); port && port->alpc_port_id() != 0)
+            auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (port->alpc_port_id() != 0)
             {
                 alpc::close_port(c.win_emu, port->alpc_port_id());
                 return STATUS_SUCCESS;
             }
 
-            c.proc.ports.erase(port_handle);
-            return STATUS_SUCCESS;
+            return port->get_internal_port()->disconnect() ? STATUS_SUCCESS : STATUS_PORT_DISCONNECTED;
         }
 
         // The emulator has no per-thread impersonation context (see NtSetInformationThread's ThreadImpersonationToken
@@ -444,7 +565,7 @@ namespace sogen
             uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
             if (allocated_attributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
             {
-                offset += wow64 ? sizeof(ALPC_SECURITY_ATTR<EmulatorTraits<Emu32>>) : sizeof(ALPC_SECURITY_ATTR<EmulatorTraits<Emu64>>);
+                offset += wow64 ? 0x0C : 0x18;
             }
             if (allocated_attributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
             {
@@ -458,10 +579,189 @@ namespace sogen
             return attributes.value() + offset;
         }
 
+        std::optional<uint64_t> find_context_attribute(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes,
+                                                       const ULONG allocated_attributes)
+        {
+            if (!attributes || !(allocated_attributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+            {
+                return std::nullopt;
+            }
+
+            const bool wow64 = c.proc.is_wow64_process;
+            uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
+            if (allocated_attributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
+            {
+                offset += wow64 ? 0x0C : 0x18;
+            }
+            if (allocated_attributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
+            {
+                offset += wow64 ? 0x10 : 0x20;
+            }
+
+            return attributes.value() + offset;
+        }
+
+        template <typename Traits>
+        std::optional<uint64_t> read_send_message_context(const syscall_context& c, const uint64_t address)
+        {
+            const auto attribute = emulator_object<ALPC_CONTEXT_ATTR<Traits>>{c.emu, address}.try_read();
+            if (!attribute)
+            {
+                return std::nullopt;
+            }
+
+            return static_cast<uint64_t>(attribute->MessageContext);
+        }
+
+        NTSTATUS read_send_context_attribute(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes,
+                                             uint64_t& message_context)
+        {
+            message_context = 0;
+            if (!attributes)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto header = attributes.try_read();
+            if (!header)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            if (!(header->ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto address = find_context_attribute(c, attributes, header->AllocatedAttributes);
+            if (!address)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto context = c.proc.is_wow64_process ? read_send_message_context<EmulatorTraits<Emu32>>(c, *address)
+                                                         : read_send_message_context<EmulatorTraits<Emu64>>(c, *address);
+            if (!context)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            message_context = *context;
+            return STATUS_SUCCESS;
+        }
+
+        template <typename Traits>
+        void write_context_attribute_at(const syscall_context& c, const uint64_t address, const uint64_t message_context,
+                                        const ULONG message_id)
+        {
+            emulator_object<ALPC_CONTEXT_ATTR<Traits>>{c.emu, address}.write({
+                .PortContext = 0,
+                .MessageContext = static_cast<Traits::PVOID>(message_context),
+                .Sequence = 0,
+                .MessageId = message_id,
+                .CallbackId = 0,
+            });
+        }
+
+        void write_reply_context_attribute(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes,
+                                           const uint64_t message_context, const ULONG message_id)
+        {
+            if (!attributes || message_context == 0)
+            {
+                return;
+            }
+
+            auto header = attributes.read();
+            const auto address = find_context_attribute(c, attributes, header.AllocatedAttributes);
+            if (!address)
+            {
+                return;
+            }
+
+            if (c.proc.is_wow64_process)
+            {
+                write_context_attribute_at<EmulatorTraits<Emu32>>(c, *address, message_context, message_id);
+            }
+            else
+            {
+                write_context_attribute_at<EmulatorTraits<Emu64>>(c, *address, message_context, message_id);
+            }
+
+            header.ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+            attributes.write(header);
+        }
+
         template <typename Traits>
         emulator_object<ALPC_HANDLE_ATTR<Traits>> handle_attribute_at(const syscall_context& c, const uint64_t address)
         {
             return {c.emu, address};
+        }
+
+        std::optional<uint64_t> find_view_attribute(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes,
+                                                    const ULONG allocated_attributes)
+        {
+            if (!attributes || !(allocated_attributes & ALPC_MESSAGE_VIEW_ATTRIBUTE))
+            {
+                return std::nullopt;
+            }
+
+            uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
+            if (allocated_attributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
+            {
+                offset += c.proc.is_wow64_process ? 0x0C : 0x18;
+            }
+
+            return attributes.value() + offset;
+        }
+
+        template <typename Traits>
+        emulator_object<ALPC_DATA_VIEW_ATTR<Traits>> view_attribute_at(const syscall_context& c, const uint64_t address)
+        {
+            return {c.emu, address};
+        }
+
+        bool write_reply_view_attribute(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes,
+                                        const uint64_t view_base, const uint64_t view_size)
+        {
+            if (view_base == 0)
+            {
+                return true;
+            }
+
+            if (!attributes)
+            {
+                return false;
+            }
+
+            auto header = attributes.read();
+            const auto attr_base = find_view_attribute(c, attributes, header.AllocatedAttributes);
+            if (!attr_base)
+            {
+                return false;
+            }
+
+            const auto write_attribute = [&]<typename Traits>() {
+                view_attribute_at<Traits>(c, *attr_base)
+                    .write({
+                        .Flags = alpc_view_not_secure,
+                        .SectionHandle = 0,
+                        .ViewBase = static_cast<Traits::PVOID>(view_base),
+                        .ViewSize = static_cast<Traits::SIZE_T>(view_size),
+                    });
+            };
+
+            if (c.proc.is_wow64_process)
+            {
+                write_attribute.template operator()<EmulatorTraits<Emu32>>();
+            }
+            else
+            {
+                write_attribute.template operator()<EmulatorTraits<Emu64>>();
+            }
+
+            header.ValidAttributes =
+                (header.ValidAttributes & (ALPC_MESSAGE_CONTEXT_ATTRIBUTE | ALPC_MESSAGE_HANDLE_ATTRIBUTE)) | ALPC_MESSAGE_VIEW_ATTRIBUTE;
+            attributes.write(header);
+            return true;
         }
 
         // Deliver reply handles (e.g. the shared render section in an audio Initialize reply) to the receiver via
@@ -494,7 +794,7 @@ namespace sogen
                 handle_attribute_at<Traits>(c, *attr_base)
                     .write({
                         .Flags = alpc_received_handle_flags,
-                        .Handle = static_cast<typename Traits::HANDLE>(h.handle),
+                        .Handle = static_cast<Traits::HANDLE>(h.handle),
                         .ObjectType = static_cast<ULONG>(handles.size()),
                         .DesiredAccess = h.desired_access,
                     });
@@ -509,9 +809,8 @@ namespace sogen
                 write_attribute.template operator()<EmulatorTraits<Emu64>>();
             }
 
-            // Report exactly the attributes the reply carries (CONTEXT|HANDLE), matching the real kernel, rather
-            // than OR-ing HANDLE onto whatever stale ValidAttributes the caller's buffer happened to contain.
-            header.ValidAttributes = (header.ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE) | ALPC_MESSAGE_HANDLE_ATTRIBUTE;
+            header.ValidAttributes =
+                (header.ValidAttributes & (ALPC_MESSAGE_CONTEXT_ATTRIBUTE | ALPC_MESSAGE_VIEW_ATTRIBUTE)) | ALPC_MESSAGE_HANDLE_ATTRIBUTE;
             attributes.write(header);
         }
 
@@ -524,7 +823,12 @@ namespace sogen
                 return 0;
             }
 
-            const auto attr_base = find_handle_attribute(c, attributes, attributes.read().AllocatedAttributes);
+            const auto header = attributes.read();
+            if ((header.ValidAttributes & ALPC_MESSAGE_HANDLE_ATTRIBUTE) == 0)
+            {
+                return 0;
+            }
+            const auto attr_base = find_handle_attribute(c, attributes, header.AllocatedAttributes);
             if (!attr_base)
             {
                 return 0;
@@ -532,6 +836,50 @@ namespace sogen
 
             return c.proc.is_wow64_process ? handle_attribute_at<EmulatorTraits<Emu32>>(c, *attr_base).read().Handle
                                            : handle_attribute_at<EmulatorTraits<Emu64>>(c, *attr_base).read().Handle;
+        }
+
+        NTSTATUS read_send_view_attribute(const syscall_context& c, const port& destination,
+                                          const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes, lpc_message_context& context)
+        {
+            if (!attributes)
+            {
+                return STATUS_SUCCESS;
+            }
+            const auto header = attributes.try_read();
+            if (!header)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            if ((header->ValidAttributes & ~header->AllocatedAttributes) != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            if ((header->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE) == 0)
+            {
+                return STATUS_SUCCESS;
+            }
+            const auto address = find_view_attribute(c, attributes, header->AllocatedAttributes);
+            if (!address)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            const auto read_attribute = [&]<typename Traits>() -> NTSTATUS {
+                const auto view = view_attribute_at<Traits>(c, *address).try_read();
+                if (!view)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                if ((view->Flags & ~alpc_view_not_secure) != 0 ||
+                    !destination.owns_section_view(view->SectionHandle, view->ViewBase, view->ViewSize))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                context.send_view_base = view->ViewBase;
+                context.send_view_size = view->ViewSize;
+                return STATUS_SUCCESS;
+            };
+            return c.proc.is_wow64_process ? read_attribute.template operator()<EmulatorTraits<Emu32>>()
+                                           : read_attribute.template operator()<EmulatorTraits<Emu64>>();
         }
 
         NTSTATUS handle_NtAlpcSendWaitReceivePort(const syscall_context& c, const handle port_handle, const ULONG flags,
@@ -557,23 +905,43 @@ namespace sogen
 
             const bool wow64 = (flags & alpc::msgflg_wow64_call) != 0;
 
-            if (capture_audio_render_event(c, send_message_attributes))
+            const auto port_key = static_cast<uint32_t>(port_handle.bits & 0xFFFFFFFF);
+            if (send_message)
             {
-                write_empty_success_reply(send_message, receive_message);
-                if (buffer_length && receive_message)
+                const auto send_header = lpc_port_message::read(send_message);
+                if (send_header.native.MessageId == 0)
                 {
-                    alpc::write_size_parameter(c.win_emu, buffer_length.value(), wow64, lpc_port_message::read(send_message).wire_size());
+                    auto stamped_header = send_header;
+                    stamped_header.native.MessageId = port->allocate_message_id();
+                    stamped_header.write(send_message);
                 }
-                return STATUS_SUCCESS;
+
+                if ((send_header.native.u2.s2.Type & lpc_continuation_required) != 0)
+                {
+                    return STATUS_SUCCESS;
+                }
             }
 
             lpc_message_context context{c.emu};
             context.send_message = send_message;
             context.receive_message = receive_message;
             context.receive_buffer_length = buffer_length ? alpc::read_size_parameter(c.win_emu, buffer_length.value(), wow64) : 0;
+            if (send_message)
+            {
+                const auto status = read_send_view_attribute(c, *port->get_internal_port(), send_message_attributes, context);
+                if (!NT_SUCCESS(status))
+                {
+                    return status;
+                }
+            }
             context.send_handle = read_send_handle_attribute(c, send_message_attributes);
+            const auto context_attribute_status = read_send_context_attribute(c, send_message_attributes, context.send_message_context);
+            if (!NT_SUCCESS(context_attribute_status))
+            {
+                return context_attribute_status;
+            }
 
-            const auto result = port->handle_message(c.win_emu, context);
+            auto result = port->handle_message(c.win_emu, context);
 
             if (receive_message && NT_SUCCESS(result.status))
             {
@@ -585,6 +953,35 @@ namespace sogen
                     throw std::runtime_error("Unexpected success result returned by port handler");
                 }
 
+                if (!result.view_payload.empty())
+                {
+                    const auto allocation_start = c.proc.is_wow64_process ? DEFAULT_ALLOCATION_ADDRESS_32BIT : 0;
+                    const auto aligned_view_size = page_align_up(static_cast<uint64_t>(result.view_payload.size()));
+                    if constexpr (sizeof(size_t) < sizeof(uint64_t))
+                    {
+                        if (aligned_view_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+                        {
+                            return STATUS_NO_MEMORY;
+                        }
+                    }
+                    const auto view_size = static_cast<size_t>(aligned_view_size);
+                    const auto view_base =
+                        c.win_emu.memory.allocate_memory(view_size, memory_permission::read_write, false, allocation_start);
+                    if (view_base == 0)
+                    {
+                        return STATUS_NO_MEMORY;
+                    }
+
+                    c.emu.write_memory(view_base, result.view_payload.data(), result.view_payload.size());
+                    if (!write_reply_view_attribute(c, receive_message_attributes, view_base, view_size))
+                    {
+                        c.win_emu.memory.release_memory(view_base, view_size);
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    c.proc.pending_alpc_reply_views[port_key].push_back({view_base, view_size});
+                }
+
                 result.message.write(receive_message);
 
                 if (!result.payload.empty())
@@ -594,6 +991,7 @@ namespace sogen
                 }
 
                 write_reply_handle_attribute(c, receive_message_attributes, result.handles);
+                write_reply_context_attribute(c, receive_message_attributes, result.message_context, result.message.native.MessageId);
 
                 // Stash the delivered handles so rpcrt4 can pull them back via
                 // NtAlpcQueryInformationMessage(AlpcMessageHandleInformation), which is how its system-handle
@@ -612,35 +1010,46 @@ namespace sogen
             return result.status;
         }
 
-        NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, const handle port_handle, const uint32_t information_class,
-                                               const emulator_pointer information, const uint32_t length,
-                                               const emulator_pointer return_length)
+        NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, const handle port_handle, const uint32_t port_information_class,
+                                               const emulator_pointer port_information, const uint32_t length,
+                                               const emulator_object<ULONG> return_length)
         {
             const auto* port = c.proc.ports.get(port_handle);
+            if (port && port->alpc_port_id() != 0)
+            {
+                return alpc::query_information(c, port->alpc_port_id(), port_information_class, port_information, length,
+                                               return_length.value());
+            }
+
+            constexpr uint32_t alpc_basic_information = 0;
+            if (port_information_class != alpc_basic_information)
+            {
+                return STATUS_INVALID_INFO_CLASS;
+            }
+
+            using information_type = ALPC_BASIC_INFORMATION<EmulatorTraits<Emu64>>;
+            if (return_length)
+            {
+                return_length.write(static_cast<ULONG>(sizeof(information_type)));
+            }
+
+            if (!port_information || length < sizeof(information_type))
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
             if (!port)
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
-            if (port->alpc_port_id() == 0)
-            {
-                return alpc::query_emulated_port_information(c, information_class, information, length, return_length);
-            }
-
-            return alpc::query_information(c, port->alpc_port_id(), information_class, information, length, return_length);
-        }
-
-        NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
-                                                const handle /*section_handle*/, const EmulatorTraits<Emu64>::SIZE_T section_size,
-                                                const emulator_pointer alpc_section_handle, const emulator_pointer actual_section_size)
-        {
-            return alpc::create_port_section(c, section_size, alpc_section_handle, actual_section_size);
-        }
-
-        NTSTATUS handle_NtAlpcDeletePortSection(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
-                                                const uint64_t section_handle)
-        {
-            return alpc::delete_port_section(c, section_handle);
+            const auto* internal_port = port->get_internal_port();
+            emulator_object<information_type>{c.emu, port_information}.write({
+                .Flags = internal_port->flags,
+                .SequenceNo = internal_port->sequence_number,
+                .PortContext = 0,
+            });
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtAlpcCreateResourceReserve(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
@@ -654,18 +1063,6 @@ namespace sogen
                                                     const uint64_t resource_id)
         {
             return alpc::delete_resource_reserve(c, resource_id);
-        }
-
-        NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
-                                                const emulator_pointer view_attributes)
-        {
-            return alpc::create_section_view(c, view_attributes);
-        }
-
-        NTSTATUS handle_NtAlpcDeleteSectionView(const syscall_context& c, const handle /*port_handle*/, const ULONG /*flags*/,
-                                                const emulator_pointer view_base)
-        {
-            return alpc::delete_section_view(c, view_base);
         }
 
         NTSTATUS handle_NtAlpcAcceptConnectPort(const syscall_context& c, const emulator_object<handle> port_handle,
@@ -735,31 +1132,115 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& c, const handle port_handle, const uint32_t information_class,
-                                             const emulator_pointer information, const uint32_t length)
+        template <typename Traits>
+        NTSTATUS read_completion_association(const syscall_context& c, const emulator_pointer port_information, const uint32_t length,
+                                             uint64_t& completion_key, handle& completion_port)
         {
-            const auto* port = c.proc.ports.get(port_handle);
+            ALPC_PORT_ASSOCIATE_COMPLETION_PORT<Traits> association{};
+            if (length < sizeof(association))
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            if (!c.emu.try_read_memory(port_information, &association, sizeof(association)))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            completion_key = association.CompletionKey;
+            completion_port.bits = association.CompletionPort;
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& c, const handle port_handle, const uint32_t port_information_class,
+                                             const emulator_pointer port_information, const uint32_t length)
+        {
+            auto* port = c.proc.ports.get(port_handle);
             if (!port)
             {
                 return STATUS_INVALID_HANDLE;
             }
 
-            if (port->alpc_port_id() == 0)
+            if (port->alpc_port_id() != 0)
+            {
+                return alpc::set_information(c, port->alpc_port_id(), port_information_class, port_information, length);
+            }
+
+            constexpr uint32_t alpc_associate_completion_port_information = 2;
+            if (port_information_class != alpc_associate_completion_port_information)
             {
                 return STATUS_SUCCESS;
             }
 
-            return alpc::set_information(c, port->alpc_port_id(), information_class, information, length);
+            uint64_t completion_key{};
+            handle completion_port{};
+            const auto status =
+                c.proc.is_wow64_process
+                    ? read_completion_association<EmulatorTraits<Emu32>>(c, port_information, length, completion_key, completion_port)
+                    : read_completion_association<EmulatorTraits<Emu64>>(c, port_information, length, completion_key, completion_port);
+            if (status != STATUS_SUCCESS)
+            {
+                return status;
+            }
+
+            return port->associate_completion_port(c.win_emu, c.vcpu.active_thread, completion_key, completion_port);
         }
 
-        NTSTATUS handle_NtAlpcCreateSecurityContext()
+        NTSTATUS handle_NtAlpcCreateSecurityContext(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                    const emulator_object<ALPC_SECURITY_ATTR<EmulatorTraits<Emu64>>> security_attribute)
         {
-            return STATUS_NOT_SUPPORTED;
+            constexpr ULONG create_handle = 0x20000;
+            constexpr ULONG supported_attribute_flags = 0x70000;
+
+            if (flags != 0 || !security_attribute)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            auto attribute = security_attribute.read();
+            if (!attribute.SecurityQos || (attribute.Flags & create_handle) == 0 || (attribute.Flags & ~supported_attribute_flags) != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto& owner = security_context_owner(*port);
+            if (owner.disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+
+            attribute.ContextHandle = owner.create_security_context();
+            security_attribute.write(attribute);
+            return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcDeleteSecurityContext()
+        NTSTATUS handle_NtAlpcDeleteSecurityContext(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                    const handle context_handle)
         {
-            return STATUS_NOT_SUPPORTED;
+            if (flags != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            auto& owner = security_context_owner(*port);
+            if (owner.disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+
+            return owner.delete_security_context(context_handle.bits) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
         }
     }
 

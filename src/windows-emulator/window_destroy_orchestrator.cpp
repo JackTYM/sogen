@@ -5,7 +5,7 @@
 namespace sogen
 {
 
-    window_destroy_orchestrator::window_destroy_orchestrator(window_destroy_state& state, const syscall_context& c)
+    window_destroy_orchestrator::window_destroy_orchestrator(window_destroy_data& state, const syscall_context& c)
         : state_(state),
           emu_(c.emu),
           proc_(c.proc),
@@ -231,7 +231,7 @@ namespace sogen
             };
         }
 
-        if ((win.style & WS_CHILD) != 0 && (win.ex_style & WS_EX_NOPARENTNOTIFY) == 0)
+        if (is_direct_target && (win.style & WS_CHILD) != 0 && (win.ex_style & WS_EX_NOPARENTNOTIFY) == 0 && win.parent_handle != 0)
         {
             uint64_t child_id{};
             win.guest.access([&](const USER_WINDOW& guest_win) { child_id = guest_win.wID; });
@@ -304,11 +304,42 @@ namespace sogen
         return dependents;
     }
 
+    static void clear_cached_window(const emulator_thread& thread, const hwnd handle, const uint64_t guest_pointer)
+    {
+        if (thread.teb64)
+        {
+            thread.teb64->access([&](TEB64& teb) {
+                if (teb.Win32ClientInfo.arr[8] == handle && teb.Win32ClientInfo.arr[9] == guest_pointer)
+                {
+                    teb.Win32ClientInfo.arr[8] = 0;
+                    teb.Win32ClientInfo.arr[9] = 0;
+                }
+            });
+        }
+
+        if (thread.teb32)
+        {
+            thread.teb32->access([&](TEB32& teb) {
+                if (teb.Win32ClientInfo[8] == static_cast<uint32_t>(handle) &&
+                    teb.Win32ClientInfo[9] == static_cast<uint32_t>(guest_pointer))
+                {
+                    teb.Win32ClientInfo[8] = 0;
+                    teb.Win32ClientInfo[9] = 0;
+                }
+            });
+        }
+    }
+
     void window_destroy_orchestrator::finalize_frame(window_destroy_frame& frame, const window& win) const
     {
         this->pop_frame_allocation(frame);
         this->thread_.remove_window_messages(frame.handle);
+        if (auto* owner = this->proc_.find_thread_by_id(win.thread_id))
+        {
+            owner->forget_window(frame.handle);
+        }
 
+        clear_cached_window(this->thread_, win.handle, win.guest.value());
         win.guest.access([&](USER_WINDOW& guest_win) {
             guest_win.spwndParent = 0;
             guest_win.spwndChild = 0;
@@ -319,6 +350,7 @@ namespace sogen
 
         this->ui_.destroy_window(frame.handle);
         this->win_emu_.broadcast_window_destroyed(frame.handle);
+        this->proc_.release_mouse_capture(frame.handle);
         this->proc_.gdi_window_surfaces.erase(static_cast<uint32_t>(frame.handle));
         if (this->proc_.focus_window == frame.handle)
         {

@@ -15,6 +15,12 @@ namespace sogen
             constexpr uint32_t JOB_OBJECT_BASIC_LIMIT_INFORMATION_CLASS = 2;
             constexpr uint32_t JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9;
             constexpr uint32_t JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+            constexpr uint32_t JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800;
+            constexpr uint32_t JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000;
+            constexpr uint32_t JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x00000400;
+            constexpr uint32_t SUPPORTED_JOB_OBJECT_LIMIT_FLAGS = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK |
+                                                                  JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK |
+                                                                  JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
 
             // JOBOBJECT_EXTENDED_LIMIT_INFORMATION wraps JOBOBJECT_BASIC_LIMIT_INFORMATION as its
             // first member, so LimitFlags sits at the same offset for both info classes: past the two
@@ -64,6 +70,11 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            if (c.proc.is_current_process_handle(process_handle))
+            {
+                return STATUS_SUCCESS;
+            }
+
             if (process_handle.value.type != handle_types::process)
             {
                 return STATUS_INVALID_HANDLE;
@@ -105,6 +116,11 @@ namespace sogen
                     fprintf(stderr, "[JOB_OBJECT_SET] class=%u length=%u limit_flags=0x%x\n", job_object_information_class,
                             job_object_information_length, limit_flags);
                     fflush(stderr);
+                }
+
+                if ((limit_flags & ~SUPPORTED_JOB_OBJECT_LIMIT_FLAGS) != 0)
+                {
+                    return STATUS_NOT_SUPPORTED;
                 }
 
                 job->limit_flags = limit_flags;

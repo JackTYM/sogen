@@ -20,9 +20,11 @@ real per-vCPU objects (docs/multi-vcpu-design.md).
 */
 
 #pragma once
+#include "interface.hpp"
 #include "typed_emulator.hpp"
 #include "typed_cpu.hpp"
 #include "x86_register.hpp"
+#include "arm64_register.hpp"
 
 #include <stdexcept>
 
@@ -31,123 +33,30 @@ namespace sogen
 
     // --[Core]--------------------------------------------------------------------------
 
-    template <typename Traits>
-    struct arch_emulator : typed_emulator<Traits>
-    {
-    };
-
-    template <typename Traits>
-    struct x86_cpu : typed_cpu<Traits>
-    {
-        using register_type = Traits::register_type;
-        using pointer_type = Traits::pointer_type;
-
-        virtual void set_segment_base(register_type base, pointer_type value) = 0;
-        virtual pointer_type get_segment_base(register_type base) = 0;
-        virtual void load_gdt(pointer_type address, uint32_t limit) = 0;
-
-        // Add new virtuals at the end of the class so the vtable slots of existing methods never
-        // move; this keeps separately built backends (e.g. the dynamically loaded KVM/unicorn/FEX
-        // backends) ABI-compatible with the analyzer that calls through this interface.
-        //
-        // Called once, from module_manager::map_main_modules() right after the process's execution
-        // mode is determined (PE-header-driven detection) and before any module - including this
-        // process's own executable - is mapped. Backends that execute guest code natively on real
-        // x86-64 hardware (KVM/Unicorn/WHP) don't need this - the CPU transparently switches to
-        // compatibility mode on the CS segment load alone, so the default implementation is a no-op.
-        // A JIT-based backend (FEXCore) can't do that - its bitness is fixed per compiled context -
-        // so it uses this to know, as early as possible, whether it needs to stand up a second,
-        // 32-bit-mode context.
-        virtual void notify_process_bitness(bool /*is_wow64_process*/)
-        {
-        }
-
-        // Identifies which real WoW64 CPU-mode-switch mechanism lives at a registered gate-crossing
-        // range, so a JIT backend knows which calling convention to decode when guest execution
-        // reaches it (see register_gate_crossing).
-        enum class gate_crossing_kind
-        {
-            // sogen's own synthetic heaven's-gate trampoline (wow64_heaven_gate.hpp, kCodeBase): a
-            // 19-byte push/iretq sequence driven with the convention RAX=target RIP, RBX=target RSP,
-            // RCX=target CS, RDX=target SS, current RFLAGS carried through. Used by
-            // exception_dispatch.cpp to deliver a 64-bit exception to a thread currently running
-            // 32-bit code.
-            heaven_gate,
-            // The real wow64cpu.dll turbo-thunk dispatcher (its TurboDispatchJumpAddressStart export:
-            // `mov ecx,eax; shr ecx,0x10; jmp [r15+rcx*8]`). Its convention (EAX dispatch index, r15
-            // jump-table base populated by BTCpuProcessInit) differs from the heaven's-gate one -
-            // see perform_gate_crossing.
-            wow64cpu_dispatch,
-            // The real wow64cpu.dll forward (64->32) transition function RunSimulatedCode (RVA
-            // 0x1650, called in a loop by BTCpuSimulate). It sets up 32-bit execution context and
-            // far-jumps into 32-bit compat-mode code (its `mov gs, cx` at RVA 0x16c7 is the exact
-            // instruction FEXCore's fixed-bitness 64-bit JIT cannot compile). Registering its entry
-            // as a gate makes a JIT backend intercept it *before* any of those bytes are compiled and
-            // instead decode the WoW64 CPU-area register block itself, marshaling the 32-bit register
-            // file into its 32-bit Context - see perform_gate_crossing. Appended last for vtable-ABI
-            // safety (this enum is only passed by value, but keep additions at the end regardless).
-            wow64_run_simulated_code,
-            // wow64cpu.dll's own BTCpuProcessInit writes this into a dedicated, freshly-r-x'd page
-            // (observed at a fixed RVA past the turbo-bop table): a bare `jmp far 0x33:<same page +
-            // a few bytes>` (opcode 0xEA - only valid in 16/32-bit mode, undefined in 64-bit long
-            // mode, so FEXCore's fixed-bitness JIT can't execute it any more than the other two real
-            // transitions above). This is the real Wow64Transition entry point for this ntdll32/
-            // wow64cpu.dll build combination - the 32-bit syscall stub's `call fs:[0xC0]` lands
-            // directly here, with the syscall number/args already live and its own return address
-            // still on the stack - so despite the different encoding (immediate target offset/
-            // selector rather than any register convention, and no RSP touch, unlike a call/ret or
-            // iretq), reaching it is handled identically to wow64cpu_dispatch's WOW64SVC thunk. See
-            // perform_gate_crossing's decode of it.
-            far_jmp_bitness_switch,
-        };
-
-        // Registers [address, address+size) as a WoW64 bitness gate crossing: a JIT backend
-        // intercepts guest execution reaching it (its range is inherently non-executable to the
-        // JIT) and, instead of raising a memory-violation exception, marshals the CPU
-        // register file into its other-bitness Context and switches which one is executing - the
-        // observable effect of the real hardware CS-segment mode switch that native backends
-        // (KVM/Unicorn/WHP) perform transparently, hence the no-op default here.
-        virtual void register_gate_crossing(pointer_type /*address*/, size_t /*size*/, gate_crossing_kind /*kind*/)
-        {
-        }
-
-        // Tells a JIT backend wow64cpu.dll's real TurboDispatchJumpAddressEnd export address - the
-        // generic 64-bit dispatch continuation a reverse (32->64) wow64cpu_dispatch gate crossing
-        // resumes execution at (see gate_crossing_kind::wow64cpu_dispatch's doc comment). This
-        // can't be reliably derived from a fixed RVA offset relative to the image base or to
-        // TurboDispatchJumpAddressStart - the RVA differs across wow64cpu.dll
-        // builds/OS versions - so the caller resolves it from the real export table (the same way
-        // TurboDispatchJumpAddressStart itself already is) and hands the address over directly. A
-        // no-op on native-execution backends (KVM/Unicorn/WHP): they execute the real 64-bit
-        // dispatch code directly and never need to resume it synthetically.
-        virtual void set_wow64_turbo_dispatch_end(pointer_type /*address*/)
-        {
-        }
-    };
-
-    template <typename Traits>
-    struct x86_emulator : arch_emulator<Traits>, x86_cpu<Traits>
+    template <typename Traits, typename CpuType>
+    struct EMULATOR_INTERFACE arch_emulator : typed_emulator<Traits>, CpuType
     {
         using registers = Traits::register_type;
         using register_type = Traits::register_type;
         using pointer_type = Traits::pointer_type;
         using hookable_instructions = Traits::hookable_instructions;
+        using cpu_type = CpuType;
 
         // Both bases expose a memory surface (the machine's own and the CPU's
         // delegating one); they resolve to the same backend implementation.
-        using arch_emulator<Traits>::read_memory;
-        using arch_emulator<Traits>::try_read_memory;
-        using arch_emulator<Traits>::write_memory;
-        using arch_emulator<Traits>::try_write_memory;
-        using arch_emulator<Traits>::move_memory;
-        using arch_emulator<Traits>::set_memory;
+        using typed_emulator<Traits>::read_memory;
+        using typed_emulator<Traits>::try_read_memory;
+        using typed_emulator<Traits>::write_memory;
+        using typed_emulator<Traits>::try_write_memory;
+        using typed_emulator<Traits>::move_memory;
+        using typed_emulator<Traits>::set_memory;
 
-        virtual size_t vcpu_count() const
+        size_t vcpu_count() const override
         {
             return 1;
         }
 
-        virtual x86_cpu<Traits>& get_cpu(const size_t index)
+        virtual CpuType& get_cpu(const size_t index)
         {
             if (index >= this->vcpu_count())
             {
@@ -155,6 +64,11 @@ namespace sogen
             }
 
             return *this;
+        }
+
+        guest_cpu& get_guest_cpu(size_t index) final
+        {
+            return this->get_cpu(index);
         }
 
         size_t index() const override
@@ -186,7 +100,44 @@ namespace sogen
     };
 
     template <typename Traits>
-    struct arm_emulator : arch_emulator<Traits>
+    struct EMULATOR_INTERFACE x86_cpu : typed_cpu<Traits>
+    {
+        using register_type = Traits::register_type;
+        using pointer_type = Traits::pointer_type;
+
+        struct descriptor_table_register
+        {
+            uint64_t base{};
+            uint32_t limit{};
+        };
+
+        virtual bool read_descriptor_table(int reg, descriptor_table_register& table) = 0;
+
+        virtual void set_segment_base(register_type base, pointer_type value) = 0;
+        virtual pointer_type get_segment_base(register_type base) = 0;
+        virtual void load_gdt(pointer_type address, uint32_t limit) = 0;
+
+        // Called once before any module is mapped, so a backend that cannot host a WoW64 process
+        // can reject it up front instead of failing once compatibility-mode code runs.
+        virtual void notify_process_bitness(bool /*is_wow64_process*/)
+        {
+        }
+    };
+
+    template <typename Traits>
+    struct EMULATOR_INTERFACE x86_emulator : arch_emulator<Traits, x86_cpu<Traits>>
+    {
+    };
+
+    template <typename Traits>
+    struct EMULATOR_INTERFACE arm_cpu : typed_cpu<Traits>
+    {
+        using register_type = Traits::register_type;
+        using pointer_type = Traits::pointer_type;
+    };
+
+    template <typename Traits>
+    struct EMULATOR_INTERFACE arm_emulator : arch_emulator<Traits, arm_cpu<Traits>>
     {
     };
 
@@ -201,7 +152,7 @@ namespace sogen
 
     // --[x86_64]-------------------------------------------------------------------------
 
-    struct x86_64_traits
+    struct EMULATOR_INTERFACE x86_64_traits
     {
         using pointer_type = uint64_t;
         using register_type = x86_register;
@@ -212,5 +163,36 @@ namespace sogen
 
     using x86_64_cpu = x86_cpu<x86_64_traits>;
     using x86_64_emulator = x86_emulator<x86_64_traits>;
+
+    enum class arm64_hookable_instructions
+    {
+        svc,
+        // MRS of CNTVCT_EL0 or PMCCNTR_EL0, which Windows exposes to EL0. The hook receives the destination
+        // arm64_register and writes the result itself.
+        read_counter,
+    };
+
+    // ARM64 interrupt hooks receive the ESR_ELx exception class of a synchronous guest exception,
+    // with PC at the faulting instruction.
+    enum class arm64_exception_class : int
+    {
+        undefined_instruction = 0x00,
+        // A user PSTATE.SS lets exactly one instruction run; the step is reported with PC at the next one and
+        // SS cleared. A step whose instruction raises another exception is dropped.
+        software_step = 0x32,
+        breakpoint_instruction = 0x3C,
+    };
+
+    struct EMULATOR_INTERFACE arm64_traits
+    {
+        using pointer_type = uint64_t;
+        using register_type = arm64_register;
+        static constexpr register_type instruction_pointer = arm64_register::pc;
+        static constexpr register_type stack_pointer = arm64_register::sp;
+        using hookable_instructions = arm64_hookable_instructions;
+    };
+
+    using arm64_cpu = arm_cpu<arm64_traits>;
+    using arm64_emulator = arm_emulator<arm64_traits>;
 
 } // namespace sogen

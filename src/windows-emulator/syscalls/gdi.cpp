@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../debug_font.hpp"
 #include "../emulator_utils.hpp"
+#include "../gdi_font_signature.hpp"
 #include "../syscall_utils.hpp"
 #include "dxgk_adapters.hpp"
 
@@ -27,6 +28,10 @@ namespace sogen
             constexpr uint8_t k_gdi_font_type = 0x0A;
             constexpr uint8_t k_gdi_brush_type = 0x10;
             constexpr uint8_t k_gdi_pen_type = 0x30;
+            constexpr int32_t k_gdi_dc_object_bitmap = 0x50000;
+            constexpr int32_t k_gdi_dc_object_font = 0xA0000;
+            constexpr int32_t k_gdi_dc_object_brush = 0x100000;
+            constexpr int32_t k_gdi_dc_object_pen = 0x300000;
 
             constexpr uint32_t k_gdi_dc_attr_size = 0x130;
             constexpr uint32_t k_gdi_brush_attr_size = 0x20;
@@ -36,15 +41,27 @@ namespace sogen
             constexpr uint32_t k_gdi_font_attr_size = 0x40;
             constexpr uint32_t k_gdi_region_attr_size = 0x20;
 
-            constexpr uint32_t k_gdi_dc_attr_hbrush_offset = 0x10;
-            constexpr uint32_t k_gdi_dc_attr_hpen_offset = 0x18;
+            constexpr uint32_t k_gdi_dc_attr_hbrush_offset = 0xA0;
+            constexpr uint32_t k_gdi_dc_attr_hpen_offset = 0xA8;
+            constexpr uint32_t k_gdi_dc_attr_dc_brush_color_offset = 0xC4;   // SetDCBrushColor
+            constexpr uint32_t k_gdi_dc_attr_dc_pen_color_offset = 0xCC;     // SetDCPenColor
             constexpr uint32_t k_gdi_dc_attr_background_color_offset = 0x20; // DC_ATTR.crBackgroundClr (SetBkColor)
             constexpr uint32_t k_gdi_dc_attr_text_color_offset = 0x28;       // DC_ATTR.crForegroundClr (SetTextColor)
             constexpr uint32_t k_gdi_dc_attr_pt_current_offset = 0xD8;
+            constexpr uint32_t k_gdi_dc_attr_text_align_offset = 0x110; // DC_ATTR.lTextAlign (SetTextAlign)
             constexpr uint32_t k_gdi_dc_attr_font_offset = 0x128;
 
+            constexpr uint32_t k_error_invalid_handle = 6;
+
             constexpr uint32_t k_stock_white_brush_index = 0x00;
-            constexpr uint32_t k_stock_black_pen_index = 0x06;
+            constexpr uint32_t k_stock_ltgray_brush_index = 0x01;
+            constexpr uint32_t k_stock_gray_brush_index = 0x02;
+            constexpr uint32_t k_stock_dkgray_brush_index = 0x03;
+            constexpr uint32_t k_stock_black_brush_index = 0x04;
+            constexpr uint32_t k_stock_null_brush_index = 0x05;
+            constexpr uint32_t k_stock_white_pen_index = 0x06;
+            constexpr uint32_t k_stock_black_pen_index = 0x07;
+            constexpr uint32_t k_stock_null_pen_index = 0x08;
             constexpr uint32_t k_stock_system_font_index = 0x0D;
             constexpr uint32_t k_stock_default_gui_font_index = 0x11;
             constexpr uint32_t k_stock_dc_brush_index = 0x12;
@@ -90,8 +107,6 @@ namespace sogen
             static_assert(sizeof(font_enum_record) == 0x1E4);
 
             constexpr uint32_t k_default_dpi = 96;
-            constexpr uint32_t k_default_width = 1920;
-            constexpr uint32_t k_default_height = 1080;
             constexpr uint32_t k_default_bitmap_fill = 0xFFF5F5F5u;
 
             constexpr uint32_t k_gdi_first_dynamic_handle = 0x2000;
@@ -129,13 +144,35 @@ namespace sogen
                 0x00E3E3E3u, // COLOR_3DLIGHT
                 0x00000000u, // COLOR_INFOTEXT
                 0x00E1FFFFu, // COLOR_INFOBK
+                0x00000000u, // reserved
                 0x00000000u, // COLOR_HOTLIGHT
                 0x00CC6600u, // COLOR_GRADIENTACTIVECAPTION
                 0x00F2E4D7u, // COLOR_GRADIENTINACTIVECAPTION
                 0x00F0F0F0u, // COLOR_MENUHILIGHT
                 0x00F0F0F0u, // COLOR_MENUBAR
-                0x00FFFFFFu, // COLOR_DESKTOP
             };
+
+            // The logfonts GetObject reports for the stock fonts on Windows.
+            EMU_LOGFONTW stock_font_logfont(const uint32_t index)
+            {
+                EMU_LOGFONTW font{};
+                font.lfCharSet = DEFAULT_CHARSET;
+                if (index == k_stock_system_font_index)
+                {
+                    font.lfHeight = 16;
+                    font.lfWidth = 7;
+                    font.lfWeight = FW_BOLD;
+                    font.lfPitchAndFamily = VARIABLE_PITCH | FF_SWISS;
+                    std::ranges::copy(u"System", font.lfFaceName);
+                }
+                else
+                {
+                    font.lfHeight = -11;
+                    font.lfWeight = FW_NORMAL;
+                    std::ranges::copy(u"MS Shell Dlg", font.lfFaceName);
+                }
+                return font;
+            }
 
             struct gdi_batch_header
             {
@@ -157,7 +194,7 @@ namespace sogen
                 RECT rect{};
                 DWORD code_page{};
                 UINT count{};
-                UINT dx_size{};
+                UINT dx_offset{};
                 uint64_t font{};
                 FLONG text_align{};
                 POINTL viewport_org{};
@@ -363,11 +400,18 @@ namespace sogen
                 return true;
             }
 
+            // Native processes get these above 4 GiB even where an older executable moves its own default allocation address
+            // down. Backends sharing the address space with the guest can only hand memory above it to a new process.
+            uint64_t gdi_allocation_start(const syscall_context& c)
+            {
+                return c.proc.is_wow64_process ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
+            }
+
             uint64_t allocate_gdi_user_block(const syscall_context& c, const uint32_t size)
             {
                 const auto aligned_size = static_cast<size_t>(page_align_up(size));
                 const uint64_t base =
-                    c.win_emu.memory.allocate_memory(aligned_size, memory_permission::read_write, false, DEFAULT_ALLOCATION_ADDRESS_32BIT);
+                    c.win_emu.memory.allocate_memory(aligned_size, memory_permission::read_write, false, gdi_allocation_start(c));
                 if (base == 0)
                 {
                     return 0;
@@ -382,6 +426,18 @@ namespace sogen
                 std::vector<uint8_t> zeroed(size, 0);
                 c.emu.write_memory(base, zeroed.data(), zeroed.size());
                 return base;
+            }
+
+            // The handle table entry holds only the base type, which gdi32's SelectObject checks against the low five
+            // bits of the handle's type byte: pens and extended pens are brushes there. The full type stays in Unique.
+            uint8_t gdi_base_type(const uint8_t type)
+            {
+                return static_cast<uint8_t>(type & 0x1Fu);
+            }
+
+            uint8_t gdi_object_type(const GDI_HANDLE_ENTRY64& entry)
+            {
+                return static_cast<uint8_t>(entry.Unique & 0x7Fu);
             }
 
             uint32_t allocate_gdi_handle(const syscall_context& c, const uint8_t type, const uint64_t user_ptr, const uint64_t object_ptr)
@@ -418,9 +474,9 @@ namespace sogen
                     entry_obj.access([&](GDI_HANDLE_ENTRY64& writable) {
                         writable = {};
                         writable.Object = object_ptr;
-                        writable.Owner.ProcessId = static_cast<uint16_t>(c.proc.process_id);
+                        writable.Owner = c.proc.process_id;
                         writable.Unique = unique;
-                        writable.Type = type;
+                        writable.Type = gdi_base_type(type);
                         writable.Flags = 0;
                         writable.UserPointer = encoded_user_ptr;
                     });
@@ -443,20 +499,282 @@ namespace sogen
                 }
 
                 const uint64_t user_ptr = (type == k_gdi_font_type) ? 0 : attr;
-                return allocate_gdi_handle(c, type, user_ptr, attr);
+                const auto handle_value = allocate_gdi_handle(c, type, user_ptr, attr);
+                if (handle_value == 0)
+                {
+                    c.win_emu.memory.release_memory(attr, 0);
+                }
+                return handle_value;
             }
 
             bool get_gdi_object_address(const syscall_context& c, const uint32_t handle_value, const uint8_t expected_type, uint64_t& addr)
             {
                 GDI_HANDLE_ENTRY64 entry{};
                 uint64_t entry_addr = 0;
-                if (!read_gdi_entry_for_handle(c, handle_value, entry, entry_addr) || entry.Type != expected_type)
+                if (!read_gdi_entry_for_handle(c, handle_value, entry, entry_addr) || gdi_object_type(entry) != expected_type)
                 {
                     return false;
                 }
 
                 addr = entry.Object;
                 return addr != 0;
+            }
+
+            // RGNATTR. gdi32 answers simple and null regions from it in user mode and edits it in place
+            // (CreateRectRgn, SetRectRgn, OffsetRgn, simple CombineRgn cases), so it is the authority for
+            // those; only complex regions keep their rectangles in process state.
+            struct gdi_region_attr
+            {
+                ULONG attr_flags;
+                ULONG complexity;
+                RECT bounds;
+            };
+
+            static_assert(sizeof(gdi_region_attr) <= k_gdi_region_attr_size);
+
+            using gdi_region_span = std::pair<LONG, LONG>;
+
+            bool is_empty_rect(const RECT& rect)
+            {
+                return rect.left >= rect.right || rect.top >= rect.bottom;
+            }
+
+            std::vector<RECT> rect_region(const RECT& rect)
+            {
+                return is_empty_rect(rect) ? std::vector<RECT>{} : std::vector<RECT>{rect};
+            }
+
+            RECT region_bounds(const std::vector<RECT>& rects)
+            {
+                if (rects.empty())
+                {
+                    return {};
+                }
+
+                auto bounds = rects.front();
+                for (const auto& rect : rects)
+                {
+                    bounds.left = (std::min)(bounds.left, rect.left);
+                    bounds.top = (std::min)(bounds.top, rect.top);
+                    bounds.right = (std::max)(bounds.right, rect.right);
+                    bounds.bottom = (std::max)(bounds.bottom, rect.bottom);
+                }
+
+                return bounds;
+            }
+
+            ULONG region_complexity(const std::vector<RECT>& rects)
+            {
+                if (rects.empty())
+                {
+                    return NULLREGION;
+                }
+
+                return rects.size() == 1 ? SIMPLEREGION : COMPLEXREGION;
+            }
+
+            std::optional<std::vector<RECT>> read_gdi_region(const syscall_context& c, const uint32_t region)
+            {
+                uint64_t attr_address = 0;
+                if (!get_gdi_object_address(c, region, k_gdi_region_type, attr_address))
+                {
+                    return std::nullopt;
+                }
+
+                gdi_region_attr attr{};
+                if (!c.win_emu.memory.try_read_memory(attr_address, &attr, sizeof(attr)))
+                {
+                    return std::nullopt;
+                }
+
+                switch (attr.complexity)
+                {
+                case NULLREGION:
+                    return std::vector<RECT>{};
+                case SIMPLEREGION:
+                    return rect_region(attr.bounds);
+                case COMPLEXREGION:
+                    if (const auto it = c.proc.gdi_regions.find(region); it != c.proc.gdi_regions.end())
+                    {
+                        return it->second;
+                    }
+                    break;
+                default:
+                    break;
+                }
+
+                c.win_emu.log.error("Region 0x%X has unsupported complexity %u\n", region, static_cast<uint32_t>(attr.complexity));
+                return std::nullopt;
+            }
+
+            int32_t store_gdi_region(const syscall_context& c, const uint32_t region, std::vector<RECT> rects)
+            {
+                uint64_t attr_address = 0;
+                if (!get_gdi_object_address(c, region, k_gdi_region_type, attr_address))
+                {
+                    return RGN_ERROR;
+                }
+
+                gdi_region_attr attr{};
+                if (!c.win_emu.memory.try_read_memory(attr_address, &attr, sizeof(attr)))
+                {
+                    return RGN_ERROR;
+                }
+
+                attr.complexity = region_complexity(rects);
+                attr.bounds = region_bounds(rects);
+                if (!c.win_emu.memory.try_write_memory(attr_address, &attr, sizeof(attr)))
+                {
+                    return RGN_ERROR;
+                }
+
+                if (attr.complexity == COMPLEXREGION)
+                {
+                    c.proc.gdi_regions[region] = std::move(rects);
+                }
+                else
+                {
+                    c.proc.gdi_regions.erase(region);
+                }
+
+                return static_cast<int32_t>(attr.complexity);
+            }
+
+            bool region_mode_includes(const int32_t mode, const bool in_first, const bool in_second)
+            {
+                switch (mode)
+                {
+                case RGN_AND:
+                    return in_first && in_second;
+                case RGN_OR:
+                    return in_first || in_second;
+                case RGN_XOR:
+                    return in_first != in_second;
+                case RGN_DIFF:
+                    return in_first && !in_second;
+                case RGN_COPY:
+                    return in_first;
+                default:
+                    return false;
+                }
+            }
+
+            struct gdi_region_source_rect
+            {
+                RECT rect;
+                bool from_second;
+            };
+
+            struct gdi_region_edge
+            {
+                LONG x;
+                bool from_second;
+                int32_t depth_change;
+            };
+
+            std::vector<gdi_region_span> combine_region_band(const std::vector<gdi_region_source_rect>& band_rects, const int32_t mode)
+            {
+                std::vector<gdi_region_edge> edges{};
+                edges.reserve(band_rects.size() * 2);
+                for (const auto& [rect, from_second] : band_rects)
+                {
+                    edges.push_back({.x = rect.left, .from_second = from_second, .depth_change = 1});
+                    edges.push_back({.x = rect.right, .from_second = from_second, .depth_change = -1});
+                }
+
+                std::ranges::sort(edges, {}, &gdi_region_edge::x);
+
+                std::vector<gdi_region_span> spans{};
+                int32_t first_depth = 0;
+                int32_t second_depth = 0;
+                for (size_t i = 0; i < edges.size();)
+                {
+                    const auto left = edges[i].x;
+                    for (; i < edges.size() && edges[i].x == left; ++i)
+                    {
+                        (edges[i].from_second ? second_depth : first_depth) += edges[i].depth_change;
+                    }
+
+                    if (i == edges.size() || !region_mode_includes(mode, first_depth > 0, second_depth > 0))
+                    {
+                        continue;
+                    }
+
+                    const auto right = edges[i].x;
+                    if (!spans.empty() && spans.back().second == left)
+                    {
+                        spans.back().second = right;
+                    }
+                    else
+                    {
+                        spans.emplace_back(left, right);
+                    }
+                }
+
+                return spans;
+            }
+
+            // GetRegionData exposes the y-x banded form Windows keeps regions in.
+            std::vector<RECT> combine_regions(const std::vector<RECT>& first, const std::vector<RECT>& second, const int32_t mode)
+            {
+                std::vector<LONG> band_edges{};
+                std::vector<gdi_region_source_rect> pending{};
+                const auto add_source = [&](const std::vector<RECT>& rects, const bool from_second) {
+                    for (const auto& rect : rects)
+                    {
+                        band_edges.insert(band_edges.end(), {rect.top, rect.bottom});
+                        pending.push_back({.rect = rect, .from_second = from_second});
+                    }
+                };
+
+                add_source(first, false);
+                add_source(second, true);
+
+                std::ranges::sort(band_edges);
+                band_edges.erase(std::ranges::unique(band_edges).begin(), band_edges.end());
+                std::ranges::sort(pending, {}, [](const gdi_region_source_rect& source) { return source.rect.top; });
+
+                std::vector<RECT> result{};
+                std::vector<gdi_region_span> previous_spans{};
+                size_t previous_band_start = 0;
+                std::vector<gdi_region_source_rect> band_rects{};
+                size_t next_pending = 0;
+
+                for (size_t i = 0; i + 1 < band_edges.size(); ++i)
+                {
+                    const auto top = band_edges[i];
+                    const auto bottom = band_edges[i + 1];
+
+                    std::erase_if(band_rects, [&](const gdi_region_source_rect& source) { return source.rect.bottom <= top; });
+                    for (; next_pending < pending.size() && pending[next_pending].rect.top <= top; ++next_pending)
+                    {
+                        band_rects.push_back(pending[next_pending]);
+                    }
+
+                    auto spans = combine_region_band(band_rects, mode);
+                    if (spans.empty())
+                    {
+                        continue;
+                    }
+
+                    if (spans == previous_spans && result.back().bottom == top)
+                    {
+                        for (auto j = previous_band_start; j < result.size(); ++j)
+                        {
+                            result[j].bottom = bottom;
+                        }
+                        continue;
+                    }
+
+                    previous_band_start = result.size();
+                    for (const auto& [left, right] : spans)
+                    {
+                        result.push_back(RECT{.left = left, .top = top, .right = right, .bottom = bottom});
+                    }
+                    previous_spans = std::move(spans);
+                }
+
+                return result;
             }
 
             void sync_surface_from_guest_dib(const syscall_context& c, gdi_bitmap_surface& surface)
@@ -565,14 +883,14 @@ namespace sogen
                     win = win->parent_handle != 0 ? c.proc.windows.get(win->parent_handle) : nullptr;
                 }
 
-                if (!win || !win->host_surface_window || win->width <= 0 || win->height <= 0)
+                if (!win || !win->host_surface_window || win->client_width() <= 0 || win->client_height() <= 0)
                 {
                     return nullptr;
                 }
 
                 const auto top_handle = static_cast<uint32_t>(win->handle);
-                const auto width = static_cast<uint32_t>(win->width);
-                const auto height = static_cast<uint32_t>(win->height);
+                const auto width = static_cast<uint32_t>(win->client_width());
+                const auto height = static_cast<uint32_t>(win->client_height());
 
                 auto& surface = c.proc.gdi_window_surfaces[top_handle];
                 if (surface.width != width || surface.height != height || surface.pixels.size() != static_cast<size_t>(width) * height)
@@ -676,12 +994,7 @@ namespace sogen
                     return;
                 }
 
-                c.win_emu.ui().present_surface(present_handle,
-                                               ui_surface_desc{.width = static_cast<int>(surface->width),
-                                                               .height = static_cast<int>(surface->height),
-                                                               .stride = static_cast<int>(surface->width * sizeof(uint32_t)),
-                                                               .format = ui_surface_format::bgra8,
-                                                               .pixels = surface->pixels.data()});
+                c.win_emu.ui().present_surface(present_handle, make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
             }
 
             void set_surface_pixel(gdi_bitmap_surface& surface, const int x, const int y, const uint32_t color)
@@ -694,43 +1007,85 @@ namespace sogen
                 surface.pixels[static_cast<size_t>(y) * surface.width + static_cast<size_t>(x)] = color;
             }
 
-            // Decode a single pixel from a BI_RGB DIB scanline (any standard bit depth) into 0xFFRRGGBB BGRA.
-            uint32_t dib_pixel_to_bgra32(const uint8_t* row, const uint32_t x, const uint16_t bpp, const uint32_t* palette)
+            // BITMAPCOREHEADER is only 12 bytes and lays out its fields differently, so the BITMAPINFOHEADER
+            // offsets are only valid once biSize says the header is at least that large.
+            std::optional<EMU_BITMAPINFOHEADER> read_bitmap_info_header(const syscall_context& c, const emulator_pointer info)
+            {
+                if (c.emu.read_memory<uint32_t>(info) < sizeof(EMU_BITMAPINFOHEADER))
+                {
+                    return std::nullopt;
+                }
+
+                return c.emu.read_memory<EMU_BITMAPINFOHEADER>(info);
+            }
+
+            bool is_supported_dib(const EMU_BITMAPINFOHEADER& header, const uint32_t color_use)
+            {
+                constexpr uint32_t bi_rgb = 0;
+                constexpr uint32_t dib_rgb_colors = 0;
+                const auto bit_count = header.biBitCount;
+                const bool valid_bit_count =
+                    bit_count == 1 || bit_count == 4 || bit_count == 8 || bit_count == 16 || bit_count == 24 || bit_count == 32;
+                // DIB_PAL_COLORS colour tables hold 16-bit logical-palette indices, not RGBQUADs.
+                const bool valid_color_table = bit_count > 8 || color_use == dib_rgb_colors;
+                return valid_bit_count && valid_color_table && header.biCompression == bi_rgb && header.biWidth > 0;
+            }
+
+            std::vector<uint32_t> read_dib_palette(const syscall_context& c, const emulator_pointer info,
+                                                   const EMU_BITMAPINFOHEADER& header)
+            {
+                if (header.biBitCount > 8)
+                {
+                    return {};
+                }
+
+                const uint32_t max_colors = 1u << header.biBitCount;
+                const uint32_t palette_entries = header.biClrUsed != 0 ? std::min<uint32_t>(header.biClrUsed, max_colors) : max_colors;
+                constexpr size_t rgbquad_size = 4;
+                const auto color_table = c.emu.read_memory(info + header.biSize, static_cast<size_t>(palette_entries) * rgbquad_size);
+
+                // Pixel data may index past biClrUsed, so size the palette by bit depth rather than by the table.
+                std::vector<uint32_t> palette(max_colors, 0xFF000000u);
+                for (uint32_t i = 0; i < palette_entries; ++i)
+                {
+                    const std::byte* bgrx = color_table.data() + static_cast<size_t>(i) * rgbquad_size;
+                    palette[i] = 0xFF000000u | (std::to_integer<uint32_t>(bgrx[2]) << 16) | (std::to_integer<uint32_t>(bgrx[1]) << 8) |
+                                 std::to_integer<uint32_t>(bgrx[0]);
+                }
+                return palette;
+            }
+
+            size_t dib_stride(const uint64_t width, const uint32_t bit_count)
+            {
+                return static_cast<size_t>(((width * bit_count + 31u) / 32u) * 4u);
+            }
+
+            uint32_t dib_pixel_to_bgra32(const uint8_t* row, const uint32_t x, const uint16_t bpp, const std::vector<uint32_t>& palette)
             {
                 switch (bpp)
                 {
-                case 1: {
-                    const uint8_t index = (row[x / 8u] >> (7u - (x & 7u))) & 1u;
-                    if (palette)
-                    {
-                        return palette[index];
-                    }
-                    return index ? 0xFFFFFFFFu : 0xFF000000u;
-                }
+                case 1:
+                    return palette[(row[x / 8u] >> (7u - (x & 7u))) & 1u];
                 case 4: {
                     const uint8_t packed = row[x / 2u];
-                    const uint8_t index = (x & 1u) == 0u ? static_cast<uint8_t>(packed >> 4) : static_cast<uint8_t>(packed & 0x0Fu);
-                    return palette ? palette[index] : 0xFF000000u;
+                    const uint8_t index = (x & 1u) == 0u ? packed >> 4u : packed & 0x0Fu;
+                    return palette[index];
                 }
                 case 8:
-                    return palette ? palette[row[x]] : 0xFF000000u;
+                    return palette[row[x]];
                 case 16: {
-                    uint16_t v = 0;
-                    std::memcpy(&v, row + static_cast<size_t>(x) * 2, sizeof(v));
-                    // BI_RGB 16bpp = RGB555: bits 14-10 = R, 9-5 = G, 4-0 = B
-                    const auto r = static_cast<uint8_t>(((v >> 10u) & 0x1Fu) * 255u / 31u);
-                    const auto g = static_cast<uint8_t>(((v >> 5u) & 0x1Fu) * 255u / 31u);
-                    const auto b = static_cast<uint8_t>((v & 0x1Fu) * 255u / 31u);
-                    return 0xFF000000u | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | b;
+                    const uint8_t* p = row + static_cast<size_t>(x) * 2;
+                    const uint32_t v = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8);
+                    // BI_RGB 16bpp is RGB555, not RGB565.
+                    const uint32_t r = ((v >> 10u) & 0x1Fu) * 255u / 31u;
+                    const uint32_t g = ((v >> 5u) & 0x1Fu) * 255u / 31u;
+                    const uint32_t b = (v & 0x1Fu) * 255u / 31u;
+                    return 0xFF000000u | (r << 16) | (g << 8) | b;
                 }
-                case 24: {
-                    const uint8_t* p = row + static_cast<size_t>(x) * 3;
-                    return 0xFF000000u | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | p[0];
-                }
+                case 24:
                 case 32: {
-                    uint32_t pixel = 0;
-                    std::memcpy(&pixel, row + static_cast<size_t>(x) * sizeof(uint32_t), sizeof(pixel));
-                    return pixel | 0xFF000000u;
+                    const uint8_t* p = row + static_cast<size_t>(x) * (bpp / 8u);
+                    return 0xFF000000u | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | p[0];
                 }
                 default:
                     return 0xFF000000u;
@@ -770,6 +1125,13 @@ namespace sogen
                 return true;
             }
 
+            uint32_t read_dc_attr_colorref(const syscall_context& c, const uint64_t address)
+            {
+                uint32_t colorref = 0;
+                c.win_emu.memory.try_read_memory(address, &colorref, sizeof(colorref));
+                return colorref_to_bgra(colorref);
+            }
+
             uint32_t get_brush_color(const syscall_context& c, const uint32_t brush_handle)
             {
                 uint64_t brush_attr = 0;
@@ -796,6 +1158,11 @@ namespace sogen
                 if (pen_handle == 0)
                 {
                     return 0xFF000000u;
+                }
+
+                if (pen_handle == static_cast<uint32_t>(read_gdi_object_slot(c, k_stock_dc_pen_index)))
+                {
+                    return read_dc_attr_colorref(c, dc_attr + k_gdi_dc_attr_dc_pen_color_offset);
                 }
 
                 uint64_t pen_attr = 0;
@@ -825,7 +1192,24 @@ namespace sogen
                 }
             }
 
-            uint32_t get_dc_brush_color(const syscall_context& c, const hdc dc)
+            std::optional<uint32_t> get_brush_color_in_dc(const syscall_context& c, const hdc dc, const uint32_t brush_handle)
+            {
+                if (brush_handle == static_cast<uint32_t>(read_gdi_object_slot(c, k_stock_null_brush_index)))
+                {
+                    return std::nullopt;
+                }
+
+                uint64_t dc_attr = 0;
+                if (brush_handle == static_cast<uint32_t>(read_gdi_object_slot(c, k_stock_dc_brush_index)) &&
+                    get_gdi_object_address(c, static_cast<uint32_t>(dc), k_gdi_dc_type, dc_attr))
+                {
+                    return read_dc_attr_colorref(c, dc_attr + k_gdi_dc_attr_dc_brush_color_offset);
+                }
+
+                return get_brush_color(c, brush_handle);
+            }
+
+            std::optional<uint32_t> get_dc_brush_color(const syscall_context& c, const hdc dc)
             {
                 uint64_t dc_attr = 0;
                 if (!get_gdi_object_address(c, static_cast<uint32_t>(dc), k_gdi_dc_type, dc_attr))
@@ -840,7 +1224,7 @@ namespace sogen
                     return 0xFFFFFFFFu;
                 }
 
-                return get_brush_color(c, brush_handle);
+                return get_brush_color_in_dc(c, dc, brush_handle);
             }
 
             // Reads a COLORREF directly out of the DC_ATTR (the user-mode block gdi32 updates on
@@ -978,6 +1362,55 @@ namespace sogen
                 }
             }
 
+            // SetTextAlign chooses which point of the text (x, y) names; draw_text starts at the top-left corner.
+            POINT text_top_left(const int x, const int y, const uint32_t text_align, const size_t count, const uint32_t* dx)
+            {
+                constexpr uint32_t ta_right = 2;
+                constexpr uint32_t ta_center = 6;
+                constexpr uint32_t ta_bottom = 8;
+                constexpr uint32_t ta_baseline = 24;
+
+                int width = 0;
+                for (size_t i = 0; i < count; ++i)
+                {
+                    width += dx != nullptr ? static_cast<int32_t>(dx[i]) : k_text_cell_width;
+                }
+
+                POINT origin{.x = x, .y = y};
+                if ((text_align & ta_center) == ta_center)
+                {
+                    origin.x -= width / 2;
+                }
+                else if ((text_align & ta_right) != 0)
+                {
+                    origin.x -= width;
+                }
+
+                if ((text_align & ta_baseline) == ta_baseline)
+                {
+                    origin.y -= static_cast<int>(k_default_font_ascent);
+                }
+                else if ((text_align & ta_bottom) != 0)
+                {
+                    origin.y -= k_text_cell_height;
+                }
+
+                return origin;
+            }
+
+            bool is_stock_object_selected(const syscall_context& c, const hdc dc, const uint32_t attr_offset, const uint32_t stock_index)
+            {
+                uint64_t dc_attr = 0;
+                if (!get_gdi_object_address(c, static_cast<uint32_t>(dc), k_gdi_dc_type, dc_attr))
+                {
+                    return false;
+                }
+
+                uint32_t selected = 0;
+                c.win_emu.memory.try_read_memory(dc_attr + attr_offset, &selected, sizeof(selected));
+                return selected != 0 && selected == static_cast<uint32_t>(read_gdi_object_slot(c, stock_index));
+            }
+
             void fill_rect(gdi_bitmap_surface& surface, const int left, const int top, const int right, const int bottom,
                            const uint32_t color)
             {
@@ -1004,7 +1437,8 @@ namespace sogen
                 gdi_bitmap_surface* surface = nullptr;
                 int32_t origin_x = 0;
                 int32_t origin_y = 0;
-                if (!get_dc_state_and_surface(c, dc, dc_state, surface, origin_x, origin_y) || !surface)
+                uint32_t present_handle = 0;
+                if (!get_dc_state_and_surface(c, dc, dc_state, surface, origin_x, origin_y, &present_handle) || !surface)
                 {
                     return true;
                 }
@@ -1034,24 +1468,28 @@ namespace sogen
                                       colorref_to_bgra(text_out->background));
                         }
 
-                        // The guest controls the batch contents: the variable payload after
-                        // `string` holds the dx array (dx_size bytes) followed by the text
-                        // (count * sizeof(char16_t) bytes). Validate both fit inside this
-                        // command before dereferencing, otherwise a malformed count/dx_size
-                        // would read past header->size and beyond batch.Buffer.
+                        // The payload after `string` holds the text, then the advances. dx_offset is 0 without advances and
+                        // otherwise the text size rounded up to a ULONG (GDIBSTEXTOUT::Size). The guest controls the batch, so
+                        // both parts are checked to fit inside this command before being read.
                         const auto payload_capacity = static_cast<size_t>(header->size) - offsetof(gdi_batch_text_out, string);
-                        const auto dx_bytes = static_cast<size_t>(text_out->dx_size);
+                        const auto dx_offset = static_cast<size_t>(text_out->dx_offset);
                         const auto text_bytes = static_cast<size_t>(text_out->count) * sizeof(char16_t);
-                        if (dx_bytes <= payload_capacity && text_bytes <= payload_capacity - dx_bytes)
+                        const auto dx_bytes = dx_offset != 0 ? static_cast<size_t>(text_out->count) * sizeof(uint32_t) : 0;
+                        if (text_bytes <= payload_capacity &&
+                            (dx_offset == 0 ||
+                             (dx_offset >= text_bytes && dx_offset <= payload_capacity && dx_bytes <= payload_capacity - dx_offset)))
                         {
-                            const auto* dx = reinterpret_cast<const uint32_t*>(text_out->string.data());
-                            const auto* text =
-                                reinterpret_cast<const char16_t*>(text_out->string.data() + text_out->dx_size / sizeof(char16_t));
-                            draw_text(*surface, text_out->x + text_out->viewport_org.x + origin_x,
-                                      text_out->y + text_out->viewport_org.y + origin_y, std::u16string_view(text, text_out->count),
+                            const auto* text = reinterpret_cast<const char16_t*>(text_out->string.data());
+                            const auto* advances = dx_offset != 0
+                                                       ? reinterpret_cast<const uint32_t*>(
+                                                             reinterpret_cast<const std::byte*>(text_out->string.data()) + dx_offset)
+                                                       : nullptr;
+                            const auto top_left = text_top_left(text_out->x + text_out->viewport_org.x + origin_x,
+                                                                text_out->y + text_out->viewport_org.y + origin_y, text_out->text_align,
+                                                                text_out->count, advances);
+                            draw_text(*surface, top_left.x, top_left.y, std::u16string_view(text, text_out->count),
                                       colorref_to_bgra(text_out->foreground),
-                                      has_rect && (text_out->options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr,
-                                      text_out->dx_size >= text_out->count * sizeof(uint32_t) ? dx : nullptr);
+                                      has_rect && (text_out->options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr, advances);
                         }
                     }
                     else if (header->cmd == k_gdi_batch_cmd_poly_pat_blt &&
@@ -1071,15 +1509,20 @@ namespace sogen
                             std::memcpy(&rect, bytes + rect_offset, sizeof(rect));
                             brush = rect.brush;
 
-                            const auto color = brush != 0 ? get_brush_color(c, static_cast<uint32_t>(brush)) : get_dc_brush_color(c, dc);
-                            fill_rect(*surface, rect.x + origin_x, rect.y + origin_y, rect.x + rect.width + origin_x,
-                                      rect.y + rect.height + origin_y, color);
+                            const auto color =
+                                brush != 0 ? get_brush_color_in_dc(c, dc, static_cast<uint32_t>(brush)) : get_dc_brush_color(c, dc);
+                            if (color)
+                            {
+                                fill_rect(*surface, rect.x + origin_x, rect.y + origin_y, rect.x + rect.width + origin_x,
+                                          rect.y + rect.height + origin_y, *color);
+                            }
                         }
                     }
 
                     offset += static_cast<size_t>(header->size);
                 }
 
+                present_win_surface(c, present_handle, surface);
                 return true;
             }
 
@@ -1092,7 +1535,8 @@ namespace sogen
                 uint64_t client_drawing_brush = 0;
                 bool needs_seed = false;
 
-                c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& server_info) {
+                c.proc.user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+                    std::ranges::copy(k_default_system_colors, server_info.systemColors);
                     for (size_t i = 0; i < system_brushes.size(); ++i)
                     {
                         system_brushes[i] = server_info.ahbrSystem[i];
@@ -1166,6 +1610,23 @@ namespace sogen
                 });
             }
 
+            uint32_t stock_brush_color(const uint32_t index)
+            {
+                switch (index)
+                {
+                case k_stock_ltgray_brush_index:
+                    return 0x00C0C0C0u;
+                case k_stock_gray_brush_index:
+                    return 0x00808080u;
+                case k_stock_dkgray_brush_index:
+                    return 0x00404040u;
+                case k_stock_black_brush_index:
+                    return 0x00000000u;
+                default:
+                    return 0x00FFFFFFu;
+                }
+            }
+
             void seed_gdi_stock_objects(const syscall_context& c)
             {
                 struct stock_seed
@@ -1176,7 +1637,7 @@ namespace sogen
                     bool mirror_to_default_gui_slot;
                 };
 
-                constexpr std::array<stock_seed, 6> seeds = {
+                constexpr std::array<stock_seed, 13> seeds = {
                     stock_seed{
                         .index = k_stock_white_brush_index,
                         .type = k_gdi_brush_type,
@@ -1184,7 +1645,49 @@ namespace sogen
                         .mirror_to_default_gui_slot = false,
                     },
                     stock_seed{
+                        .index = k_stock_ltgray_brush_index,
+                        .type = k_gdi_brush_type,
+                        .attr_size = k_gdi_brush_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
+                        .index = k_stock_gray_brush_index,
+                        .type = k_gdi_brush_type,
+                        .attr_size = k_gdi_brush_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
+                        .index = k_stock_dkgray_brush_index,
+                        .type = k_gdi_brush_type,
+                        .attr_size = k_gdi_brush_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
+                        .index = k_stock_black_brush_index,
+                        .type = k_gdi_brush_type,
+                        .attr_size = k_gdi_brush_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
+                        .index = k_stock_null_brush_index,
+                        .type = k_gdi_brush_type,
+                        .attr_size = k_gdi_brush_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
+                        .index = k_stock_white_pen_index,
+                        .type = k_gdi_pen_type,
+                        .attr_size = k_gdi_pen_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
                         .index = k_stock_black_pen_index,
+                        .type = k_gdi_pen_type,
+                        .attr_size = k_gdi_pen_attr_size,
+                        .mirror_to_default_gui_slot = false,
+                    },
+                    stock_seed{
+                        .index = k_stock_null_pen_index,
                         .type = k_gdi_pen_type,
                         .attr_size = k_gdi_pen_attr_size,
                         .mirror_to_default_gui_slot = false,
@@ -1232,12 +1735,16 @@ namespace sogen
                     write_gdi_object_slot(c, seed.index, handle64);
                     if (seed.type == k_gdi_brush_type)
                     {
-                        const uint32_t color = seed.index == k_stock_white_brush_index ? 0x00FFFFFFu : k_default_system_colors[15];
-                        set_gdi_object_color(c, handle, k_gdi_brush_type, color);
+                        set_gdi_object_color(c, handle, k_gdi_brush_type, stock_brush_color(seed.index));
                     }
                     else if (seed.type == k_gdi_pen_type)
                     {
-                        set_gdi_object_color(c, handle, k_gdi_pen_type, 0x00000000u);
+                        const uint32_t color = seed.index == k_stock_white_pen_index ? 0x00FFFFFFu : 0x00000000u;
+                        set_gdi_object_color(c, handle, k_gdi_pen_type, color);
+                    }
+                    else if (seed.type == k_gdi_font_type)
+                    {
+                        c.proc.gdi_fonts[handle] = stock_font_logfont(seed.index);
                     }
 
                     if (seed.mirror_to_default_gui_slot)
@@ -1263,11 +1770,22 @@ namespace sogen
                 std::array<uint8_t, k_gdi_dc_attr_size> zeroed{};
                 c.emu.write_memory(dc_attr, zeroed.data(), zeroed.size());
 
-                const uint64_t system_font = read_gdi_object_slot(c, k_stock_system_font_index);
-                if (system_font != 0)
+                constexpr uint32_t white = 0x00FFFFFFu;
+                c.emu.write_memory(dc_attr + k_gdi_dc_attr_dc_brush_color_offset, &white, sizeof(white));
+
+                const std::array<std::pair<uint32_t, uint32_t>, 3> default_objects{{
+                    {k_stock_system_font_index, k_gdi_dc_attr_font_offset},
+                    {k_stock_white_brush_index, k_gdi_dc_attr_hbrush_offset},
+                    {k_stock_black_pen_index, k_gdi_dc_attr_hpen_offset},
+                }};
+                for (const auto& [stock_index, attr_offset] : default_objects)
                 {
-                    const auto handle_value = static_cast<uint32_t>(system_font);
-                    c.emu.write_memory(dc_attr + k_gdi_dc_attr_font_offset, &handle_value, sizeof(handle_value));
+                    const uint64_t stock_object = read_gdi_object_slot(c, stock_index);
+                    if (stock_object != 0)
+                    {
+                        const auto handle_value = static_cast<uint32_t>(stock_object);
+                        c.emu.write_memory(dc_attr + attr_offset, &handle_value, sizeof(handle_value));
+                    }
                 }
             }
 
@@ -1286,6 +1804,11 @@ namespace sogen
                 if (handle_value != 0)
                 {
                     c.proc.gdi_dc_states[handle_value] = {};
+                }
+                else
+                {
+                    c.win_emu.memory.release_memory(dc_attr, 0);
+                    dc_attr = 0;
                 }
                 return handle_value;
             }
@@ -1316,6 +1839,25 @@ namespace sogen
                 return handle_value;
             }
 
+            uint32_t ensure_memory_dc_default_bitmap(const syscall_context& c)
+            {
+                const auto default_bitmap = c.proc.gdi_memory_dc_default_bitmap_handle;
+                if (default_bitmap != 0 && c.proc.gdi_bitmap_surfaces.contains(default_bitmap))
+                {
+                    return default_bitmap;
+                }
+
+                gdi_bitmap_surface* surface = nullptr;
+                const auto created_bitmap = create_gdi_bitmap_surface(c, 1, 1, 0xFF000000u, &surface);
+                if (surface != nullptr)
+                {
+                    surface->guest_bpp = 1;
+                }
+
+                c.proc.gdi_memory_dc_default_bitmap_handle = created_bitmap;
+                return created_bitmap;
+            }
+
             hdc ensure_default_hdc(const syscall_context& c)
             {
                 if (c.proc.gdi_default_dc_handle != 0)
@@ -1334,20 +1876,20 @@ namespace sogen
                 return handle_value;
             }
 
-            uint32_t get_device_caps_value(const uint32_t index)
+            uint32_t get_device_caps_value(const process_context& proc, const uint32_t index)
             {
                 switch (index)
                 {
                 case 4: // HORZSIZE
-                    return (k_default_width * 254) / (k_default_dpi * 10);
+                    return (proc.display_width * 254) / (k_default_dpi * 10);
                 case 6: // VERTSIZE
-                    return (k_default_height * 254) / (k_default_dpi * 10);
+                    return (proc.display_height * 254) / (k_default_dpi * 10);
                 case 8:    // HORZRES
                 case 0x76: // DESKTOPHORZRES
-                    return k_default_width;
+                    return proc.display_width;
                 case 0xA:  // VERTRES
                 case 0x75: // DESKTOPVERTRES
-                    return k_default_height;
+                    return proc.display_height;
                 case 14:
                 case 0x28: // PLANES
                 case 0x2A: // NUMBRUSHES
@@ -1365,23 +1907,16 @@ namespace sogen
 
             void write_device_caps(const syscall_context& c, const emulator_pointer caps_ptr, const size_t count)
             {
-                std::vector<uint32_t> caps(count, 0);
-                const auto set_cap = [&](const size_t idx, const uint32_t value) {
-                    if (idx < caps.size())
-                    {
-                        caps[idx] = value;
-                    }
-                };
+                static constexpr std::array<uint32_t, 9> k_cap_indices = {4, 6, 8, 0xA, 0x28, 0x2A, 0x2C, 0x58, 0x5A};
 
-                set_cap(4, get_device_caps_value(4));
-                set_cap(6, get_device_caps_value(6));
-                set_cap(8, get_device_caps_value(8));
-                set_cap(0xA, get_device_caps_value(0xA));
-                set_cap(0x28, get_device_caps_value(0x28));
-                set_cap(0x2A, get_device_caps_value(0x2A));
-                set_cap(0x2C, get_device_caps_value(0x2C));
-                set_cap(0x58, get_device_caps_value(0x58));
-                set_cap(0x5A, get_device_caps_value(0x5A));
+                std::vector<uint32_t> caps(count, 0);
+                for (const auto index : k_cap_indices)
+                {
+                    if (index < caps.size())
+                    {
+                        caps[index] = get_device_caps_value(c.proc, index);
+                    }
+                }
 
                 if (caps_ptr != 0)
                 {
@@ -1603,6 +2138,11 @@ namespace sogen
                 return status;
             }
 
+            bool rop3_uses_pattern(const uint8_t rop3)
+            {
+                return ((rop3 >> 4) & 0x0Fu) != (rop3 & 0x0Fu);
+            }
+
             bool rop3_uses_source(const uint8_t rop3)
             {
                 // ROP3 truth-table index: bit0=D, bit1=S, bit2=P.
@@ -1645,6 +2185,87 @@ namespace sogen
 
                 return out;
             }
+
+            // Windows fails a request whose output would exceed this many bytes before writing anything.
+            constexpr uint64_t max_char_metric_output_size = 0x2710000;
+
+            bool is_char_metric_request_valid(const syscall_context& c, const hdc dc, const UINT char_count, const size_t entry_size,
+                                              const emulator_pointer chars, const emulator_pointer buffer)
+            {
+                return dc != 0 && buffer != 0 && char_count != 0 &&
+                       static_cast<uint64_t>(char_count) * entry_size <= max_char_metric_output_size &&
+                       (chars == 0 || is_readable_range(c.win_emu.memory, chars, static_cast<uint64_t>(char_count) * sizeof(char16_t)));
+            }
+
+            bool write_guest_block(const syscall_context& c, const emulator_pointer address, const void* data, const size_t size)
+            {
+                return is_writable_range(c.win_emu.memory, address, size) && c.emu.try_write_memory(address, data, size);
+            }
+
+            bool write_guest_bytes_up_to_fault(const syscall_context& c, const emulator_pointer address, const void* data,
+                                               const size_t size)
+            {
+                const auto* bytes = static_cast<const std::byte*>(data);
+                for (size_t offset = 0; offset < size;)
+                {
+                    const auto current = address + offset;
+                    const auto piece = static_cast<size_t>(std::min<uint64_t>(size - offset, page_align_up(current + 1) - current));
+                    if (!write_guest_block(c, current, bytes + offset, piece))
+                    {
+                        return false;
+                    }
+
+                    offset += piece;
+                }
+
+                return true;
+            }
+
+            template <typename Entry>
+            bool write_repeated_entries(const syscall_context& c, const emulator_pointer buffer, const UINT count, const Entry& entry)
+            {
+                std::array<Entry, 0x100> chunk{};
+                chunk.fill(entry);
+                for (UINT written = 0; written < count;)
+                {
+                    const auto chunk_count = std::min<size_t>(chunk.size(), count - written);
+                    if (!write_guest_bytes_up_to_fault(c, buffer + (static_cast<uint64_t>(written) * sizeof(Entry)), chunk.data(),
+                                                       chunk_count * sizeof(Entry)))
+                    {
+                        return false;
+                    }
+
+                    written += static_cast<UINT>(chunk_count);
+                }
+
+                return true;
+            }
+
+            // Windows measures at most this many characters, with or without a fit count or partial extents.
+            constexpr uint64_t max_text_extent_chars = max_char_metric_output_size / (sizeof(char16_t) + sizeof(ULONG));
+
+            bool write_fixed_width_extents(const syscall_context& c, const emulator_pointer extents, const ULONG count)
+            {
+                std::array<ULONG, 0x100> chunk{};
+                for (ULONG written = 0; written < count;)
+                {
+                    const auto chunk_count = std::min<size_t>(chunk.size(), count - written);
+                    for (size_t i = 0; i < chunk_count; ++i)
+                    {
+                        chunk[i] = static_cast<ULONG>((written + i + 1) * k_default_font_width);
+                    }
+
+                    if (!write_guest_bytes_up_to_fault(c, extents + (static_cast<uint64_t>(written) * sizeof(ULONG)), chunk.data(),
+                                                       chunk_count * sizeof(ULONG)))
+                    {
+                        return false;
+                    }
+
+                    written += static_cast<ULONG>(chunk_count);
+                }
+
+                return true;
+            }
         }
 
         // Returns the surface a paint DC should be presented to, and (via present_handle) the host window handle it
@@ -1680,9 +2301,9 @@ namespace sogen
             return handle_NtGdiInit(c);
         }
 
-        uint32_t handle_NtGdiGetDeviceCaps(const syscall_context&, const hdc /*dc*/, const uint32_t index)
+        uint32_t handle_NtGdiGetDeviceCaps(const syscall_context& c, const hdc /*dc*/, const uint32_t index)
         {
-            return get_device_caps_value(index);
+            return get_device_caps_value(c.proc, index);
         }
 
         uint32_t handle_NtGdiGetDeviceCapsAll(const syscall_context& c, const hdc /*dc*/, const emulator_pointer caps)
@@ -1854,6 +2475,25 @@ namespace sogen
             return TRUE;
         }
 
+        void flush_gdi_batch(const syscall_context& c)
+        {
+            const auto& thread = c.thread();
+            ULONG batch_count = 0;
+            if (thread.teb64)
+            {
+                c.emu.read_memory(thread.teb64->value() + offsetof(TEB64, GdiBatchCount), &batch_count, sizeof(batch_count));
+            }
+            if (batch_count == 0 && thread.teb32)
+            {
+                c.emu.read_memory(thread.teb32->value() + offsetof(TEB32, GdiBatchCount), &batch_count, sizeof(batch_count));
+            }
+
+            if (batch_count != 0)
+            {
+                (void)handle_NtGdiFlush(c);
+            }
+        }
+
         uint64_t handle_NtGdiCreateSolidBrush(const syscall_context& c, const uint32_t color, const uint64_t /*unused*/)
         {
             const auto handle = allocate_gdi_object(c, k_gdi_brush_type, k_gdi_brush_attr_size);
@@ -1896,6 +2536,46 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        uint32_t count_process_gdi_objects(const syscall_context& c)
+        {
+            uint64_t table = 0;
+            c.proc.peb64.access([&](const PEB64& peb) { table = peb.GdiSharedHandleTable; });
+            if (table == 0)
+            {
+                return 0;
+            }
+
+            // Windows charges neither the stock objects, the memory DC default bitmap among them, nor the system color
+            // brushes to the process.
+            std::unordered_set<uint32_t> system_objects{c.proc.gdi_memory_dc_default_bitmap_handle};
+            for (uint32_t index = 0; index < std::extent_v<decltype(GDI_SHARED_MEMORY64::Objects)>; ++index)
+            {
+                system_objects.insert(static_cast<uint32_t>(read_gdi_object_slot(c, index)));
+            }
+            c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& server_info) {
+                for (const auto brush : server_info.ahbrSystem)
+                {
+                    system_objects.insert(static_cast<uint32_t>(brush));
+                }
+            });
+
+            std::vector<GDI_HANDLE_ENTRY64> entries(GDI_MAX_HANDLE_COUNT);
+            c.emu.read_memory(table, entries.data(), entries.size() * sizeof(GDI_HANDLE_ENTRY64));
+
+            uint32_t count = 0;
+            for (uint32_t index = 0; index < entries.size(); ++index)
+            {
+                const auto& entry = entries[index];
+                const auto handle_value = (static_cast<uint32_t>(entry.Unique) << 16) | index;
+                if (entry.Type != 0 && (entry.Owner & ~1u) == c.proc.process_id && !system_objects.contains(handle_value))
+                {
+                    ++count;
+                }
+            }
+
+            return count;
+        }
+
         uint64_t handle_NtGdiCreateCompatibleDC(const syscall_context& c, const hdc /*dc*/)
         {
             uint64_t dc_attr = 0;
@@ -1913,9 +2593,7 @@ namespace sogen
 
             it->second.is_memory_dc = true;
 
-            // Memory DCs begin with a default monochrome bitmap selected, and SelectObject
-            // returns that previous bitmap on the first real bitmap selection.
-            const auto default_bitmap = create_gdi_bitmap_surface(c, 1, 1, 0xFF000000u);
+            const auto default_bitmap = ensure_memory_dc_default_bitmap(c);
             if (default_bitmap == 0)
             {
                 return 0;
@@ -1931,8 +2609,9 @@ namespace sogen
             const auto dc = allocate_gdi_dc(c, dc_attr);
             if (dc != 0)
             {
-                const hwnd desktop_window = c.proc.default_desktop_window_handle.bits;
-                c.proc.gdi_dc_states[dc].target_window = window == 0 ? desktop_window : window;
+                auto& state = c.proc.gdi_dc_states[dc];
+                state.target_window = window;
+                state.is_window_dc = true;
             }
             return dc;
         }
@@ -2052,16 +2731,120 @@ namespace sogen
                                           const uint32_t bits_pixel, const emulator_pointer bits)
         {
             gdi_bitmap_surface* surface = nullptr;
-            const auto handle_value = create_gdi_bitmap_surface(c, width, height, k_default_bitmap_fill, &surface);
+            const auto monochrome = planes == 1 && bits_pixel == 1;
+            const auto handle_value = create_gdi_bitmap_surface(c, width, height, monochrome ? 0 : k_default_bitmap_fill, &surface);
             if (surface != nullptr)
             {
-                if (bits != 0 && planes == 1 && bits_pixel == 32)
+                if (planes == 1 && bits_pixel != 0)
+                {
+                    surface->guest_bpp = bits_pixel;
+                }
+
+                if (bits != 0 && monochrome)
+                {
+                    const auto stride = ((static_cast<size_t>(width) + 15u) / 16u) * 2u;
+                    std::vector<uint8_t> input(stride * height);
+                    c.emu.read_memory(bits, input.data(), input.size());
+                    for (uint32_t y = 0; y < height; ++y)
+                    {
+                        for (uint32_t x = 0; x < width; ++x)
+                        {
+                            const auto bit = (input[static_cast<size_t>(y) * stride + x / 8u] >> (7u - (x & 7u))) & 1u;
+                            surface->pixels[static_cast<size_t>(y) * width + x] = bit == 0 ? 0xFF000000u : 0xFFFFFFFFu;
+                        }
+                    }
+                }
+                else if (bits != 0 && planes == 1 && bits_pixel == 32)
                 {
                     const auto byte_count = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
                     c.emu.read_memory(bits, surface->pixels.data(), byte_count);
                 }
             }
             return handle_value;
+        }
+
+        int32_t handle_NtGdiGetBitmapBits(const syscall_context& c, const handle bitmap, const int32_t count, const emulator_pointer bits)
+        {
+            const auto it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(bitmap.bits));
+
+            if (it == c.proc.gdi_bitmap_surfaces.end())
+            {
+                return 0;
+            }
+
+            auto& surface = it->second;
+            sync_surface_from_guest_dib(c, surface);
+
+            const uint32_t bpp = surface.guest_bpp;
+
+            if (bpp != 1 && bpp != 24 && bpp != 32)
+            {
+                c.win_emu.log.warn("NtGdiGetBitmapBits: Unsupported bitmap bit depth: %u bpp", bpp);
+                return 0;
+            }
+
+            // GetBitmapBits scanlines are aligned to 16-bit boundaries.
+            const size_t stride = ((static_cast<size_t>(surface.width) * bpp + 15) / 16) * 2;
+
+            const size_t total_size = stride * surface.height;
+
+            if (total_size > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            {
+                return 0;
+            }
+
+            // A null output buffer is a size query.
+            if (bits == 0)
+            {
+                return static_cast<int32_t>(total_size);
+            }
+
+            const size_t copy_size = count < 0 ? total_size : std::min(static_cast<size_t>(count), total_size);
+
+            if (copy_size == 0)
+            {
+                return 0;
+            }
+
+            std::vector<uint8_t> output(total_size, 0);
+
+            for (uint32_t y = 0; y < surface.height; ++y)
+            {
+                const uint32_t source_y = surface.guest_top_down ? y : surface.height - 1 - y;
+
+                const auto* source = surface.pixels.data() + static_cast<size_t>(source_y) * surface.width;
+
+                auto* destination = output.data() + static_cast<size_t>(y) * stride;
+
+                if (bpp == 1)
+                {
+                    for (uint32_t x = 0; x < surface.width; ++x)
+                    {
+                        if ((source[x] & 0x00FFFFFFu) != 0)
+                        {
+                            destination[x / 8u] |= static_cast<uint8_t>(0x80u >> (x & 7u));
+                        }
+                    }
+                }
+                else if (bpp == 32)
+                {
+                    std::memcpy(destination, source, static_cast<size_t>(surface.width) * sizeof(uint32_t));
+                }
+                else
+                {
+                    for (uint32_t x = 0; x < surface.width; ++x)
+                    {
+                        const uint32_t pixel = source[x];
+
+                        destination[x * 3 + 0] = static_cast<uint8_t>(pixel);
+                        destination[x * 3 + 1] = static_cast<uint8_t>(pixel >> 8);
+                        destination[x * 3 + 2] = static_cast<uint8_t>(pixel >> 16);
+                    }
+                }
+            }
+
+            c.emu.write_memory(bits, output.data(), copy_size);
+            return static_cast<int32_t>(copy_size);
         }
 
         uint64_t handle_NtGdiCreateDIBSection(const syscall_context& c, const hdc /*dc*/, const uint64_t /*section_app*/,
@@ -2086,18 +2869,17 @@ namespace sogen
             const auto abs_height = header.biHeight > 0 ? static_cast<uint32_t>(header.biHeight)
                                                         : static_cast<uint32_t>(-static_cast<int64_t>(header.biHeight));
 
-            const auto stride = static_cast<uint32_t>(((static_cast<uint64_t>(width) * header.biBitCount + 31u) / 32u) * 4u);
+            const auto stride = static_cast<uint32_t>(dib_stride(width, header.biBitCount));
 
             const auto allocation_bytes = static_cast<uint64_t>(stride) * abs_height;
 
-            if (allocation_bytes == 0 || allocation_bytes > (std::numeric_limits<size_t>::max)())
+            if (allocation_bytes == 0 || allocation_bytes > std::numeric_limits<size_t>::max())
             {
                 return 0;
             }
 
-            const auto guest_bits =
-                c.win_emu.memory.allocate_memory(static_cast<size_t>(page_align_up(allocation_bytes)), memory_permission::read_write, false,
-                                                 DEFAULT_ALLOCATION_ADDRESS_32BIT);
+            const auto guest_bits = c.win_emu.memory.allocate_memory(static_cast<size_t>(page_align_up(allocation_bytes)),
+                                                                     memory_permission::read_write, false, gdi_allocation_start(c));
 
             if (guest_bits == 0)
             {
@@ -2125,28 +2907,66 @@ namespace sogen
             return handle_value;
         }
 
-        uint64_t handle_NtGdiCreateDIBitmapInternal(const syscall_context& c, const hdc /*dc*/, const uint32_t width, const uint32_t height,
-                                                    const uint32_t /*usage*/, const emulator_pointer bits, const emulator_pointer /*info*/,
-                                                    const uint32_t /*info_header_size*/, const uint32_t /*init*/, const uint32_t /*offset*/,
-                                                    const uint32_t /*cj*/, const uint32_t /*i_usage*/)
+        uint64_t handle_NtGdiCreateDIBitmapInternal(const syscall_context& c, const hdc /*dc*/, const int32_t width, const int32_t height,
+                                                    const uint32_t init, const emulator_pointer bits, const emulator_pointer info,
+                                                    const uint32_t usage, const uint32_t /*max_info*/, const uint32_t max_bits,
+                                                    const uint32_t /*flags*/, const uint64_t /*color_transform*/)
         {
-            gdi_bitmap_surface* surface = nullptr;
-            const auto handle_value = create_gdi_bitmap_surface(c, width, height, k_default_bitmap_fill, &surface);
-            if (surface != nullptr)
+            // CreateDIBitmap passes the DIB's height through, which is negative for a top-down DIB.
+            if (width <= 0 || height == 0)
             {
-                if (bits != 0)
+                return 0;
+            }
+
+            const auto surface_width = static_cast<uint32_t>(width);
+            const auto surface_height = static_cast<uint32_t>(std::abs(static_cast<int64_t>(height)));
+            gdi_bitmap_surface* surface = nullptr;
+            const auto handle_value = create_gdi_bitmap_surface(c, surface_width, surface_height, k_default_bitmap_fill, &surface);
+            if (!surface || (init & CBM_INIT) == 0 || bits == 0 || info == 0)
+            {
+                return handle_value;
+            }
+
+            const auto header = read_bitmap_info_header(c, info);
+            if (!header || !is_supported_dib(*header, usage) || header->biHeight == 0)
+            {
+                c.win_emu.log.warn("NtGdiCreateDIBitmapInternal: unsupported initial DIB (usage=%u)\n", usage);
+                return handle_value;
+            }
+
+            const bool top_down = header->biHeight < 0;
+            const auto src_width = static_cast<uint32_t>(header->biWidth);
+            const auto src_height = static_cast<uint32_t>(std::abs(static_cast<int64_t>(header->biHeight)));
+            const auto bit_count = header->biBitCount;
+            const auto stride = dib_stride(src_width, bit_count);
+            const auto palette = read_dib_palette(c, info, *header);
+
+            std::vector<uint8_t> data(stride * src_height);
+            if (max_bits != 0 && data.size() > max_bits)
+            {
+                data.resize(max_bits);
+            }
+            c.emu.read_memory(bits, data.data(), data.size());
+            const auto available_rows = static_cast<uint32_t>(data.size() / stride);
+
+            for (uint32_t y = 0; y < std::min(surface_height, src_height); ++y)
+            {
+                const auto stored_row = top_down ? y : (src_height - 1 - y);
+                if (stored_row >= available_rows)
                 {
-                    const auto byte_count = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
-                    c.emu.read_memory(bits, surface->pixels.data(), byte_count);
+                    continue;
+                }
+
+                const uint8_t* row = data.data() + static_cast<size_t>(stored_row) * stride;
+                for (uint32_t x = 0; x < std::min(surface_width, src_width); ++x)
+                {
+                    set_surface_pixel(*surface, static_cast<int>(x), static_cast<int>(y), dib_pixel_to_bgra32(row, x, bit_count, palette));
                 }
             }
+
             return handle_value;
         }
 
-        // GetDIBits: report a bitmap's geometry into the caller's BITMAPINFOHEADER and, when a pixel buffer is
-        // supplied, copy its contents out as a bottom-up 32bpp BI_RGB DIB. The emulator's GDI bitmaps are all
-        // stored as 32bpp BGRA surfaces, so that is the only format reported. D3D9/DX11 init queries this to
-        // probe a memory bitmap before deciding its presentation path.
         int handle_NtGdiGetDIBitsInternal(const syscall_context& c, const hdc /*dc*/, const handle bitmap, const uint32_t start_scan,
                                           const uint32_t scan_lines, const emulator_pointer bits, const emulator_pointer info,
                                           const uint32_t /*usage*/, const uint32_t max_bits, const uint32_t /*max_info*/)
@@ -2163,12 +2983,21 @@ namespace sogen
             }
             const auto& surface = it->second;
 
+            // With a buffer, the caller's header describes the requested format, and a negative height asks for top-down rows.
+            int32_t requested_height = 0;
+            if (bits != 0)
+            {
+                c.emu.read_memory(info + 8, &requested_height, sizeof(requested_height));
+            }
+            const bool top_down = requested_height < 0;
+
             const auto bi_width = static_cast<int32_t>(surface.width);
-            const auto bi_height = static_cast<int32_t>(surface.height);
+            const auto bi_height = top_down ? -static_cast<int32_t>(surface.height) : static_cast<int32_t>(surface.height);
             const uint16_t planes = 1;
-            const uint16_t bit_count = 32;
+            const uint16_t bit_count = surface.guest_bpp == 1 ? 1 : 32;
             const uint32_t compression = 0; // BI_RGB
-            const uint32_t size_image = surface.width * surface.height * static_cast<uint32_t>(sizeof(uint32_t));
+            const auto stride = dib_stride(surface.width, bit_count);
+            const auto size_image = static_cast<uint32_t>(stride * surface.height);
             c.emu.write_memory(info + 4, &bi_width, sizeof(bi_width));
             c.emu.write_memory(info + 8, &bi_height, sizeof(bi_height));
             c.emu.write_memory(info + 12, &planes, sizeof(planes));
@@ -2182,8 +3011,6 @@ namespace sogen
                 return bi_height;
             }
 
-            // Copy the requested scanlines as a bottom-up DIB (row 0 is the bottom image row).
-            const size_t stride = static_cast<size_t>(surface.width) * sizeof(uint32_t);
             uint32_t copied = 0;
             for (uint32_t row = 0; row < scan_lines; ++row)
             {
@@ -2197,50 +3024,28 @@ namespace sogen
                 {
                     break;
                 }
-                const uint32_t src_y = surface.height - 1 - dib_row;
-                c.emu.write_memory(bits + dst_offset, surface.pixels.data() + static_cast<size_t>(src_y) * surface.width, stride);
+                const uint32_t src_y = top_down ? dib_row : surface.height - 1 - dib_row;
+                const auto* source = surface.pixels.data() + static_cast<size_t>(src_y) * surface.width;
+                if (bit_count == 1)
+                {
+                    std::vector<uint8_t> packed_row(stride);
+                    for (uint32_t x = 0; x < surface.width; ++x)
+                    {
+                        if ((source[x] & 0x00FFFFFFu) != 0)
+                        {
+                            packed_row[x / 8u] |= static_cast<uint8_t>(0x80u >> (x & 7u));
+                        }
+                    }
+                    c.emu.write_memory(bits + dst_offset, packed_row.data(), packed_row.size());
+                }
+                else
+                {
+                    c.emu.write_memory(bits + dst_offset, source, stride);
+                }
                 ++copied;
             }
 
             return static_cast<int>(copied);
-        }
-
-        // GetBitmapBits is a DDB API: scanlines are returned top-down, unlike GetDIBits' bottom-up DIB above.
-        LONG handle_NtGdiGetBitmapBits(const syscall_context& c, const handle bitmap, const LONG cb_buffer, const emulator_pointer bits)
-        {
-            if (bits == 0 || cb_buffer <= 0)
-            {
-                return 0;
-            }
-
-            const auto it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(bitmap.bits));
-            if (it == c.proc.gdi_bitmap_surfaces.end())
-            {
-                return 0;
-            }
-
-            const auto& surface = it->second;
-            if (surface.pixels.empty())
-            {
-                return 0;
-            }
-
-            const size_t stride = static_cast<size_t>(surface.width) * sizeof(uint32_t);
-            const size_t total = stride * surface.height;
-            const size_t to_copy = std::min(static_cast<size_t>(cb_buffer), total);
-
-            for (size_t row = 0; row < surface.height; ++row)
-            {
-                const size_t dst_offset = row * stride;
-                if (dst_offset >= to_copy)
-                {
-                    break;
-                }
-                const size_t row_bytes = std::min(stride, to_copy - dst_offset);
-                c.emu.write_memory(bits + dst_offset, surface.pixels.data() + row * surface.width, row_bytes);
-            }
-
-            return static_cast<LONG>(to_copy);
         }
 
         LONG handle_NtGdiSetBitmapBits(const syscall_context& c, const handle bitmap, const ULONG cb_buffer, const emulator_pointer bits)
@@ -2276,7 +3081,7 @@ namespace sogen
         int handle_NtGdiSetDIBitsToDeviceInternal(const syscall_context& c, const hdc dc, const int x_dest, const int y_dest,
                                                   const uint32_t width, const uint32_t height, const int x_src, const int y_src,
                                                   const uint32_t /*start_scan*/, const uint32_t scan_lines, const emulator_pointer bits,
-                                                  const emulator_pointer info, const uint32_t /*color_use*/, const uint32_t max_bits,
+                                                  const emulator_pointer info, const uint32_t color_use, const uint32_t max_bits,
                                                   const uint32_t /*max_info*/, const uint32_t /*transform_coordinates*/,
                                                   const uint64_t /*color_transform*/)
         {
@@ -2294,65 +3099,28 @@ namespace sogen
                 return 0;
             }
 
-            int32_t bi_width = 0;
-            int32_t bi_height = 0;
-            uint16_t bit_count = 0;
-            uint32_t compression = 0;
-            c.emu.read_memory(info + 4, &bi_width, sizeof(bi_width));
-            c.emu.read_memory(info + 8, &bi_height, sizeof(bi_height));
-            c.emu.read_memory(info + 14, &bit_count, sizeof(bit_count));
-            c.emu.read_memory(info + 16, &compression, sizeof(compression));
-
-            uint32_t bi_size = 0;
-            uint32_t clr_used = 0;
-            c.emu.read_memory(info + 0, &bi_size, sizeof(bi_size));
-            c.emu.read_memory(info + 32, &clr_used, sizeof(clr_used));
-
-            constexpr uint32_t bi_rgb = 0;
-            const bool valid_bit_count =
-                bit_count == 1 || bit_count == 4 || bit_count == 8 || bit_count == 16 || bit_count == 24 || bit_count == 32;
-            if (!valid_bit_count || compression != bi_rgb || bi_width <= 0 || bi_height == 0)
+            const auto header = read_bitmap_info_header(c, info);
+            if (!header)
             {
-                c.win_emu.log.warn("NtGdiSetDIBitsToDeviceInternal: unsupported DIB (bpp=%u compression=%u width=%d)\n", bit_count,
-                                   compression, bi_width);
+                c.win_emu.log.warn("NtGdiSetDIBitsToDeviceInternal: unsupported DIB header (size=%u)\n", c.emu.read_memory<uint32_t>(info));
                 return 0;
             }
 
-            const bool top_down = bi_height < 0;
-            const auto src_width = static_cast<uint32_t>(bi_width);
-            const auto src_height = static_cast<uint32_t>(top_down ? -bi_height : bi_height);
-            const auto stored_rows = std::min(scan_lines, src_height);
-            // DIB scanlines are DWORD-aligned, not tightly packed.
-            const size_t stride = ((static_cast<size_t>(src_width) * bit_count + 31u) / 32u) * 4u;
-
-            std::vector<uint32_t> palette{};
-            if (bit_count <= 8)
+            const auto bit_count = header->biBitCount;
+            if (!is_supported_dib(*header, color_use))
             {
-                const uint32_t max_colors = 1u << bit_count;
-                const uint32_t palette_entries = clr_used != 0 ? std::min(clr_used, max_colors) : max_colors;
-                const uint64_t palette_ptr = info + bi_size;
-
-                // Always size the palette to the full index range the pixel bit depth can address
-                // (max_colors), not just palette_entries - biClrUsed can legitimately be smaller than
-                // that (a sparse palette), but pixel data can still contain any index up to max_colors-1,
-                // and dib_pixel_to_bgra32 indexes this vector directly with no bounds check.
-                palette.resize(max_colors, 0xFF000000u);
-                for (uint32_t i = 0; i < palette_entries; ++i)
-                {
-                    struct
-                    {
-                        uint8_t blue;
-                        uint8_t green;
-                        uint8_t red;
-                        uint8_t reserved;
-                    } rgb{};
-
-                    c.emu.read_memory(palette_ptr + static_cast<uint64_t>(i) * sizeof(rgb), &rgb, sizeof(rgb));
-                    palette[i] = 0xFF000000u | (static_cast<uint32_t>(rgb.red) << 16) | (static_cast<uint32_t>(rgb.green) << 8) |
-                                 static_cast<uint32_t>(rgb.blue);
-                }
+                c.win_emu.log.warn("NtGdiSetDIBitsToDeviceInternal: unsupported DIB (bpp=%u compression=%u usage=%u width=%d)\n", bit_count,
+                                   static_cast<uint32_t>(header->biCompression), color_use, static_cast<int32_t>(header->biWidth));
+                return 0;
             }
-            const uint32_t* palette_data = palette.empty() ? nullptr : palette.data();
+
+            const bool top_down = header->biHeight < 0;
+            const auto src_width = static_cast<uint32_t>(header->biWidth);
+            const auto src_height = static_cast<uint32_t>(top_down ? -header->biHeight : header->biHeight);
+            const auto stored_rows = std::min(scan_lines, src_height);
+            const size_t stride = dib_stride(src_width, bit_count);
+
+            const auto palette = read_dib_palette(c, info, *header);
 
             std::vector<uint8_t> data(stride * stored_rows);
             if (data.empty())
@@ -2389,7 +3157,7 @@ namespace sogen
                         break;
                     }
                     set_surface_pixel(*surface, x_dest + origin_x + static_cast<int>(i), y_dest + origin_y + static_cast<int>(j),
-                                      dib_pixel_to_bgra32(row, src_x, bit_count, palette_data));
+                                      dib_pixel_to_bgra32(row, src_x, bit_count, palette));
                 }
                 ++copied;
             }
@@ -2405,7 +3173,7 @@ namespace sogen
         int handle_NtGdiStretchDIBitsInternal(const syscall_context& c, const hdc dc, const int x_dst, const int y_dst, const int dst_width,
                                               const int dst_height, const int x_src, const int y_src, const int src_width,
                                               const int src_height, const emulator_pointer bits, const emulator_pointer info,
-                                              const uint32_t /*usage*/, const uint32_t /*rop*/, const uint32_t /*max_info*/,
+                                              const uint32_t color_use, const uint32_t /*rop*/, const uint32_t /*max_info*/,
                                               const uint32_t max_bits, const uint64_t /*color_transform*/)
         {
             if (bits == 0 || info == 0 || dst_width == 0 || dst_height == 0 || src_width <= 0 || src_height <= 0)
@@ -2422,57 +3190,28 @@ namespace sogen
                 return 0;
             }
 
-            int32_t bi_width = 0;
-            int32_t bi_height = 0;
-            uint16_t bit_count = 0;
-            uint32_t compression = 0;
-            c.emu.read_memory(info + 4, &bi_width, sizeof(bi_width));
-            c.emu.read_memory(info + 8, &bi_height, sizeof(bi_height));
-            c.emu.read_memory(info + 14, &bit_count, sizeof(bit_count));
-            c.emu.read_memory(info + 16, &compression, sizeof(compression));
-
-            constexpr uint32_t bi_rgb = 0;
-
-            uint32_t bi_size = 0;
-            uint32_t clr_used = 0;
-            c.emu.read_memory(info + 0, &bi_size, sizeof(bi_size));
-            c.emu.read_memory(info + 32, &clr_used, sizeof(clr_used)); // BITMAPINFOHEADER.biClrUsed
-
-            if ((bit_count != 4 && bit_count != 24 && bit_count != 32) || compression != bi_rgb || bi_width <= 0 || bi_height == 0)
+            const auto header = read_bitmap_info_header(c, info);
+            if (!header)
             {
-                c.win_emu.log.warn("NtGdiStretchDIBitsInternal: unsupported DIB (bpp=%u compression=%u width=%d)\n", bit_count, compression,
-                                   bi_width);
+                c.win_emu.log.warn("NtGdiStretchDIBitsInternal: unsupported DIB header (size=%u)\n", c.emu.read_memory<uint32_t>(info));
                 return 0;
             }
 
-            const bool top_down = bi_height < 0;
-            const auto img_width = static_cast<uint32_t>(bi_width);
-            const auto img_height = static_cast<uint32_t>(top_down ? -bi_height : bi_height);
-
-            // DIB scanlines are DWORD-aligned, not tightly packed.
-            const size_t stride = ((static_cast<size_t>(img_width) * bit_count + 31u) / 32u) * 4u;
-
-            std::array<uint32_t, 16> palette{};
-            if (bit_count == 4)
+            const auto bit_count = header->biBitCount;
+            if (!is_supported_dib(*header, color_use) || header->biHeight == 0)
             {
-                const uint32_t palette_entries = clr_used != 0 ? std::min<uint32_t>(clr_used, 16) : 16;
-                const uint64_t palette_ptr = info + bi_size;
-
-                for (uint32_t i = 0; i < palette_entries; ++i)
-                {
-                    struct
-                    {
-                        uint8_t blue;
-                        uint8_t green;
-                        uint8_t red;
-                        uint8_t reserved;
-                    } rgb{};
-
-                    c.emu.read_memory(palette_ptr + static_cast<uint64_t>(i) * sizeof(rgb), &rgb, sizeof(rgb));
-                    palette[i] = 0xFF000000u | (static_cast<uint32_t>(rgb.red) << 16) | (static_cast<uint32_t>(rgb.green) << 8) |
-                                 static_cast<uint32_t>(rgb.blue);
-                }
+                c.win_emu.log.warn("NtGdiStretchDIBitsInternal: unsupported DIB (bpp=%u compression=%u usage=%u width=%d)\n", bit_count,
+                                   static_cast<uint32_t>(header->biCompression), color_use, static_cast<int32_t>(header->biWidth));
+                return 0;
             }
+
+            const bool top_down = header->biHeight < 0;
+            const auto img_width = static_cast<uint32_t>(header->biWidth);
+            const auto img_height = static_cast<uint32_t>(top_down ? -header->biHeight : header->biHeight);
+
+            const size_t stride = dib_stride(img_width, bit_count);
+
+            const auto palette = read_dib_palette(c, info, *header);
 
             std::vector<uint8_t> data(stride * img_height);
             if (data.empty())
@@ -2518,31 +3257,8 @@ namespace sogen
                         continue;
                     }
 
-                    uint32_t pixel = 0;
-
-                    if (bit_count == 32)
-                    {
-                        std::memcpy(&pixel, row + static_cast<size_t>(img_x) * sizeof(uint32_t), sizeof(pixel));
-                        pixel |= 0xFF000000u;
-                    }
-                    else if (bit_count == 24)
-                    {
-                        const uint8_t* px = row + static_cast<size_t>(img_x) * 3;
-                        pixel = static_cast<uint32_t>(px[0]) | (static_cast<uint32_t>(px[1]) << 8) | (static_cast<uint32_t>(px[2]) << 16) |
-                                0xFF000000u;
-                    }
-                    else // 4bpp BI_RGB
-                    {
-                        const uint8_t packed = row[static_cast<size_t>(img_x) / 2u];
-
-                        // In 4bpp DIBs, the left pixel is the high nibble.
-                        const uint8_t index = (img_x & 1u) == 0 ? static_cast<uint8_t>(packed >> 4) : static_cast<uint8_t>(packed & 0x0Fu);
-
-                        pixel = palette[index];
-                    }
-
                     const int out_x = x_dst + origin_x + (flip_x ? (dst_w - 1 - dx) : dx);
-                    set_surface_pixel(*surface, out_x, out_y, pixel);
+                    set_surface_pixel(*surface, out_x, out_y, dib_pixel_to_bgra32(row, img_x, bit_count, palette));
                 }
             }
 
@@ -2596,10 +3312,20 @@ namespace sogen
             {
                 c.win_emu.memory.release_memory(bmp_it->second.guest_bits, 0);
             }
+            if (entry.Object != 0)
+            {
+                c.win_emu.memory.release_memory(entry.Object, 0);
+            }
+
+            if (handle_value == c.proc.gdi_memory_dc_default_bitmap_handle)
+            {
+                c.proc.gdi_memory_dc_default_bitmap_handle = 0;
+            }
 
             c.proc.gdi_dc_states.erase(handle_value);
             c.proc.gdi_bitmap_surfaces.erase(handle_value);
-            c.proc.gdi_font_descriptors.erase(handle_value);
+            c.proc.gdi_fonts.erase(handle_value);
+            c.proc.gdi_regions.erase(handle_value);
             return 1;
         }
 
@@ -2622,11 +3348,14 @@ namespace sogen
                 return 0;
             }
 
-            for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
+            if (bitmap_handle != c.proc.gdi_memory_dc_default_bitmap_handle)
             {
-                if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
+                for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
                 {
-                    return 0;
+                    if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
+                    {
+                        return 0;
+                    }
                 }
             }
 
@@ -2752,22 +3481,12 @@ namespace sogen
 
         uint64_t handle_NtGdiHfontCreate(const syscall_context& c, const emulator_pointer logfont, const uint32_t /*angle*/)
         {
-            const auto handle_value = allocate_gdi_object(c, k_gdi_font_type, k_gdi_font_attr_size);
-            if (handle_value == 0)
+            const auto handle = allocate_gdi_object(c, k_gdi_font_type, k_gdi_font_attr_size);
+            if (handle != 0 && logfont != 0)
             {
-                return 0;
+                c.proc.gdi_fonts[handle] = emulator_object<EMU_LOGFONTW>{c.emu, logfont}.read();
             }
-
-            if (logfont != 0)
-            {
-                std::vector<uint8_t> logfont_bytes(k_logfontw_size);
-                if (c.emu.try_read_memory(logfont, logfont_bytes.data(), logfont_bytes.size()))
-                {
-                    c.proc.gdi_font_descriptors[handle_value].logfont_bytes = std::move(logfont_bytes);
-                }
-            }
-
-            return handle_value;
+            return handle;
         }
 
         uint32_t handle_NtGdiExtGetObjectW(const syscall_context& c, const uint32_t handle_value, const uint32_t size,
@@ -2780,12 +3499,13 @@ namespace sogen
                 return 0;
             }
 
+            const auto object_type = gdi_object_type(entry);
             const auto bitmap_it =
-                entry.Type == k_gdi_bitmap_type ? c.proc.gdi_bitmap_surfaces.find(handle_value) : c.proc.gdi_bitmap_surfaces.end();
+                object_type == k_gdi_bitmap_type ? c.proc.gdi_bitmap_surfaces.find(handle_value) : c.proc.gdi_bitmap_surfaces.end();
             const auto* surface = bitmap_it != c.proc.gdi_bitmap_surfaces.end() ? &bitmap_it->second : nullptr;
             const bool is_dib_section = surface && surface->guest_bits != 0;
 
-            uint32_t object_size = get_gdi_object_size(entry.Type);
+            uint32_t object_size = get_gdi_object_size(object_type);
             if (object_size == 0)
             {
                 return 0;
@@ -2811,9 +3531,8 @@ namespace sogen
             if (surface)
             {
                 const auto bpp = static_cast<uint16_t>(surface->guest_bpp != 0 ? surface->guest_bpp : 32u);
-                const auto width_bytes = surface->guest_stride != 0
-                                             ? surface->guest_stride
-                                             : static_cast<uint32_t>(((static_cast<uint64_t>(surface->width) * bpp + 31u) / 32u) * 4u);
+                const auto width_bytes =
+                    surface->guest_stride != 0 ? surface->guest_stride : static_cast<uint32_t>(dib_stride(surface->width, bpp));
 
                 // The 64-bit BITMAP and DIBSECTION layouts: WoW64 callers get them converted by wow64win.
                 const utils::safe_buffer_accessor<uint8_t> bitmap{object_data};
@@ -2835,13 +3554,11 @@ namespace sogen
                     bitmap.as<uint32_t>(52).set(width_bytes * surface->height);
                 }
             }
-
-            if (entry.Type == k_gdi_font_type)
+            else if (object_type == k_gdi_font_type)
             {
-                const auto font_it = c.proc.gdi_font_descriptors.find(handle_value);
-                if (font_it != c.proc.gdi_font_descriptors.end() && font_it->second.logfont_bytes.size() == object_data.size())
+                if (const auto font_it = c.proc.gdi_fonts.find(handle_value); font_it != c.proc.gdi_fonts.end())
                 {
-                    object_data = font_it->second.logfont_bytes;
+                    std::memcpy(object_data.data(), &font_it->second, std::min(object_data.size(), sizeof(font_it->second)));
                 }
             }
 
@@ -2900,8 +3617,9 @@ namespace sogen
                                .italic = true,
                                .supports_arabic_and_hebrew = false},
                 };
-                constexpr std::array<std::pair<BYTE, std::u16string_view>, 9> scripts{
+                constexpr std::array<std::pair<BYTE, std::u16string_view>, 10> scripts{
                     std::pair{static_cast<BYTE>(ANSI_CHARSET), u"Western"sv},
+                    std::pair{static_cast<BYTE>(SHIFTJIS_CHARSET), u"Japanese"sv},
                     std::pair{static_cast<BYTE>(HEBREW_CHARSET), u"Hebrew"sv},
                     std::pair{static_cast<BYTE>(ARABIC_CHARSET), u"Arabic"sv},
                     std::pair{static_cast<BYTE>(GREEK_CHARSET), u"Greek"sv},
@@ -2914,6 +3632,16 @@ namespace sogen
 
                 for (const auto& style : styles)
                 {
+                    gdi_font_signature signature{};
+                    for (const auto& supported_script : scripts)
+                    {
+                        const auto font_charset = supported_script.first;
+                        if (style.supports_arabic_and_hebrew || (font_charset != ARABIC_CHARSET && font_charset != HEBREW_CHARSET))
+                        {
+                            add_gdi_font_charset(signature, font_charset);
+                        }
+                    }
+
                     for (const auto& [font_charset, script] : scripts)
                     {
                         if ((!style.supports_arabic_and_hebrew && (font_charset == ARABIC_CHARSET || font_charset == HEBREW_CHARSET)) ||
@@ -2946,6 +3674,9 @@ namespace sogen
                         font.text_metric.ntmTm.tmPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
                         font.text_metric.ntmTm.ntmFlags =
                             (style.weight == FW_BOLD ? NTM_BOLD : NTM_REGULAR) | (style.italic ? NTM_ITALIC : 0);
+
+                        std::ranges::copy(signature.unicode_subsets, font.text_metric.fsUsb);
+                        std::ranges::copy(signature.code_pages, font.text_metric.fsCsb);
                     }
                 }
             }
@@ -3024,25 +3755,20 @@ namespace sogen
             const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
             if (dc_it != c.proc.gdi_dc_states.end())
             {
-                const auto font_it = c.proc.gdi_font_descriptors.find(dc_it->second.selected_font);
-                if (font_it != c.proc.gdi_font_descriptors.end() && font_it->second.logfont_bytes.size() == k_logfontw_size)
+                const auto font_it = c.proc.gdi_fonts.find(dc_it->second.selected_font);
+                if (font_it != c.proc.gdi_fonts.end())
                 {
-                    const auto& bytes = font_it->second.logfont_bytes;
-
-                    int32_t lf_height{};
-                    std::memcpy(&lf_height, bytes.data(), sizeof(lf_height));
-                    if (lf_height != 0)
+                    const auto& font = font_it->second;
+                    if (font.lfHeight != 0)
                     {
-                        height = static_cast<uint32_t>(std::abs(lf_height));
+                        height = static_cast<uint32_t>(std::abs(font.lfHeight));
                         ascent = (height * 3) / 4;
                         descent = height - ascent;
                     }
 
-                    int32_t lf_weight{};
-                    std::memcpy(&lf_weight, bytes.data() + 16, sizeof(lf_weight));
-                    if (lf_weight != 0)
+                    if (font.lfWeight != 0)
                     {
-                        weight = static_cast<uint32_t>(lf_weight);
+                        weight = static_cast<uint32_t>(font.lfWeight);
                     }
                 }
             }
@@ -3062,22 +3788,10 @@ namespace sogen
             return 1;
         }
 
-        std::u16string read_logfont_face_name(const std::vector<uint8_t>& logfont_bytes)
+        std::u16string logfont_face_name(const EMU_LOGFONTW& font)
         {
-            constexpr size_t face_name_offset = 28;
-            constexpr size_t face_name_chars = 32;
-
-            if (logfont_bytes.size() != k_logfontw_size)
-            {
-                return {};
-            }
-
-            std::u16string name(face_name_chars, u'\0');
-            std::memcpy(name.data(), logfont_bytes.data() + face_name_offset, face_name_chars * sizeof(char16_t));
-
-            const auto null_pos = name.find(u'\0');
-            name.resize(null_pos == std::u16string::npos ? face_name_chars : null_pos);
-            return name;
+            const std::u16string_view face_name{font.lfFaceName, std::size(font.lfFaceName)};
+            return std::u16string{face_name.substr(0, face_name.find(u'\0'))};
         }
 
         int32_t handle_NtGdiGetTextFaceW(const syscall_context& c, const hdc dc, const int32_t count, const emulator_pointer face_name,
@@ -3094,10 +3808,10 @@ namespace sogen
             const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
             if (dc_it != c.proc.gdi_dc_states.end())
             {
-                const auto font_it = c.proc.gdi_font_descriptors.find(dc_it->second.selected_font);
-                if (font_it != c.proc.gdi_font_descriptors.end())
+                const auto font_it = c.proc.gdi_fonts.find(dc_it->second.selected_font);
+                if (font_it != c.proc.gdi_fonts.end())
                 {
-                    selected_name = read_logfont_face_name(font_it->second.logfont_bytes);
+                    selected_name = logfont_face_name(font_it->second);
                 }
             }
 
@@ -3125,61 +3839,10 @@ namespace sogen
             return required;
         }
 
-        NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& c, const uint32_t action, const uint32_t param,
-                                                   const emulator_pointer pv_param, const uint32_t win_ini)
+        uint32_t handle_NtGdiGetKerningPairs(const syscall_context&, const hdc /*dc*/, const uint32_t /*pair_count*/,
+                                             const emulator_pointer /*pairs*/)
         {
-            if (std::getenv("SOGEN_DEBUG_SPI"))
-            {
-                c.win_emu.log.error("NtUserSystemParametersInfo: action=0x%x param=0x%x pv_param=0x%llx win_ini=0x%x\n", action, param,
-                                    static_cast<unsigned long long>(pv_param), win_ini);
-            }
-
-            if (action != SPI_GETNONCLIENTMETRICS || pv_param == 0 || param < offsetof(EMU_NONCLIENTMETRICSW, iPaddedBorderWidth))
-            {
-                return STATUS_NOT_SUPPORTED;
-            }
-
-            const auto fill_font = [](EMU_LOGFONTW& font, const LONG height) {
-                font = {};
-                font.lfHeight = height;
-                font.lfWeight = FW_NORMAL;
-                font.lfCharSet = DEFAULT_CHARSET;
-                font.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
-                utils::string::copy(font.lfFaceName, u"Segoe UI");
-            };
-
-            EMU_NONCLIENTMETRICSW metrics{};
-            metrics.cbSize = sizeof(metrics);
-            metrics.iBorderWidth = 1;
-            metrics.iScrollWidth = 17;
-            metrics.iScrollHeight = 17;
-            metrics.iCaptionWidth = 32;
-            metrics.iCaptionHeight = 23;
-            metrics.iSmCaptionWidth = 16;
-            metrics.iSmCaptionHeight = 19;
-            metrics.iMenuWidth = 32;
-            metrics.iMenuHeight = 23;
-            metrics.iPaddedBorderWidth = 0;
-            fill_font(metrics.lfCaptionFont, -12);
-            fill_font(metrics.lfSmCaptionFont, -11);
-            fill_font(metrics.lfMenuFont, -12);
-            fill_font(metrics.lfStatusFont, -12);
-            fill_font(metrics.lfMessageFont, -12);
-
-            const auto write_size = std::min<uint32_t>(param, sizeof(metrics));
-            c.emu.write_memory(pv_param, &metrics, write_size);
-            return STATUS_SUCCESS;
-        }
-
-        // SystemParametersInfoForDpi scales DPI-dependent metrics for an explicitly given DPI instead of the
-        // calling thread's own DPI-awareness context. The emulated desktop is a single fixed-96-DPI space
-        // (see the identity conversion in handle_NtUserTransformPoint), so there is no scaling to apply and
-        // this can share NtUserSystemParametersInfo's own metrics table verbatim; the requested dpi is
-        // therefore unused, matching the fact that this variant never notifies/updates the system setting.
-        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, const uint32_t action, const uint32_t param,
-                                                         const emulator_pointer pv_param, const uint32_t /*dpi*/)
-        {
-            return handle_NtUserSystemParametersInfo(c, action, param, pv_param, 0);
+            return 0;
         }
 
         BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const int32_t char_count,
@@ -3198,23 +3861,75 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
-                                       const emulator_pointer /*chars*/, const UINT /*flags*/, const emulator_pointer buffer)
+        BOOL handle_NtGdiGetTextExtentExW(const syscall_context& c, const hdc dc, const emulator_pointer text, const ULONG char_count,
+                                          const ULONG max_extent, const emulator_object<ULONG> fit, const emulator_pointer extents,
+                                          const emulator_pointer size, const ULONG /*flags*/)
         {
-            if (dc == 0 || buffer == 0)
+            // Windows answers an empty string without looking at the DC or the text.
+            if (char_count == 0)
+            {
+                constexpr SIZE empty_size{};
+                constexpr ULONG no_fit = 0;
+                if (size == 0 || !write_guest_block(c, size, &empty_size, sizeof(empty_size)))
+                {
+                    return FALSE;
+                }
+
+                if (fit && !write_guest_block(c, fit.value(), &no_fit, sizeof(no_fit)))
+                {
+                    return FALSE;
+                }
+
+                return TRUE;
+            }
+
+            // Windows reads the whole text before writing anything, although the fixed-width measure does not need it.
+            if (dc == 0 || size == 0 || char_count > max_text_extent_chars ||
+                !is_readable_range(c.win_emu.memory, text, static_cast<uint64_t>(char_count) * sizeof(char16_t)))
             {
                 return FALSE;
             }
 
-            const std::vector<int32_t> widths(char_count, static_cast<int32_t>(k_default_font_width));
-            c.emu.write_memory(buffer, widths.data(), widths.size() * sizeof(int32_t));
+            const SIZE text_size{
+                .cx = static_cast<LONG>(k_default_font_width * char_count),
+                .cy = static_cast<LONG>(k_default_font_height),
+            };
+            if (!write_guest_block(c, size, &text_size, sizeof(text_size)))
+            {
+                return FALSE;
+            }
+
+            const ULONG fitting = std::min<ULONG>(char_count, max_extent / k_default_font_width);
+            if (fit && !write_guest_block(c, fit.value(), &fitting, sizeof(fitting)))
+            {
+                return FALSE;
+            }
+
+            const ULONG extent_count = fit ? fitting : char_count;
+            if (extents != 0 && !write_fixed_width_extents(c, extents, extent_count))
+            {
+                return FALSE;
+            }
+
             return TRUE;
         }
 
-        BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
-                                           const emulator_pointer /*chars*/, const UINT /*flags*/, const emulator_pointer buffer)
+        BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
+                                       const emulator_pointer chars, const UINT /*flags*/, const emulator_pointer buffer)
         {
-            if (dc == 0 || buffer == 0)
+            if (!is_char_metric_request_valid(c, dc, char_count, sizeof(int32_t), chars, buffer))
+            {
+                return FALSE;
+            }
+
+            const auto width = static_cast<int32_t>(k_default_font_width);
+            return write_repeated_entries(c, buffer, char_count, width) ? TRUE : FALSE;
+        }
+
+        BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
+                                           const emulator_pointer chars, const UINT /*flags*/, const emulator_pointer buffer)
+        {
+            if (!is_char_metric_request_valid(c, dc, char_count, sizeof(ABC), chars, buffer))
             {
                 return FALSE;
             }
@@ -3224,9 +3939,7 @@ namespace sogen
                 .abcB = k_default_font_width,
                 .abcC = 0,
             };
-            const std::vector<ABC> widths(char_count, metrics);
-            c.emu.write_memory(buffer, widths.data(), widths.size() * sizeof(ABC));
-            return TRUE;
+            return write_repeated_entries(c, buffer, char_count, metrics) ? TRUE : FALSE;
         }
 
         uint32_t handle_NtGdiGetGlyphOutline(const syscall_context& c, const hdc dc, const UINT character, const UINT format,
@@ -3523,229 +4236,63 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        // RGNATTR, the user-mode region attribute gdi32 reads for its rectangle fast paths. gdi32's
-        // SetRectRgn edits it in place and sets the dirty flag, so a dirty attribute overrides any
-        // rectangles stored on the kernel side.
-        struct gdi_region_attr
+        uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG x_left, const LONG y_top, const LONG x_right,
+                                           const LONG y_bottom)
         {
-            ULONG attr_flags;
-            ULONG complexity;
-            RECT bounds;
-        };
-
-        constexpr ULONG k_gdi_region_attr_valid = 0x1;
-        constexpr ULONG k_gdi_region_attr_dirty = 0x2;
-        constexpr int32_t k_gdi_region_error = 0;
-        constexpr ULONG k_gdi_null_region = 1;
-        constexpr ULONG k_gdi_simple_region = 2;
-        constexpr ULONG k_gdi_complex_region = 3;
-
-        bool rect_is_empty(const RECT& rect)
-        {
-            return rect.left >= rect.right || rect.top >= rect.bottom;
-        }
-
-        std::optional<std::vector<RECT>> read_region_rects(const syscall_context& c, const uint32_t region)
-        {
-            uint64_t attr_address = 0;
-            if (!get_gdi_object_address(c, region, k_gdi_region_type, attr_address))
-            {
-                return std::nullopt;
-            }
-
-            const auto attr = c.emu.read_memory<gdi_region_attr>(attr_address);
-            if (attr.complexity == k_gdi_complex_region && (attr.attr_flags & k_gdi_region_attr_dirty) == 0)
-            {
-                if (const auto it = c.proc.gdi_regions.find(region); it != c.proc.gdi_regions.end())
-                {
-                    return it->second;
-                }
-            }
-
-            if (attr.complexity == k_gdi_null_region || rect_is_empty(attr.bounds))
-            {
-                return std::vector<RECT>{};
-            }
-
-            return std::vector<RECT>{attr.bounds};
-        }
-
-        // Rebuilds the YX-banded rectangle list Windows uses for a region whose membership is given by
-        // `inside` over the grid spanned by every input rectangle edge.
-        template <typename Inside>
-        std::vector<RECT> build_banded_region(const std::vector<RECT>& first, const std::vector<RECT>& second, const Inside& inside)
-        {
-            std::vector<LONG> xs{};
-            std::vector<LONG> ys{};
-            for (const auto* rects : {&first, &second})
-            {
-                for (const auto& rect : *rects)
-                {
-                    xs.insert(xs.end(), {rect.left, rect.right});
-                    ys.insert(ys.end(), {rect.top, rect.bottom});
-                }
-            }
-
-            std::ranges::sort(xs);
-            xs.erase(std::ranges::unique(xs).begin(), xs.end());
-            std::ranges::sort(ys);
-            ys.erase(std::ranges::unique(ys).begin(), ys.end());
-
-            const auto contains = [](const std::vector<RECT>& rects, const LONG x, const LONG y) {
-                return std::ranges::any_of(rects, [&](const RECT& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; });
+            const auto region = allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
+            const RECT rect{
+                .left = (std::min)(x_left, x_right),
+                .top = (std::min)(y_top, y_bottom),
+                .right = (std::max)(x_left, x_right),
+                .bottom = (std::max)(y_top, y_bottom),
             };
+            (void)store_gdi_region(c, region, rect_region(rect));
+            return region;
+        }
 
-            std::vector<RECT> result{};
-            std::vector<std::pair<LONG, LONG>> previous_runs{};
-            size_t previous_band_start = 0;
+        bool set_gdi_region_rect(const syscall_context& c, const handle region, const RECT& rect)
+        {
+            return store_gdi_region(c, static_cast<uint32_t>(region.bits), rect_region(rect)) != RGN_ERROR;
+        }
 
-            for (size_t y = 0; y + 1 < ys.size(); ++y)
+        int32_t handle_NtGdiCombineRgn(const syscall_context& c, const handle destination, const handle first_source,
+                                       const handle second_source, const int32_t mode)
+        {
+            if (mode < RGN_AND || mode > RGN_COPY)
             {
-                std::vector<std::pair<LONG, LONG>> runs{};
-                for (size_t x = 0; x + 1 < xs.size(); ++x)
-                {
-                    if (!inside(contains(first, xs[x], ys[y]), contains(second, xs[x], ys[y])))
-                    {
-                        continue;
-                    }
+                c.win_emu.log.error("Unsupported region combine mode: %d\n", mode);
+                set_guest_last_error(c, k_error_invalid_parameter);
+                return RGN_ERROR;
+            }
 
-                    if (!runs.empty() && runs.back().second == xs[x])
-                    {
-                        runs.back().second = xs[x + 1];
-                    }
-                    else
-                    {
-                        runs.emplace_back(xs[x], xs[x + 1]);
-                    }
-                }
+            const auto first = read_gdi_region(c, static_cast<uint32_t>(first_source.bits));
+            const auto second =
+                mode == RGN_COPY ? std::optional{std::vector<RECT>{}} : read_gdi_region(c, static_cast<uint32_t>(second_source.bits));
+            if (!first || !second)
+            {
+                set_guest_last_error(c, k_error_invalid_handle);
+                return RGN_ERROR;
+            }
 
-                const bool extends_previous_band =
-                    !runs.empty() && runs == previous_runs && previous_band_start < result.size() && result.back().bottom == ys[y];
-                if (extends_previous_band)
-                {
-                    for (size_t i = previous_band_start; i < result.size(); ++i)
-                    {
-                        result[i].bottom = ys[y + 1];
-                    }
-                    continue;
-                }
-
-                previous_band_start = result.size();
-                for (const auto& [left, right] : runs)
-                {
-                    result.push_back(RECT{left, ys[y], right, ys[y + 1]});
-                }
-                previous_runs = std::move(runs);
+            const auto result = store_gdi_region(c, static_cast<uint32_t>(destination.bits), combine_regions(*first, *second, mode));
+            if (result == RGN_ERROR)
+            {
+                set_guest_last_error(c, k_error_invalid_handle);
             }
 
             return result;
         }
 
-        ULONG store_region_rects(const syscall_context& c, const uint32_t region, std::vector<RECT> rects)
-        {
-            uint64_t attr_address = 0;
-            if (!get_gdi_object_address(c, region, k_gdi_region_type, attr_address))
-            {
-                return k_gdi_region_error;
-            }
-
-            gdi_region_attr attr{.attr_flags = k_gdi_region_attr_valid};
-            if (rects.empty())
-            {
-                attr.complexity = k_gdi_null_region;
-            }
-            else
-            {
-                attr.complexity = rects.size() == 1 ? k_gdi_simple_region : k_gdi_complex_region;
-                attr.bounds = rects.front();
-                for (const auto& rect : rects)
-                {
-                    attr.bounds.left = std::min(attr.bounds.left, rect.left);
-                    attr.bounds.top = std::min(attr.bounds.top, rect.top);
-                    attr.bounds.right = std::max(attr.bounds.right, rect.right);
-                    attr.bounds.bottom = std::max(attr.bounds.bottom, rect.bottom);
-                }
-            }
-
-            c.emu.write_memory(attr_address, attr);
-
-            if (attr.complexity == k_gdi_complex_region)
-            {
-                c.proc.gdi_regions[region] = std::move(rects);
-            }
-            else
-            {
-                c.proc.gdi_regions.erase(region);
-            }
-
-            return attr.complexity;
-        }
-
-        uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG x_left, const LONG y_top, const LONG x_right,
-                                           const LONG y_bottom)
-        {
-            const auto region = allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
-
-            const RECT bounds{std::min(x_left, x_right), std::min(y_top, y_bottom), std::max(x_left, x_right), std::max(y_top, y_bottom)};
-            (void)store_region_rects(c, region, rect_is_empty(bounds) ? std::vector<RECT>{} : std::vector<RECT>{bounds});
-            return region;
-        }
-
-        int32_t handle_NtGdiCombineRgn(const syscall_context& c, const handle destination, const handle first, const handle second,
-                                       const int32_t mode)
-        {
-            constexpr int32_t rgn_and = 1;
-            constexpr int32_t rgn_or = 2;
-            constexpr int32_t rgn_xor = 3;
-            constexpr int32_t rgn_diff = 4;
-            constexpr int32_t rgn_copy = 5;
-
-            const auto first_rects = read_region_rects(c, static_cast<uint32_t>(first.bits));
-            const auto second_rects = mode == rgn_copy ? std::optional<std::vector<RECT>>{std::vector<RECT>{}}
-                                                       : read_region_rects(c, static_cast<uint32_t>(second.bits));
-            if (!first_rects || !second_rects)
-            {
-                return k_gdi_region_error;
-            }
-
-            const auto combine = [&](const auto& inside) { return build_banded_region(*first_rects, *second_rects, inside); };
-
-            std::vector<RECT> result{};
-            switch (mode)
-            {
-            case rgn_and:
-                result = combine([](const bool a, const bool b) { return a && b; });
-                break;
-            case rgn_or:
-                result = combine([](const bool a, const bool b) { return a || b; });
-                break;
-            case rgn_xor:
-                result = combine([](const bool a, const bool b) { return a != b; });
-                break;
-            case rgn_diff:
-                result = combine([](const bool a, const bool b) { return a && !b; });
-                break;
-            case rgn_copy:
-                result = combine([](const bool a, const bool /*b*/) { return a; });
-                break;
-            default:
-                return k_gdi_region_error;
-            }
-
-            return static_cast<int32_t>(store_region_rects(c, static_cast<uint32_t>(destination.bits), std::move(result)));
-        }
-
         BOOL handle_NtGdiEqualRgn(const syscall_context& c, const handle first_region, const handle second_region)
         {
-            const auto first = read_region_rects(c, static_cast<uint32_t>(first_region.bits));
-            const auto second = read_region_rects(c, static_cast<uint32_t>(second_region.bits));
+            const auto first = read_gdi_region(c, static_cast<uint32_t>(first_region.bits));
+            const auto second = read_gdi_region(c, static_cast<uint32_t>(second_region.bits));
             if (!first || !second)
             {
                 return FALSE;
             }
 
-            const auto difference = build_banded_region(*first, *second, [](const bool a, const bool b) { return a != b; });
-            return difference.empty() ? TRUE : FALSE;
+            return combine_regions(*first, *second, RGN_XOR).empty() ? TRUE : FALSE;
         }
 
         int32_t handle_NtGdiGetRandomRgn(const syscall_context&, const hdc dc, const uint64_t region, const LONG /*index*/)
@@ -3756,14 +4303,20 @@ namespace sogen
         uint32_t handle_NtGdiGetRegionData(const syscall_context& c, const handle hrgn, const ULONG buffer_size,
                                            const emulator_pointer region_data)
         {
-            const auto rects = read_region_rects(c, static_cast<uint32_t>(hrgn.bits));
+            const auto rects = read_gdi_region(c, static_cast<uint32_t>(hrgn.bits));
             if (!rects)
             {
                 return 0;
             }
 
-            const auto rects_size = static_cast<DWORD>(rects->size() * sizeof(RECT));
-            const DWORD required_size = sizeof(RGNDATAHEADER) + rects_size;
+            const auto rects_bytes = rects->size() * sizeof(RECT);
+            if (rects_bytes > std::numeric_limits<DWORD>::max() - sizeof(RGNDATAHEADER))
+            {
+                return 0;
+            }
+
+            const auto rects_size = static_cast<DWORD>(rects_bytes);
+            const auto required_size = static_cast<DWORD>(sizeof(RGNDATAHEADER) + rects_bytes);
             if (region_data == 0)
             {
                 return required_size;
@@ -3771,6 +4324,7 @@ namespace sogen
 
             if (buffer_size < required_size)
             {
+                set_guest_last_error(c, k_error_invalid_parameter);
                 return 0;
             }
 
@@ -3779,15 +4333,7 @@ namespace sogen
             header.iType = RDH_RECTANGLES;
             header.nCount = static_cast<DWORD>(rects->size());
             header.nRgnSize = rects_size;
-            header.rcBound = rects->empty() ? RECT{} : rects->front();
-            for (const auto& rect : *rects)
-            {
-                header.rcBound.left = std::min(header.rcBound.left, rect.left);
-                header.rcBound.top = std::min(header.rcBound.top, rect.top);
-                header.rcBound.right = std::max(header.rcBound.right, rect.right);
-                header.rcBound.bottom = std::max(header.rcBound.bottom, rect.bottom);
-            }
-
+            header.rcBound = region_bounds(*rects);
             c.emu.write_memory(region_data, &header, sizeof(header));
             if (!rects->empty())
             {
@@ -3941,8 +4487,12 @@ namespace sogen
                 }
             }
 
-            const auto color = get_dc_pen_color(c, dc);
-            draw_line(*surface, dc_state->current_x + origin_x, dc_state->current_y + origin_y, x_end + origin_x, y_end + origin_y, color);
+            if (!is_stock_object_selected(c, dc, k_gdi_dc_attr_hpen_offset, k_stock_null_pen_index))
+            {
+                const auto color = get_dc_pen_color(c, dc);
+                draw_line(*surface, dc_state->current_x + origin_x, dc_state->current_y + origin_y, x_end + origin_x, y_end + origin_y,
+                          color);
+            }
 
             dc_state->current_x = x_end;
             dc_state->current_y = y_end;
@@ -4111,7 +4661,12 @@ namespace sogen
                 }
             }
 
-            const uint32_t pattern = get_dc_brush_color(c, dst_dc);
+            const auto pattern_color = get_dc_brush_color(c, dst_dc);
+            if (!pattern_color && !needs_source && rop3_uses_pattern(rop3))
+            {
+                return TRUE;
+            }
+            const uint32_t pattern = pattern_color.value_or(0xFFFFFFFFu);
 
             for (size_t row = 0; row < blt_height; ++row)
             {
@@ -4188,7 +4743,12 @@ namespace sogen
             const bool flip_src_x = src_width < 0;
             const bool flip_src_y = src_height < 0;
 
-            const uint32_t pattern = get_dc_brush_color(c, dst_dc);
+            const auto pattern_color = get_dc_brush_color(c, dst_dc);
+            if (!pattern_color && !needs_source && rop3_uses_pattern(rop3))
+            {
+                return TRUE;
+            }
+            const uint32_t pattern = pattern_color.value_or(0xFFFFFFFFu);
 
             for (int dy = 0; dy < dst_h; ++dy)
             {
@@ -4249,8 +4809,107 @@ namespace sogen
                                           srccopy, 0);
         }
 
+        // BLENDFUNCTION is passed by value: BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat from the low byte up.
+        BOOL handle_NtGdiAlphaBlend(const syscall_context& c, const hdc dst_dc, const LONG x_dst, const LONG y_dst, const LONG dst_width,
+                                    const LONG dst_height, const hdc src_dc, const LONG x_src, const LONG y_src, const LONG src_width,
+                                    const LONG src_height, const DWORD blend_function, const handle /*color_transform*/)
+        {
+            constexpr uint8_t ac_src_over = 0x00;
+            constexpr uint8_t ac_src_alpha = 0x01;
+
+            if (dst_dc == 0 || src_dc == 0 || dst_width <= 0 || dst_height <= 0 || src_width <= 0 || src_height <= 0 ||
+                (blend_function & 0xFFu) != ac_src_over)
+            {
+                return FALSE;
+            }
+
+            const auto constant_alpha = static_cast<uint32_t>((blend_function >> 16) & 0xFFu);
+            const bool per_pixel_alpha = ((blend_function >> 24) & ac_src_alpha) != 0;
+
+            (void)handle_NtGdiFlush(c);
+
+            int32_t dst_origin_x = 0;
+            int32_t dst_origin_y = 0;
+            uint32_t present_handle = 0;
+            gdi_bitmap_surface* dst_surface = resolve_dc_surface(c, dst_dc, dst_origin_x, dst_origin_y, present_handle);
+            if (!dst_surface || dst_surface->width == 0 || dst_surface->height == 0 || dst_surface->pixels.empty())
+            {
+                return FALSE;
+            }
+
+            int32_t src_origin_x = 0;
+            int32_t src_origin_y = 0;
+            uint32_t unused_present_handle = 0;
+            const gdi_bitmap_surface* src_surface = resolve_dc_surface(c, src_dc, src_origin_x, src_origin_y, unused_present_handle);
+            if (!src_surface || src_surface->width == 0 || src_surface->height == 0 || src_surface->pixels.empty())
+            {
+                return FALSE;
+            }
+
+            // Windows fails rather than clips when the source rectangle leaves the source surface, and when source and
+            // destination overlap on the same surface.
+            const auto src_left = static_cast<int64_t>(x_src) + src_origin_x;
+            const auto src_top = static_cast<int64_t>(y_src) + src_origin_y;
+            if (src_left < 0 || src_top < 0 || src_left + src_width > static_cast<int64_t>(src_surface->width) ||
+                src_top + src_height > static_cast<int64_t>(src_surface->height))
+            {
+                return FALSE;
+            }
+
+            const auto dst_left = static_cast<int64_t>(x_dst) + dst_origin_x;
+            const auto dst_top = static_cast<int64_t>(y_dst) + dst_origin_y;
+            if (src_surface == dst_surface && dst_left < src_left + src_width && src_left < dst_left + dst_width &&
+                dst_top < src_top + src_height && src_top < dst_top + dst_height)
+            {
+                return FALSE;
+            }
+
+            const auto blend_channel = [](const uint32_t src, const uint32_t dst, const int shift, const uint32_t src_weight,
+                                          const uint32_t dst_weight) {
+                const auto s = (src >> shift) & 0xFFu;
+                const auto d = (dst >> shift) & 0xFFu;
+                return std::min<uint32_t>(255, (s * src_weight + d * dst_weight + 127) / 255) << shift;
+            };
+
+            for (LONG dy = 0; dy < dst_height; ++dy)
+            {
+                const auto out_y = dst_top + dy;
+                if (out_y < 0 || out_y >= static_cast<int64_t>(dst_surface->height))
+                {
+                    continue;
+                }
+
+                const auto sy = src_top + (static_cast<int64_t>(dy) * src_height / dst_height);
+                auto* dst_row = dst_surface->pixels.data() + static_cast<size_t>(out_y) * dst_surface->width;
+                const auto* src_row = src_surface->pixels.data() + static_cast<size_t>(sy) * src_surface->width;
+
+                for (LONG dx = 0; dx < dst_width; ++dx)
+                {
+                    const auto out_x = dst_left + dx;
+                    if (out_x < 0 || out_x >= static_cast<int64_t>(dst_surface->width))
+                    {
+                        continue;
+                    }
+
+                    const uint32_t src = src_row[src_left + (static_cast<int64_t>(dx) * src_width / dst_width)];
+                    const uint32_t dst = dst_row[out_x];
+
+                    // With AC_SRC_ALPHA the source is premultiplied.
+                    const auto src_alpha = per_pixel_alpha ? (src >> 24) & 0xFFu : 255u;
+                    const auto dst_weight = 255 - ((src_alpha * constant_alpha + 127) / 255);
+
+                    dst_row[out_x] =
+                        blend_channel(src, dst, 0, constant_alpha, dst_weight) | blend_channel(src, dst, 8, constant_alpha, dst_weight) |
+                        blend_channel(src, dst, 16, constant_alpha, dst_weight) | blend_channel(src, dst, 24, constant_alpha, dst_weight);
+                }
+            }
+
+            present_win_surface(c, present_handle, dst_surface);
+            return TRUE;
+        }
+
         BOOL handle_NtGdiPatBlt(const syscall_context& c, const hdc dc, const LONG x, const LONG y, const LONG width, const LONG height,
-                                const DWORD /*rop*/)
+                                const DWORD rop)
         {
             gdi_dc_state* dc_state = nullptr;
             gdi_bitmap_surface* surface = nullptr;
@@ -4261,12 +4920,24 @@ namespace sogen
                 return FALSE;
             }
 
+            const auto rop3 = static_cast<uint8_t>((rop >> 16) & 0xFFu);
             const auto color = get_dc_brush_color(c, dc);
+            if (!color && rop3_uses_pattern(rop3))
+            {
+                return TRUE;
+            }
+
+            const auto pattern = color.value_or(0);
             for (int yy = 0; yy < height; ++yy)
             {
                 for (int xx = 0; xx < width; ++xx)
                 {
-                    set_surface_pixel(*surface, x + xx + origin_x, y + yy + origin_y, color);
+                    const auto px = x + xx + origin_x;
+                    const auto py = y + yy + origin_y;
+                    if (const auto destination = get_surface_pixel(*surface, px, py))
+                    {
+                        set_surface_pixel(*surface, px, py, apply_rop3(rop3, 0, *destination, pattern) | 0xFF000000u);
+                    }
                 }
             }
             return TRUE;
@@ -4305,9 +4976,12 @@ namespace sogen
                     return FALSE;
                 }
 
-                const auto color = brush != 0 ? get_brush_color(c, static_cast<uint32_t>(brush)) : get_dc_brush_color(c, dc);
-                fill_rect(*surface, rect[0] + origin_x, rect[1] + origin_y, rect[0] + rect[2] + origin_x, rect[1] + rect[3] + origin_y,
-                          color);
+                const auto color = brush != 0 ? get_brush_color_in_dc(c, dc, static_cast<uint32_t>(brush)) : get_dc_brush_color(c, dc);
+                if (color)
+                {
+                    fill_rect(*surface, rect[0] + origin_x, rect[1] + origin_y, rect[0] + rect[2] + origin_x, rect[1] + rect[3] + origin_y,
+                              *color);
+                }
             }
             return TRUE;
         }
@@ -4360,30 +5034,80 @@ namespace sogen
                 c.emu.read_memory(dx, advances.data(), advances.size() * sizeof(uint32_t));
             }
 
+            uint64_t dc_attr = 0;
+            uint32_t text_align = 0;
+            if (get_gdi_object_address(c, static_cast<uint32_t>(dc), k_gdi_dc_type, dc_attr))
+            {
+                c.emu.read_memory(dc_attr + k_gdi_dc_attr_text_align_offset, &text_align, sizeof(text_align));
+            }
+
             const auto color = get_dc_text_color(c, dc);
-            draw_text(*surface, x + origin_x, y + origin_y, glyphs, color, has_rect && (options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr,
-                      advances.empty() ? nullptr : advances.data());
+            const auto* dx_values = advances.empty() ? nullptr : advances.data();
+            const auto top_left = text_top_left(x + origin_x, y + origin_y, text_align, glyphs.size(), dx_values);
+            draw_text(*surface, top_left.x, top_left.y, glyphs, color, has_rect && (options & ETO_CLIPPED) != 0 ? &clip_rect : nullptr,
+                      dx_values);
 
             dc_state->current_x = x + static_cast<int32_t>(count * k_text_cell_width);
             dc_state->current_y = y;
             return TRUE;
         }
 
-        BOOL handle_NtGdiGetRealizationInfo(const syscall_context& c, const hdc dc, const emulator_pointer realization_info,
-                                            const uint64_t /*font*/)
+        // The caller sets the size: 16 bytes for GetFontRealizationInfo, 24 when it also wants the face, and 812 for the
+        // variant that lists the font files. The emulated fonts are raster fonts without font files, so everything after
+        // the common header stays zero.
+        BOOL handle_NtGdiGetRealizationInfo(const syscall_context& c, const hdc dc, const emulator_pointer realization_info)
         {
-            if (dc == 0)
+            struct font_realization_info_header
+            {
+                uint32_t size;
+                uint32_t flags;
+                uint32_t cache_num;
+                uint32_t instance_id;
+            };
+
+            constexpr std::array<uint32_t, 3> supported_sizes{sizeof(font_realization_info_header), 24, 812};
+            constexpr uint32_t realized = 1;
+
+            uint64_t dc_attr = 0;
+            if (dc == 0 || realization_info == 0 || !get_gdi_object_address(c, static_cast<uint32_t>(dc), k_gdi_dc_type, dc_attr))
             {
                 return FALSE;
             }
 
-            if (realization_info != 0)
+            uint32_t size = 0;
+            c.emu.read_memory(realization_info, &size, sizeof(size));
+            if (std::ranges::find(supported_sizes, size) == supported_sizes.end())
             {
-                std::array<uint8_t, 0x20> zeroed{};
-                c.emu.write_memory(realization_info, zeroed.data(), zeroed.size());
+                return FALSE;
             }
 
+            uint32_t font_handle = 0;
+            c.emu.read_memory(dc_attr + k_gdi_dc_attr_font_offset, &font_handle, sizeof(font_handle));
+
+            std::vector<uint8_t> info(size);
+            const font_realization_info_header header{
+                .size = size,
+                .flags = realized,
+                .cache_num = font_handle,
+                .instance_id = font_handle,
+            };
+            std::memcpy(info.data(), &header, sizeof(header));
+
+            c.emu.write_memory(realization_info, info.data(), info.size());
             return TRUE;
+        }
+
+        BOOL handle_NtGdiFontIsLinked(const syscall_context&, const hdc /*dc*/)
+        {
+            return FALSE;
+        }
+
+        // The emulated fonts are raster fonts without TrueType tables, which GetFontData reports with GDI_ERROR.
+        uint32_t handle_NtGdiGetFontData(const syscall_context&, const hdc /*dc*/, const uint32_t /*table*/, const uint32_t /*offset*/,
+                                         const emulator_pointer /*buffer*/, const uint32_t /*size*/)
+        {
+            constexpr uint32_t gdi_error = 0xFFFFFFFF;
+            return gdi_error;
         }
 
         BOOL handle_NtGdiMoveToEx(const syscall_context& c, const hdc dc, const LONG x, const LONG y, const emulator_pointer old_point_ptr)
@@ -4449,7 +5173,7 @@ namespace sogen
             {
                 GDI_HANDLE_ENTRY32 entry32{};
                 entry32.Object = static_cast<uint32_t>(entry.Object & std::numeric_limits<uint32_t>::max());
-                entry32.OwnerValue = entry.Owner.Value;
+                entry32.OwnerValue = entry.Owner;
                 entry32.Unique = entry.Unique;
                 entry32.Type = entry.Type;
                 entry32.Flags = entry.Flags;
@@ -4472,26 +5196,49 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, const hdc dc, const uint32_t object_type)
+        std::optional<uint32_t> get_dc_attr_object_offset(const int32_t object_type)
         {
-            constexpr uint32_t lo_bitmap_type = 0x50000; // GDILoObjType_LO_BITMAP_TYPE
-            constexpr uint32_t lo_font_type = 0xA0000;   // GDILoObjType_LO_FONT_TYPE
-
-            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
-            if (it == c.proc.gdi_dc_states.end())
-            {
-                return 0;
-            }
-
             switch (object_type)
             {
-            case lo_bitmap_type:
-                return it->second.selected_bitmap;
-            case lo_font_type:
-                return it->second.selected_font;
+            case k_gdi_dc_object_font:
+                return k_gdi_dc_attr_font_offset;
+            case k_gdi_dc_object_brush:
+                return k_gdi_dc_attr_hbrush_offset;
+            case k_gdi_dc_object_pen:
+                return k_gdi_dc_attr_hpen_offset;
             default:
+                return std::nullopt;
+            }
+        }
+
+        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, const hdc dc, const int32_t object_type)
+        {
+            if (const auto offset = get_dc_attr_object_offset(object_type))
+            {
+                uint64_t dc_attr = 0;
+                if (!get_gdi_object_address(c, static_cast<uint32_t>(dc), k_gdi_dc_type, dc_attr))
+                {
+                    return 0;
+                }
+
+                uint32_t object = 0;
+                c.win_emu.memory.try_read_memory(dc_attr + *offset, &object, sizeof(object));
+                return object;
+            }
+
+            if (object_type != k_gdi_dc_object_bitmap)
+            {
                 return 0;
             }
+
+            const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (dc_it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            const auto bitmap = dc_it->second.selected_bitmap;
+            return c.proc.gdi_bitmap_surfaces.contains(bitmap) ? bitmap : 0;
         }
 
         BOOL handle_NtGdiUnrealizeObject(const syscall_context& c, const handle h)
@@ -5029,6 +5776,46 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        void complete_warp_sync_command(const syscall_context& c, const uint64_t command_ptr, const UINT32 command_length)
+        {
+            constexpr uint32_t k_sync_magic = 0x434E5953;
+            constexpr uint32_t k_ack_magic = 0x4B415953;
+            constexpr uint32_t k_ack_length = 8;
+            if (command_ptr == 0 || command_length < 24)
+            {
+                return;
+            }
+
+            uint32_t magic{};
+            if (!c.emu.try_read_memory(command_ptr, &magic, sizeof(magic)) || magic != k_sync_magic)
+            {
+                return;
+            }
+
+            // SYNC carries a UM completion event at +8 and an error event at +16. After the KM
+            // consumes the DMA buffer it overwrites the header with a sync-ack (magic + length 8).
+            // Leaving SYNC in place is treated as E_OUTOFMEMORY and the D3D11 device is removed.
+            // Signal only the completion event; the error event is DXGI_ERROR_DEVICE_REMOVED.
+            uint64_t completion{};
+            if (!c.emu.try_read_memory(command_ptr + 8, &completion, sizeof(completion)))
+            {
+                return;
+            }
+
+            uint32_t ack_magic = k_ack_magic;
+            uint32_t ack_length = k_ack_length;
+            if (!c.emu.try_write_memory(command_ptr, &ack_magic, sizeof(ack_magic)))
+            {
+                return;
+            }
+
+            c.emu.try_write_memory(command_ptr + 4, &ack_length, sizeof(ack_length));
+            if (auto* entry = c.proc.events.get(completion))
+            {
+                entry->set_signaled(true);
+            }
+        }
+
         void reserve_dxgk_submission_buffers(const syscall_context& c, const uint32_t command_buffer_size,
                                              const uint32_t allocation_list_count, const uint32_t patch_location_list_count)
         {
@@ -5077,49 +5864,6 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        // The WARP UMD (d3d10warp.dll) talks to the BasicRender kernel driver through tagged command
-        // buffers: { uint32 tag, uint32 size, uint64 args... }. For "SYNC" it passes up to two event
-        // handles that the driver signals once the submission reaches the GPU, and after the render
-        // callback returns it requires the tag to have been rewritten to "SYAK" (UMContext::
-        // FlushAllRenderingTasks); otherwise it fails with E_OUTOFMEMORY and the device is removed.
-        void acknowledge_warp_sync_command(const syscall_context& c, const EMU_D3DKMT_RENDER& render)
-        {
-            constexpr uint32_t warp_sync_tag = 0x434E5953;
-            constexpr uint32_t warp_sync_ack_tag = 0x4B415953;
-
-            struct warp_sync_command
-            {
-                uint32_t tag;
-                uint32_t size;
-                uint64_t events[2];
-            };
-
-            const auto& command_buffer = c.proc.dxgk.command_buffer;
-            if (render.CommandLength < sizeof(warp_sync_command) || command_buffer.address == 0 ||
-                static_cast<uint64_t>(render.CommandOffset) + sizeof(warp_sync_command) > command_buffer.size)
-            {
-                return;
-            }
-
-            const auto command_address = command_buffer.address + render.CommandOffset;
-            auto command = c.emu.read_memory<warp_sync_command>(command_address);
-            if (command.tag != warp_sync_tag)
-            {
-                return;
-            }
-
-            for (const auto event_handle : command.events)
-            {
-                if (auto* e = event_handle ? c.proc.events.get(event_handle) : nullptr)
-                {
-                    e->set_signaled(true);
-                }
-            }
-
-            command.tag = warp_sync_ack_tag;
-            c.emu.write_memory(command_address, command);
-        }
-
         NTSTATUS handle_NtGdiDdDDIRender(const syscall_context& c, const emulator_object<EMU_D3DKMT_RENDER> render_desc)
         {
             if (!render_desc)
@@ -5133,7 +5877,14 @@ namespace sogen
                     dxgk_warn(c, "NtGdiDdDDIRender: Unknown context 0x%X", render.hContext);
                 }
 
-                acknowledge_warp_sync_command(c, render);
+                const auto& command_buffer = c.proc.dxgk.command_buffer;
+                const auto command_offset = static_cast<uint64_t>(render.CommandOffset);
+                const auto command_length = static_cast<uint64_t>(render.CommandLength);
+                if (command_buffer.address != 0 && command_offset <= command_buffer.size &&
+                    command_length <= static_cast<uint64_t>(command_buffer.size) - command_offset)
+                {
+                    complete_warp_sync_command(c, command_buffer.address + command_offset, render.CommandLength);
+                }
 
                 // Clamp the guest-controlled sizes: at least the defaults, but never above the caps above.
                 reserve_dxgk_submission_buffers(
@@ -5247,8 +5998,8 @@ namespace sogen
 
             const size_t descriptor_offset = k_dxgk_open_resource_allocation_private_size;
             write_private(descriptor_offset + 0x00, 2u);
-            write_private(descriptor_offset + 0x04, k_default_width);
-            write_private(descriptor_offset + 0x08, k_default_height);
+            write_private(descriptor_offset + 0x04, c.proc.display_width);
+            write_private(descriptor_offset + 0x08, c.proc.display_height);
             write_private(descriptor_offset + 0x0C, 1u);
             write_private(descriptor_offset + 0x10, 0x57u);
             write_private(descriptor_offset + 0x1C, 1u);
@@ -5331,7 +6082,7 @@ namespace sogen
 
                 params.hResource = c.proc.dxgk.create_resource();
 
-                const auto backing_size = static_cast<uint64_t>(k_default_width) * static_cast<uint64_t>(k_default_height) * 4ull;
+                const auto backing_size = static_cast<uint64_t>(c.proc.display_width) * static_cast<uint64_t>(c.proc.display_height) * 4ull;
                 const auto allocation_private_data = params.pTotalPrivateDriverDataBuffer;
 
                 if (allocation_private_data != 0 &&
@@ -5445,9 +6196,9 @@ namespace sogen
                 }
 
                 const emulator_object<EMU_D3DKMT_DISPLAYMODE> mode{c.emu, params.pModeList};
-                mode.access([](EMU_D3DKMT_DISPLAYMODE& current_mode) {
-                    current_mode.Width = k_default_width;
-                    current_mode.Height = k_default_height;
+                mode.access([&](EMU_D3DKMT_DISPLAYMODE& current_mode) {
+                    current_mode.Width = c.proc.display_width;
+                    current_mode.Height = c.proc.display_height;
                     current_mode.Format = 22;
                     current_mode.IntegerRefreshRate = 60;
                     current_mode.RefreshRate = {.Numerator = 60, .Denominator = 1};
@@ -6274,6 +7025,47 @@ namespace sogen
             }
 
             return STATUS_SUCCESS;
+        }
+
+        COLORREF handle_NtGdiGetNearestColor(const syscall_context&, const hdc, const COLORREF color)
+        {
+            return static_cast<COLORREF>(color & 0x00FFFFFFu);
+        }
+
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context&, const hdc, const emulator_pointer, const uint32_t)
+        {
+            return 0;
+        }
+
+        uint32_t handle_NtGdiGetGlyphIndicesW(const syscall_context& c, const hdc dc, const emulator_pointer text, const int32_t char_count,
+                                              const emulator_pointer glyph_indices, const uint32_t)
+        {
+            constexpr uint32_t gdi_error = 0xFFFFFFFF;
+            constexpr size_t max_glyph_count = 1 << 16;
+            if (dc == 0 || text == 0 || glyph_indices == 0 || char_count < 0 || static_cast<size_t>(char_count) > max_glyph_count)
+            {
+                return gdi_error;
+            }
+
+            std::array<char16_t, 256> characters{};
+            const auto count = static_cast<size_t>(char_count);
+            for (size_t offset = 0; offset < count; offset += characters.size())
+            {
+                const auto chunk_count = std::min(characters.size(), count - offset);
+                const auto byte_count = chunk_count * sizeof(char16_t);
+                if (!c.win_emu.memory.try_read_memory(text + offset * sizeof(char16_t), characters.data(), byte_count) ||
+                    !c.win_emu.memory.try_write_memory(glyph_indices + offset * sizeof(char16_t), characters.data(), byte_count))
+                {
+                    return gdi_error;
+                }
+            }
+
+            return static_cast<uint32_t>(count);
+        }
+
+        BOOL handle_NtGdiPolyPolyDraw()
+        {
+            return TRUE;
         }
     }
 

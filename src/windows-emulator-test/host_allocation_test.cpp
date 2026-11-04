@@ -5,57 +5,51 @@
 #include <optional>
 #include <random>
 #include <stdexcept>
-#include <utility>
 #include <vector>
 
 namespace sogen::test
 {
     namespace
     {
-        // Minimal memory_interface reporting a controllable set of "foreign" host ranges - the ranges a
-        // backend sharing the guest address space with the host process (FEX on Apple Silicon: guest VA ==
-        // host VA) would say the guest must avoid because the host itself already occupies them. Everything
-        // else is an unused stub: the code under test (find_free_host_allocation_base) only ever queries
-        // reserved_host_ranges[_in]; it never maps, reads or writes guest memory (its allocate_memory_raw
-        // calls are all reserve-only).
+        // Stands in for a backend sharing the guest address space with the host process (FEX on Apple
+        // Silicon). Everything the memory_interface base does not need for that is left stubbed: the code
+        // under test only queries reserved_host_ranges[_in] and never touches guest memory.
         class fake_host_memory : public memory_interface
         {
           public:
-            // Foreign host mappings the guest must avoid. Reported by BOTH the full reserved_host_ranges()
-            // scan and the windowed reserved_host_ranges_in() probe - an ordinary foreign occupant.
+            struct guest_address_range
+            {
+                uint64_t address;
+                uint64_t size;
+            };
+
+            // Reported by both the full reserved_host_ranges() scan and the windowed probe.
             std::vector<host_reserved_range> foreign_ranges{};
 
-            // Ranges the windowed reserved_host_ranges_in() probe reports as occupied but the full
-            // reserved_host_ranges() scan deliberately OMITS - a backend may skip ranges it considers
-            // guest-owned rather than foreign in its full scan while its windowed probe still reports
-            // them occupied. This asymmetry is why find_free_host_allocation_base's rescan must include
-            // the windowed reserve_host_memory_ranges_in(pick): a full-only rescan never records these,
-            // so a pick that lands here is re-picked identically every iteration until the retry cap.
+            // Reported only by the windowed probe. A backend may skip ranges it considers guest-owned in
+            // its full scan while its windowed probe still reports them occupied, which is why
+            // find_free_host_allocation_base's rescan also records the rejected pick window - a full-only
+            // rescan would re-pick these identically every iteration.
             std::vector<host_reserved_range> hidden_from_full_scan{};
 
-            // Guest ranges the memory manager claimed/released at the host level - the mechanism a
-            // shared-address-space backend uses to keep reserved-but-uncommitted guest ranges
-            // unavailable to the host's own allocator, and to hand them back once genuinely freed.
+            // A host mapping that lands after the caller's probe: the first claim overlapping it fails, and from then on both
+            // scans report it.
+            std::optional<host_reserved_range> arriving_range{};
+
             std::vector<host_reserved_range> claimed_ranges{};
-            std::vector<host_reserved_range> released_ranges{};
+            std::vector<guest_address_range> released_ranges{};
+            bool requires_host_identity{};
+            std::optional<uint64_t> mapped_host_address{};
+            void* mapped_host_pointer{};
+            std::optional<uint64_t> placement_offset{};
 
-            // Lets a test simulate a foreign host mapping winning the reserve-time claim - the exact
-            // failure mode host_memory_collision otherwise reports via an atomic mach_vm_allocate on
-            // the real FEX/Apple backend.
-            bool fail_next_claim = false;
-
-            bool reserve_guest_address_range(const uint64_t address, const size_t size) override
+            void reserve_guest_address_range(const uint64_t address, const size_t size) override
             {
-                if (this->fail_next_claim)
-                {
-                    this->fail_next_claim = false;
-                    return false;
-                }
+                this->collide_with_arriving_range(address, size);
                 this->claimed_ranges.push_back({.address = address, .size = size});
-                return true;
             }
 
-            void release_guest_address_range(const uint64_t address, const size_t size) override
+            void release_guest_address_range(const uint64_t address, const uint64_t size) override
             {
                 this->released_ranges.push_back({.address = address, .size = size});
             }
@@ -107,12 +101,43 @@ namespace sogen::test
             }
 
           private:
+            void collide_with_arriving_range(const uint64_t address, const size_t size)
+            {
+                if (!this->arriving_range || address >= this->arriving_range->address + this->arriving_range->size ||
+                    this->arriving_range->address >= address + size)
+                {
+                    return;
+                }
+
+                this->foreign_ranges.push_back(*this->arriving_range);
+                this->arriving_range.reset();
+                throw host_memory_collision{};
+            }
+
             void map_mmio(uint64_t, size_t, mmio_read_callback, mmio_write_callback) override
             {
             }
 
-            void map_memory(uint64_t, size_t, memory_permission) override
+            void map_memory(const uint64_t address, const size_t size, memory_permission) override
             {
+                this->collide_with_arriving_range(address, size);
+            }
+
+            bool map_host_memory(const uint64_t address, size_t, void* host_pointer, memory_permission) override
+            {
+                this->mapped_host_address = address;
+                this->mapped_host_pointer = host_pointer;
+                return true;
+            }
+
+            bool host_memory_mapping_requires_identity() const override
+            {
+                return this->requires_host_identity;
+            }
+
+            uint64_t host_placement_address(const uint64_t address) const override
+            {
+                return this->placement_offset ? address + *this->placement_offset : 0;
             }
 
             void unmap_memory(uint64_t, size_t) override
@@ -125,13 +150,8 @@ namespace sogen::test
         };
     }
 
-    // Regression coverage for the module-relocation fallback's host-collision recovery.
-    // map_module_from_data's relocation fallback must route through find_free_host_allocation_base
-    // rather than find_free_allocation_base (sogen's own bookkeeping only): on backends sharing the
-    // guest VA with the host process (FEX on Apple Silicon), any real host allocation can land on a
-    // guest-owned VA, so a bookkeeping-only pick can already be occupied by a foreign host mapping.
-    // find_free_host_allocation_base confirms the pick is actually free at the host level and
-    // re-picks past any foreign occupant; this test exercises that shared helper.
+    // Covers the helper the module-relocation fallback relies on: a bookkeeping-only pick can already
+    // be occupied by a foreign host mapping on backends sharing the guest VA with the host process.
     TEST(HostAllocationTest, FindFreeHostBaseSkipsForeignOccupiedPick)
     {
         fake_host_memory host{};
@@ -140,28 +160,23 @@ namespace sogen::test
         constexpr size_t size = 0x2000;
         constexpr uint64_t start = DEFAULT_ALLOCATION_ADDRESS_64BIT;
 
-        // The address the plain, bookkeeping-only pick hands back.
         const uint64_t naive_base = mm.find_free_allocation_base(size, start);
         ASSERT_NE(naive_base, 0u);
 
-        // A foreign host mapping now occupies exactly that address, invisible to sogen's bookkeeping.
         host.foreign_ranges.push_back({.address = naive_base, .size = size});
 
-        // The plain pick still returns the now-occupied address (it cannot see the foreign mapping)...
+        // The plain pick cannot see the foreign mapping and still returns the occupied address.
         ASSERT_EQ(mm.find_free_allocation_base(size, start), naive_base);
 
-        // ...but the host-aware pick confirms and steps past it.
         const uint64_t host_base = mm.find_free_host_allocation_base(size, start);
         ASSERT_NE(host_base, 0u);
         ASSERT_NE(host_base, naive_base);
         ASSERT_GE(host_base, naive_base + size);
-
-        // The returned base really is clear of every foreign range.
         ASSERT_TRUE(mm.host_window_is_free(host_base, size));
     }
 
-    // With no foreign mappings (the default / independent-address-space backends such as unicorn), the
-    // host-aware pick is identical to the plain one - the fix is a correctness no-op there.
+    // Backends with an independent guest address space report no foreign ranges, so the host-aware pick
+    // must stay a no-op there.
     TEST(HostAllocationTest, FindFreeHostBaseMatchesPlainWhenNoForeignRanges)
     {
         fake_host_memory host{};
@@ -173,12 +188,203 @@ namespace sogen::test
         ASSERT_EQ(mm.find_free_host_allocation_base(size, start), mm.find_free_allocation_base(size, start));
     }
 
-    // find_free_host_allocation_base confirms a pick with the windowed host_window_is_free probe; a
-    // rescan that only used the full reserve_host_memory_ranges() would record nothing new for a range
-    // the full scan omits, so the same occupied pick would be chosen every iteration until the retry
-    // cap and the allocation would fail outright. The rescan therefore also records the just-rejected
-    // pick window via reserve_host_memory_ranges_in, so the next pick steps past a range the full scan
-    // cannot see. hidden_from_full_scan models exactly that range.
+    TEST(HostAllocationTest, FindFreeBaseSkipsDenseReservedRegions)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr uint64_t start = DEFAULT_ALLOCATION_ADDRESS_32BIT;
+        constexpr size_t region_count = 800;
+        constexpr size_t size = 0x1000;
+
+        for (size_t i = 0; i < region_count; ++i)
+        {
+            const auto address = start + i * ALLOCATION_GRANULARITY;
+            ASSERT_TRUE(mm.allocate_memory(address, size, nt_memory_permission{memory_permission::read_write}, true));
+        }
+
+        ASSERT_EQ(mm.find_free_allocation_base(size, start), start + region_count * ALLOCATION_GRANULARITY);
+    }
+
+    TEST(HostAllocationTest, FindFreeBaseMovesPastRegionContainingStart)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr uint64_t base = 0x40000000;
+        constexpr size_t reserved_size = 2 * ALLOCATION_GRANULARITY;
+        ASSERT_TRUE(mm.allocate_memory(base, reserved_size, nt_memory_permission{memory_permission::read_write}, true));
+
+        ASSERT_EQ(mm.find_free_allocation_base(0x1000, base + ALLOCATION_GRANULARITY), base + reserved_size);
+    }
+
+    // The contract the wow64cpu.dll pre-search in map_module_from_data relies on: the start address is
+    // only a hint, so a pick for a 32-bit-reachable module must carry the ceiling explicitly.
+    TEST(HostAllocationTest, FindFreeHostBaseWithBelow4GbCeilingReturnsZeroWhenLowArenaIsFull)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr uint64_t four_gb = 0x100000000ULL;
+        constexpr size_t size = 0x9000;
+        ASSERT_TRUE(mm.allocate_memory(MIN_ALLOCATION_ADDRESS, static_cast<size_t>(four_gb - MIN_ALLOCATION_ADDRESS),
+                                       nt_memory_permission{memory_permission::read_write}, true));
+
+        ASSERT_EQ(mm.find_free_allocation_base(size, DEFAULT_ALLOCATION_ADDRESS_32BIT), four_gb);
+        ASSERT_EQ(mm.find_free_host_allocation_base(size, DEFAULT_ALLOCATION_ADDRESS_32BIT, four_gb - 1), 0u);
+    }
+
+    TEST(HostAllocationTest, AllocateHostMemoryUsesSourceAddressWhenBackendRequiresIdentity)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr size_t size = 0x2000;
+        constexpr uintptr_t address = 0x70000000;
+        host.foreign_ranges.push_back({.address = address, .size = size});
+        host.requires_host_identity = true;
+        mm.reserve_host_memory_ranges();
+
+        ASSERT_EQ(mm.allocate_host_memory(size, reinterpret_cast<void*>(address), memory_permission::read_write), address);
+        ASSERT_EQ(host.mapped_host_address, address);
+        ASSERT_EQ(mm.get_region_kind(address), memory_region_kind::mmio);
+
+        mm.reset_host_memory_ranges();
+        ASSERT_EQ(mm.get_region_kind(address), memory_region_kind::mmio);
+    }
+
+#ifdef __ANDROID__
+    TEST(HostAllocationTest, AllocateHostMemoryUntagsSourceAddressOnAndroid)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr size_t size = 0x2000;
+        constexpr uint64_t address = DEFAULT_ALLOCATION_ADDRESS_64BIT;
+        constexpr uint64_t tag = 0xAB00000000000000;
+        void* const tagged_pointer = reinterpret_cast<void*>(address | tag);
+        host.foreign_ranges.push_back({.address = address, .size = size});
+        host.requires_host_identity = true;
+        mm.reserve_host_memory_ranges();
+
+        ASSERT_EQ(mm.allocate_host_memory(size, tagged_pointer, memory_permission::read_write), address);
+        ASSERT_EQ(host.mapped_host_address, address);
+        ASSERT_EQ(host.mapped_host_pointer, tagged_pointer);
+        ASSERT_EQ(mm.get_region_kind(address), memory_region_kind::mmio);
+    }
+#endif
+
+    TEST(HostAllocationTest, AllocateHostMemoryClaimsBackendSelectedAddress)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr size_t size = 0x2000;
+        const uint64_t address = mm.allocate_host_memory(size, reinterpret_cast<void*>(0x70000000), memory_permission::read_write);
+
+        ASSERT_NE(address, 0u);
+        ASSERT_EQ(host.mapped_host_address, address);
+        ASSERT_EQ(host.claimed_ranges.size(), 1u);
+        ASSERT_EQ(host.claimed_ranges.front().address, address);
+        ASSERT_EQ(host.claimed_ranges.front().size, size);
+    }
+
+    TEST(HostAllocationTest, PlacedHostMemoryNeedsBackendPlacement)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        bool placed = false;
+        ASSERT_EQ(mm.allocate_placed_host_memory(0x2000, memory_permission::read_write, 0x7FFEFFFF,
+                                                 [&](void*) {
+                                                     placed = true;
+                                                     return true;
+                                                 }),
+                  0u);
+        ASSERT_FALSE(placed);
+    }
+
+    TEST(HostAllocationTest, PlacedHostMemoryIsPlacedAtTheHostAddressOfAFreeRangeBelowTheLimit)
+    {
+        fake_host_memory host{};
+        host.placement_offset = 0x100000000000;
+        memory_manager mm{host};
+
+        constexpr size_t size = 0x2000;
+        constexpr uint64_t highest_address = 0x7FFEFFFF;
+        void* placed_at = nullptr;
+        const uint64_t address =
+            mm.allocate_placed_host_memory(size, memory_permission::read_write, highest_address, [&](void* host_address) {
+                placed_at = host_address;
+                return true;
+            });
+
+        ASSERT_NE(address, 0u);
+        ASSERT_LE(address + size - 1, highest_address);
+        ASSERT_EQ(placed_at, reinterpret_cast<void*>(address + *host.placement_offset));
+        ASSERT_EQ(host.mapped_host_address, address);
+        ASSERT_EQ(host.mapped_host_pointer, placed_at);
+        ASSERT_EQ(host.claimed_ranges.size(), 1u);
+        ASSERT_EQ(host.claimed_ranges.front().address, address);
+    }
+
+    TEST(HostAllocationTest, FailedPlacementReleasesTheClaim)
+    {
+        fake_host_memory host{};
+        host.placement_offset = 0;
+        memory_manager mm{host};
+
+        constexpr size_t size = 0x2000;
+        ASSERT_EQ(mm.allocate_placed_host_memory(size, memory_permission::read_write, 0x7FFEFFFF, [](void*) { return false; }), 0u);
+
+        ASSERT_EQ(host.claimed_ranges.size(), 1u);
+        ASSERT_EQ(host.released_ranges.size(), 1u);
+        ASSERT_LE(host.released_ranges.front().address, host.claimed_ranges.front().address);
+        ASSERT_GE(host.released_ranges.front().address + host.released_ranges.front().size, host.claimed_ranges.front().address + size);
+        ASSERT_FALSE(host.mapped_host_address.has_value());
+    }
+
+    TEST(HostAllocationTest, PlacedHostMemoryReachesAboveTwoGigabytesBelowALargeAddressAwareLimit)
+    {
+        fake_host_memory host{};
+        host.placement_offset = 0x100000000000;
+        memory_manager mm{host};
+
+        constexpr uint64_t two_gb = 0x80000000;
+        constexpr size_t size = 0x2000;
+        ASSERT_TRUE(mm.allocate_memory(MIN_ALLOCATION_ADDRESS, static_cast<size_t>(two_gb - MIN_ALLOCATION_ADDRESS),
+                                       nt_memory_permission{memory_permission::read_write}, true));
+
+        const auto place = [](void*) { return true; };
+        ASSERT_EQ(mm.allocate_placed_host_memory(size, memory_permission::read_write, 0x7FFEFFFF, place), 0u);
+
+        const uint64_t address = mm.allocate_placed_host_memory(size, memory_permission::read_write, 0xFFFEFFFF, place);
+        ASSERT_GE(address, two_gb);
+        ASSERT_LE(address + size - 1, 0xFFFEFFFFu);
+    }
+
+    TEST(HostAllocationTest, PlacedHostMemoryIsPlacedAtAGivenFreeAddressOnlyOnce)
+    {
+        fake_host_memory host{};
+        host.placement_offset = 0x100000000000;
+        memory_manager mm{host};
+
+        constexpr uint64_t address = 0x40000000;
+        constexpr size_t size = 0x2000;
+        void* placed_at = nullptr;
+        ASSERT_TRUE(mm.allocate_placed_host_memory_at(address, size, memory_permission::read_write, [&](void* host_address) {
+            placed_at = host_address;
+            return true;
+        }));
+
+        ASSERT_EQ(placed_at, reinterpret_cast<void*>(address + *host.placement_offset));
+        ASSERT_EQ(host.mapped_host_address, address);
+        ASSERT_FALSE(mm.allocate_placed_host_memory_at(address, size, memory_permission::read_write, [](void*) { return true; }));
+    }
+
+    // Pins the windowed half of find_free_host_allocation_base's rescan: for a range the full scan
+    // omits, a full-only rescan records nothing new and the same occupied pick is chosen every
+    // iteration until the retry cap.
     TEST(HostAllocationTest, FindFreeHostBaseStepsPastRangeHiddenFromFullScan)
     {
         fake_host_memory host{};
@@ -190,9 +396,6 @@ namespace sogen::test
         const uint64_t naive_base = mm.find_free_allocation_base(size, start);
         ASSERT_NE(naive_base, 0u);
 
-        // Occupy the naive pick with a range the full reserved_host_ranges() scan never reports (only the
-        // windowed reserved_host_ranges_in() sees it). A full-only rescan would spin on naive_base
-        // forever; the windowed record in the rescan is what lets the pick advance.
         host.hidden_from_full_scan.push_back({.address = naive_base, .size = size});
 
         const uint64_t host_base = mm.find_free_host_allocation_base(size, start);
@@ -201,12 +404,9 @@ namespace sogen::test
         ASSERT_TRUE(mm.host_window_is_free(host_base, size));
     }
 
-    // The complementary need: the rescan must ALSO keep the full reserve_host_memory_ranges(), not just
-    // the windowed record. A large contiguous foreign region at the naive pick - wider than
-    // max_host_reserved_retries picks - can only be cleared in the bounded retry budget if the full scan
-    // records the whole region at once; recording just one pick-sized slice per iteration would exhaust
-    // the retries mid-region and fail. The region here is visible to the full scan and spans far more
-    // than the retry budget could step past one slice at a time.
+    // Pins the other half: a contiguous foreign region wider than the retry budget's worth of picks can
+    // only be cleared if the full scan records the whole region at once, since one pick-sized slice per
+    // iteration would exhaust the retries mid-region.
     TEST(HostAllocationTest, FindFreeHostBaseJumpsPastLargeForeignRegionWithinRetryBudget)
     {
         fake_host_memory host{};
@@ -218,8 +418,6 @@ namespace sogen::test
         const uint64_t naive_base = mm.find_free_allocation_base(size, start);
         ASSERT_NE(naive_base, 0u);
 
-        // A single contiguous foreign region far larger than (retry budget * size) sitting on the naive pick.
-        // Only a full-scan rescan (which records the whole region in one step) can clear it within the bound.
         constexpr size_t large_region = size * 4096;
         host.foreign_ranges.push_back({.address = naive_base, .size = large_region});
 
@@ -229,13 +427,10 @@ namespace sogen::test
         ASSERT_TRUE(mm.host_window_is_free(host_base, size));
     }
 
-    // allocate_mmio may claim an address inside an already-recorded host_reserved range (the KUSD
-    // MMIO page lives inside the __PAGEZERO carve-out on FEX/Apple). Nesting the MMIO entry inside
-    // the host_reserved one would break the pairwise-non-overlap invariant
-    // overlaps_reserved_region's fast path depends on: a query above the small MMIO entry would see
-    // only that entry as its predecessor and miss the much larger host_reserved range still
-    // covering the queried address. The host_reserved coverage must instead be split around the
-    // MMIO hole so every part of it stays visible to overlap queries.
+    // allocate_mmio may claim an address inside a recorded host_reserved range (the KUSD MMIO page lives
+    // inside the __PAGEZERO carve-out on FEX/Apple). If the entries nested, a query above the small MMIO
+    // entry would see only that entry as its predecessor and miss the larger host_reserved range still
+    // covering the queried address, so the coverage must be split around the hole instead.
     TEST(HostAllocationTest, OverlapQuerySeesHostReservedCoverageAroundNestedMmio)
     {
         fake_host_memory host{};
@@ -255,18 +450,39 @@ namespace sogen::test
         ASSERT_EQ(mm.get_region_kind(mmio_base - 1), memory_region_kind::host_reserved);
         ASSERT_EQ(mm.get_region_kind(mmio_base + mmio_size), memory_region_kind::host_reserved);
 
-        // A range inside the host-reserved coverage above the MMIO page must still be reported as
-        // occupied, and the MMIO page itself must remain queryable as its own region.
         ASSERT_TRUE(mm.overlaps_reserved_region(0x80000000, 0x1000));
         ASSERT_TRUE(mm.overlaps_reserved_region(mmio_base, mmio_size));
         ASSERT_TRUE(mm.overlaps_reserved_region(reserved_base, 0x1000));
         ASSERT_FALSE(mm.overlaps_reserved_region(reserved_base + reserved_size, 0x1000));
     }
 
-    // A decommit must keep the guest range claimed at the host level (the range is still
-    // MEM_RESERVE'd - a foreign host allocation landing there would be clobbered by a later
-    // recommit), while a genuine release must hand the claim back. The memory manager signals the
-    // latter via release_guest_address_range with a range covering the freed allocation.
+    // carve_host_reserved_hole drops a host_reserved range's tracking entry wholesale when splitting it,
+    // so it assumes nothing is ever committed inside one. A commit at an explicit base within the range
+    // would populate committed_regions and a later carve would silently orphan that mapping.
+    TEST(HostAllocationTest, CommitIntoHostReservedRegionIsRejected)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr uint64_t reserved_base = 0x70000000;
+        constexpr size_t reserved_size = 0x20000000;
+
+        host.foreign_ranges.push_back({.address = reserved_base, .size = reserved_size});
+        mm.reserve_host_memory_ranges();
+        ASSERT_EQ(mm.get_region_kind(reserved_base), memory_region_kind::host_reserved);
+
+        constexpr uint64_t commit_base = reserved_base + 0x100000;
+        ASSERT_FALSE(mm.commit_memory(commit_base, 0x1000, nt_memory_permission{memory_permission::read_write}));
+
+        const auto& regions = mm.get_reserved_regions();
+        const auto entry = regions.find(reserved_base);
+        ASSERT_NE(entry, regions.end());
+        ASSERT_TRUE(entry->second.committed_regions.empty());
+    }
+
+    // A decommitted range stays MEM_RESERVE'd, so its host claim must persist - a foreign host
+    // allocation landing there would be clobbered by a later recommit. Only a genuine release hands the
+    // claim back.
     TEST(HostAllocationTest, ReleaseNotifiesHostClaimReleaseButDecommitDoesNot)
     {
         fake_host_memory host{};
@@ -289,42 +505,87 @@ namespace sogen::test
         ASSERT_GE(host.released_ranges[0].address + host.released_ranges[0].size, base + size);
     }
 
-    // A fixed-address, reserve-only allocation (MEM_RESERVE without MEM_COMMIT at an explicit or
-    // auto-picked base - the path handle_NtAllocateVirtualMemoryEx always uses) must claim the host
-    // range immediately, exactly like the size-only overload already does - not defer the claim to
-    // whichever later commit_memory call first touches a page. Without this, a reserved-but-uncommitted
-    // range stays invisible to a shared-address-space backend's own host allocator until first commit.
-    TEST(HostAllocationTest, FixedAddressReserveOnlyClaimsHostRangeImmediately)
+    // A reserve-only allocation never reaches map_memory, so the host-level claim is the only thing
+    // keeping the host's own allocator out of the range until the guest commits - and the commit's
+    // MAP_FIXED would clobber whatever landed there meanwhile.
+    TEST(HostAllocationTest, FixedBaseReserveOnlyAllocationClaimsHostRange)
     {
         fake_host_memory host{};
         memory_manager mm{host};
 
-        constexpr uint64_t base = DEFAULT_ALLOCATION_ADDRESS_64BIT;
-        constexpr size_t size = 0x3000;
+        constexpr uint64_t base = 0x40000000;
+        constexpr size_t size = 0x10000;
 
         ASSERT_TRUE(mm.allocate_memory(base, size, nt_memory_permission{memory_permission::read_write}, true));
 
         ASSERT_EQ(host.claimed_ranges.size(), 1u);
         ASSERT_EQ(host.claimed_ranges[0].address, base);
         ASSERT_EQ(host.claimed_ranges[0].size, size);
+
+        ASSERT_TRUE(mm.release_memory(base, 0));
+        ASSERT_EQ(host.released_ranges.size(), 1u);
     }
 
-    // A foreign host mapping winning the reserve-time claim must fail the reservation outright, rather
-    // than silently succeeding at the bookkeeping level while leaving a guest range that can never
-    // actually be committed.
-    TEST(HostAllocationTest, FixedAddressReserveOnlyFailsOnHostClaimCollision)
+    // Exercises reserve_host_memory_ranges_in's existing guard at the top of allocate_memory, not the
+    // reserve-only host claim tested above: a fixed-address request racing a foreign mapping in after
+    // find_free_allocation_base/host_window_is_free confirmed the address free must still fail cleanly.
+    TEST(HostAllocationTest, ForeignMappingArrivingAfterTheProbeFailsTheAllocationWithoutClaiming)
     {
         fake_host_memory host{};
         memory_manager mm{host};
 
-        constexpr uint64_t base = DEFAULT_ALLOCATION_ADDRESS_64BIT;
-        constexpr size_t size = 0x3000;
+        constexpr size_t size = 0x2000;
+        constexpr uint64_t start = DEFAULT_ALLOCATION_ADDRESS_64BIT;
 
-        host.fail_next_claim = true;
+        const uint64_t confirmed_base = mm.find_free_allocation_base(size, start);
+        ASSERT_NE(confirmed_base, 0u);
+        ASSERT_TRUE(mm.host_window_is_free(confirmed_base, size));
 
-        ASSERT_FALSE(mm.allocate_memory(base, size, nt_memory_permission{memory_permission::read_write}, true));
+        host.foreign_ranges.push_back({.address = confirmed_base, .size = size});
+
+        ASSERT_FALSE(mm.allocate_memory(confirmed_base, size, nt_memory_permission{memory_permission::read_write}, true));
         ASSERT_TRUE(host.claimed_ranges.empty());
-        ASSERT_FALSE(mm.overlaps_reserved_region(base, size));
+        ASSERT_EQ(mm.get_region_kind(confirmed_base), memory_region_kind::host_reserved);
+    }
+
+    TEST(HostAllocationTest, AllocationRepicksWhenTheHostClaimCollides)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr size_t size = 0x2000;
+        constexpr uint64_t start = DEFAULT_ALLOCATION_ADDRESS_64BIT;
+
+        const uint64_t first_pick = mm.find_free_allocation_base(size, start);
+        ASSERT_NE(first_pick, 0u);
+        host.arriving_range = host_reserved_range{.address = first_pick, .size = size};
+
+        const uint64_t base = mm.allocate_memory(size, nt_memory_permission{memory_permission::read_write}, false, start);
+
+        ASSERT_NE(base, 0u);
+        ASSERT_GE(base, first_pick + size);
+        ASSERT_EQ(mm.get_region_kind(base), memory_region_kind::private_allocation);
+        ASSERT_EQ(host.claimed_ranges.size(), 1u);
+        ASSERT_EQ(host.claimed_ranges.front().address, base);
+    }
+
+    TEST(HostAllocationTest, FixedAddressAllocationFailsWhenTheHostClaimCollides)
+    {
+        for (const bool reserve_only : {true, false})
+        {
+            SCOPED_TRACE(reserve_only ? "reserve only" : "committed");
+
+            fake_host_memory host{};
+            memory_manager mm{host};
+
+            constexpr uint64_t base = 0x40000000;
+            constexpr size_t size = 0x10000;
+            host.arriving_range = host_reserved_range{.address = base, .size = size};
+
+            ASSERT_FALSE(mm.allocate_memory(base, size, nt_memory_permission{memory_permission::read_write}, reserve_only));
+            ASSERT_EQ(mm.get_region_kind(base), memory_region_kind::free);
+            ASSERT_TRUE(host.claimed_ranges.empty());
+        }
     }
 
     namespace

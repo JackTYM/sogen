@@ -16,7 +16,9 @@ namespace sogen
         std::filesystem::path executable_path{};
         std::filesystem::path emulation_root{};
         std::filesystem::path registry_path{};
-        std::vector<std::pair<windows_path, std::filesystem::path>> path_mappings{};
+        std::vector<std::filesystem::path> registry_files{};
+        filesystem_mode root_mode{default_root_mode};
+        std::vector<mount_spec> mounts{};
         uint32_t vcpu_count{1};
         std::optional<backend_type> backend{};
         std::vector<std::pair<std::string, std::string>> click_dialog_rules{};
@@ -27,6 +29,9 @@ namespace sogen
         bool skip_syscalls{};
         bool reproducible{};
         bool disable_instruction_precision{};
+        network::network_mode network{network::network_mode::offline};
+        bool spoof_gpu_features{};
+        bool elevated{};
         bool offline{};
         std::vector<std::string> reachable_hosts{};
         uint32_t locale_id{};
@@ -57,8 +62,6 @@ namespace sogen
     // True on platforms where a child can genuinely be spawned as a separate host OS process
     // running its own copy of this same binary (POSIX hosts only - not Windows, not Emscripten).
     bool supports_child_process_spawning();
-
-    std::filesystem::path resolve_own_executable_path();
 
     // Forks+execs config.executable_path as a child running in --child-ipc-fd mode, hands it
     // settings/inherited_pipes/inherited_sections over a real socketpair, and blocks (bounded by a

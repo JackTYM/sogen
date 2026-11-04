@@ -3,12 +3,29 @@
 #include "../syscall_utils.hpp"
 #include "wait_trace.hpp"
 #include "../named_objects.hpp"
+#include "../memory_condition_events.hpp"
 
 namespace sogen
 {
 
     namespace syscalls
     {
+        namespace
+        {
+            std::optional<bool> memory_condition_state(const std::u16string_view name)
+            {
+                for (const auto& condition : memory_condition_events)
+                {
+                    if (condition.name == name)
+                    {
+                        return condition.signaled;
+                    }
+                }
+
+                return std::nullopt;
+            }
+        }
+
         NTSTATUS handle_NtSetEvent(const syscall_context& c, const uint64_t handle, const emulator_object<LONG> previous_state)
         {
             if (handle == DBWIN_DATA_READY)
@@ -35,7 +52,7 @@ namespace sogen
             }
 
             entry->set_signaled(true);
-            record_object_signal(make_handle(handle), c.thread().id, "NtSetEvent");
+            record_object_signal(make_handle(handle), c, "NtSetEvent");
 
             if (std::getenv("SOGEN_TRACE_PIPE_IO"))
             {
@@ -57,6 +74,7 @@ namespace sogen
                 }
             }
 
+            c.win_emu.wake_idle_vcpu();
             return STATUS_SUCCESS;
         }
 
@@ -80,7 +98,7 @@ namespace sogen
             entry->set_signaled(true);
 
             const auto event_handle = make_handle(handle);
-            record_object_signal(event_handle, c.thread().id, "NtPulseEvent");
+            record_object_signal(event_handle, c, "NtPulseEvent");
 
             for (auto& thread : c.proc.threads | std::views::values)
             {
@@ -91,6 +109,7 @@ namespace sogen
             }
 
             entry->set_signaled(false);
+            c.win_emu.wake_idle_vcpu();
             return STATUS_SUCCESS;
         }
 
@@ -108,7 +127,7 @@ namespace sogen
                 return STATUS_INVALID_INFO_CLASS;
             }
 
-            if (event_information_length < sizeof(EVENT_BASIC_INFORMATION))
+            if (event_information_length != sizeof(EVENT_BASIC_INFORMATION))
             {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
@@ -156,11 +175,34 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtResetEvent(const syscall_context& c, const handle event_handle, const emulator_object<LONG> previous_state)
+        {
+            if (const auto status = check_handle_type(event_handle, handle_types::event); status != STATUS_SUCCESS)
+            {
+                return status;
+            }
+
+            auto* e = c.proc.events.get(event_handle);
+            if (!e)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            previous_state.write_if_valid(e->is_signaled() ? 1 : 0);
+            e->set_signaled(false);
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtCreateEvent(const syscall_context& c, const emulator_object<handle> event_handle,
                                       const ACCESS_MASK /*desired_access*/,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                       const EVENT_TYPE event_type, const BOOLEAN initial_state)
         {
+            if (event_type != NotificationEvent && event_type != SynchronizationEvent)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             std::u16string name{};
             if (object_attributes)
             {
@@ -205,6 +247,7 @@ namespace sogen
             e.set_signaled(initial_state != FALSE);
             e.state.word(1).store(static_cast<uint64_t>(event_type));
             e.name = std::move(name);
+            e.inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
 
             const auto [handle, stored] = c.proc.events.store_and_get(std::move(e));
             event_handle.write(handle);
@@ -233,12 +276,6 @@ namespace sogen
             if (name == u"Global\\SvcctrlStartEvent_A3752DX")
             {
                 event_handle.write(SVCCTRL_START_EVENT.bits);
-                return STATUS_SUCCESS;
-            }
-
-            if (name == u"\\KernelObjects\\MaximumCommitCondition")
-            {
-                event_handle.write(MAXIMUM_COMMIT_CONDITION.bits);
                 return STATUS_SUCCESS;
             }
 
@@ -279,7 +316,18 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            return STATUS_NOT_FOUND;
+            if (const auto signaled = memory_condition_state(name))
+            {
+                event e{};
+                e.type = NotificationEvent;
+                e.set_signaled(*signaled);
+                e.state.word(1).store(static_cast<uint64_t>(NotificationEvent));
+                e.name = name;
+                event_handle.write(c.proc.events.store(std::move(e)).bits);
+                return STATUS_SUCCESS;
+            }
+
+            return STATUS_OBJECT_NAME_NOT_FOUND;
         }
     }
 

@@ -1,27 +1,26 @@
 #include "std_include.hpp"
 #include "windows_emulator.hpp"
+#include "keyboard_layout.hpp"
 
 #include "cpu_context.hpp"
 
 #include <utils/io.hpp>
-#include <utils/string.hpp>
 #include <utils/timer.hpp>
 #include <utils/finally.hpp>
 #include <utils/lazy_object.hpp>
+#include <utils/string.hpp>
 
 #include "exception_dispatch.hpp"
 #include "apiset/apiset.hpp"
 #include "syscall_dispatcher.hpp"
 #include "guest_function_call.hpp"
 
-#include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
 #include "devices/named_pipe.hpp"
 #include "process_control_server.hpp"
 #include "address_utils.hpp"
 #include "worker_factory_support.hpp"
 #include "window_control.hpp"
-#include "keyboard_layout.hpp"
 
 namespace sogen
 {
@@ -251,7 +250,7 @@ namespace sogen
             return result;
         }
 
-        std::optional<POINT> get_window_origin_relative_to_ancestor(const process_context& process, const hwnd window, const hwnd ancestor)
+        std::optional<POINT> get_client_origin_relative_to_ancestor(const process_context& process, const hwnd window, const hwnd ancestor)
         {
             POINT origin{};
             auto current_handle = window;
@@ -263,8 +262,8 @@ namespace sogen
                     return std::nullopt;
                 }
 
-                origin.x += current->x;
-                origin.y += current->y;
+                origin.x += current->client_x();
+                origin.y += current->client_y();
                 current_handle = current->parent_handle;
             }
 
@@ -325,6 +324,45 @@ namespace sogen
         bool is_key_up_message(const uint32_t message)
         {
             return message == WM_KEYUP || message == WM_SYSKEYUP;
+        }
+
+        constexpr int k_wh_keyboard_ll = 13;
+        constexpr int k_wh_mouse_ll = 14;
+
+        bool is_character_message(const uint32_t message)
+        {
+            return message == WM_CHAR || message == WM_SYSCHAR || message == WM_DEADCHAR || message == WM_SYSDEADCHAR;
+        }
+
+        int low_level_hook_id(const uint32_t message)
+        {
+            switch (message)
+            {
+            case WM_KEYDOWN:
+            case WM_KEYUP:
+            case WM_SYSKEYDOWN:
+            case WM_SYSKEYUP:
+                return k_wh_keyboard_ll;
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_RBUTTONDOWN:
+            case WM_RBUTTONUP:
+            case WM_MBUTTONDOWN:
+            case WM_MBUTTONUP:
+            case WM_XBUTTONDOWN:
+            case WM_XBUTTONUP:
+            case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
+                return k_wh_mouse_ll;
+            default:
+                return 0;
+            }
+        }
+
+        bool is_input_message(const uint32_t message)
+        {
+            return low_level_hook_id(message) != 0 || is_character_message(message) || is_pointer_message(message);
         }
 
         bool is_keyboard_message(const uint32_t message)
@@ -412,6 +450,8 @@ namespace sogen
                 return 0x2A;
             case VK_CONTROL:
                 return 0x1D;
+            case VK_MENU:
+                return 0x38;
             case VK_UP:
                 return 0x48;
             case VK_DOWN:
@@ -465,8 +505,8 @@ namespace sogen
                     // Capture sends every pointer event to the capturing window, even one reported for
                     // another top-level. Translate via screen coordinates (origin relative to the root)
                     // so it works across top-levels; for a child of top_level this is the same offset.
-                    const auto captured_origin = get_window_origin_relative_to_ancestor(process, captured->handle, 0);
-                    const auto top_level_origin = get_window_origin_relative_to_ancestor(process, top_level, 0);
+                    const auto captured_origin = get_client_origin_relative_to_ancestor(process, captured->handle, 0);
+                    const auto top_level_origin = get_client_origin_relative_to_ancestor(process, top_level, 0);
                     if (captured_origin && top_level_origin)
                     {
                         const auto screen_x = top_level_origin->x + x;
@@ -476,7 +516,7 @@ namespace sogen
                 }
                 else
                 {
-                    process.mouse_capture_window = 0;
+                    process.set_mouse_capture(0);
                 }
 
                 return {.window = top_level, .x = x, .y = y};
@@ -502,88 +542,6 @@ namespace sogen
             }
 
             return false;
-        }
-
-        vcpu_context* find_vcpu_running_thread(windows_emulator& win_emu, const emulator_thread& thread);
-
-        // Simulate the WASAPI render engine sogen otherwise lacks. dsound opens its stream event-driven, so its
-        // render thread blocks on a buffer-ready event a real engine signals every period; we signal the events
-        // dsound registered via SetEventHandle (captured in capture_audio_render_event) so it produces, then
-        // advance the shared render section's read cursor at real time. dsound's DirectSound play cursor is the
-        // engine-consumed byte position (control offset +0x18); moving it is what stops MSS's "non-moving
-        // playback cursor" watchdog from continuously resetting the stream and lets MW2 proceed past audio setup.
-        void drive_audio_render_engine(windows_emulator& win_emu)
-        {
-            auto& process = win_emu.process;
-            if (process.audio_render_streams.empty() && process.audio_render_events.empty())
-            {
-                return;
-            }
-
-            // Wake dsound's render thread(s): the buffer-ready event is auto-reset, so a set that no thread is
-            // waiting on is simply consumed by the next wait. Drop handles that no longer resolve to an event.
-            std::erase_if(process.audio_render_events, [&](const handle e) {
-                auto* event = process.events.get(e);
-                if (!event)
-                {
-                    return true;
-                }
-                event->set_signaled(true);
-                return false;
-            });
-
-            constexpr uint64_t bytes_per_second = 44100ULL * 2ULL * 4ULL; // 44100 Hz, 2ch, 32-bit float
-            constexpr uint64_t block_align = 2ULL * 4ULL;
-            constexpr uint64_t write_cursor_offset = 0x10;
-            constexpr uint64_t read_cursor_offset = 0x18;
-            constexpr uint64_t clock_position_offset = 0x98;
-
-            const auto now_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(win_emu.clock().steady_now().time_since_epoch()).count());
-
-            // dsound churns stream setup until playback stabilizes, so a tracked stream's section_object can
-            // genuinely go away (last handle and view both closed) between ticks. The stream's own weak_ptr
-            // is exactly that liveness signal - prune once it stops resolving rather than faulting the
-            // emulator on a stale address.
-            std::erase_if(process.audio_render_streams, [&](auto& stream) {
-                const auto section = stream.section.lock();
-                if (!section || !section->backing || write_cursor_offset + sizeof(uint64_t) > section->backing->size())
-                {
-                    return true; // section gone or never committed -> stop tracking it
-                }
-
-                const auto& backing = *section->backing;
-
-                uint64_t write_cursor = 0;
-                std::memcpy(&write_cursor, backing.data() + write_cursor_offset, sizeof(write_cursor));
-
-                if (write_cursor == 0)
-                {
-                    return false; // dsound has not submitted any audio on this stream yet
-                }
-
-                if (stream.start_time_ns == 0)
-                {
-                    stream.start_time_ns = now_ns; // anchor real-time consumption at first submission
-                }
-
-                const auto elapsed_ns = now_ns - stream.start_time_ns;
-                const auto consumed = std::min<uint64_t>(elapsed_ns * bytes_per_second / 1'000'000'000ULL, write_cursor);
-
-                uint64_t read_cursor = 0;
-                if (read_cursor_offset + sizeof(uint64_t) <= backing.size())
-                {
-                    std::memcpy(&read_cursor, backing.data() + read_cursor_offset, sizeof(read_cursor));
-                }
-
-                if (consumed > read_cursor && clock_position_offset + sizeof(uint64_t) <= backing.size())
-                {
-                    const uint64_t clock = consumed / block_align;
-                    std::memcpy(backing.data() + read_cursor_offset, &consumed, sizeof(consumed));
-                    std::memcpy(backing.data() + clock_position_offset, &clock, sizeof(clock));
-                }
-                return false;
-            });
         }
 
         void dump_threads_periodically(windows_emulator& win_emu)
@@ -659,37 +617,25 @@ namespace sogen
 
         void perform_context_switch_work(windows_emulator& win_emu, vcpu_context& vcpu)
         {
+            win_emu.apply_pending_guest_event_signals();
+
             auto& threads = win_emu.process.threads;
 
             for (auto it = threads.begin(); it != threads.end();)
             {
-                if (!it->second.is_terminated() || it->second.ref_count > 0)
+                auto& thread = it->second;
+                if (!thread.can_be_deleted(&vcpu))
                 {
                     ++it;
                     continue;
                 }
 
-                if (auto* running_on = find_vcpu_running_thread(win_emu, it->second))
+                if (vcpu.active_thread == &thread)
                 {
-                    if (running_on != &vcpu)
-                    {
-                        // Another vCPU still has this thread loaded; it will detach it soon.
-                        ++it;
-                        continue;
-                    }
-
-                    running_on->active_thread = nullptr;
+                    vcpu.active_thread = nullptr;
                 }
 
-                const auto [new_it, deleted] = threads.erase(it);
-                if (!deleted)
-                {
-                    ++it;
-                }
-                else
-                {
-                    it = new_it;
-                }
+                it = threads.erase(it).first;
             }
 
             win_emu.pump_pipe_ipc();
@@ -712,7 +658,6 @@ namespace sogen
                 dev.work(win_emu);
             }
 
-            drive_audio_render_engine(win_emu);
             win_emu.inject_scheduled_input();
         }
 
@@ -733,7 +678,6 @@ namespace sogen
         {
             assert(vcpu.active_thread == &thread);
 
-            auto& emu = vcpu.cpu;
             auto& apcs = thread.pending_apcs;
             if (apcs.empty())
             {
@@ -741,6 +685,7 @@ namespace sogen
             }
 
             thread.setup_if_necessary(vcpu.cpu, win_emu.process);
+            auto& cpu = vcpu.cpu;
 
             win_emu.callbacks.on_generic_activity("APC Dispatch");
 
@@ -755,9 +700,39 @@ namespace sogen
                 // queued -- so any value the guest left in that buffer while the async request was pending
                 // (e.g. reusing it for an intervening synchronous call) is correctly superseded.
                 const auto status32 = static_cast<uint32_t>(next_apx.io_status);
-                emu.write_memory(next_apx.apc_argument2, &status32, sizeof(status32));
-                emu.write_memory(next_apx.apc_argument2 + sizeof(status32), &next_apx.io_information, sizeof(next_apx.io_information));
+                cpu.write_memory(next_apx.apc_argument2, &status32, sizeof(status32));
+                cpu.write_memory(next_apx.apc_argument2 + sizeof(status32), &next_apx.io_information, sizeof(next_apx.io_information));
             }
+
+            if (auto* arm64 = dynamic_cast<arm64_cpu*>(&cpu))
+            {
+                // KiUserApcDispatcher frame: routine, three arguments, flags (bit 0: test alert), then CONTEXT at +0x30.
+                struct
+                {
+                    uint64_t routine{};
+                    std::array<uint64_t, 3> arguments{};
+                    uint32_t flags{};
+                    uint32_t reserved{};
+                    uint64_t padding{};
+                    arm64_context context{};
+                } arm64_layout;
+
+                static_assert(offsetof(decltype(arm64_layout), context) == 0x30);
+
+                arm64_layout.routine = next_apx.apc_routine;
+                arm64_layout.arguments = {next_apx.apc_argument1, next_apx.apc_argument2, next_apx.apc_argument3};
+                arm64_layout.flags = 1;
+                arm64_layout.context.ContextFlags = arm64_context_all;
+                cpu_context::save(*arm64, arm64_layout.context);
+
+                const auto new_sp = align_down(arm64->read_stack_pointer() - sizeof(arm64_layout), 0x10);
+                arm64->write_memory(new_sp, arm64_layout);
+                arm64->reg(arm64_register::sp, new_sp);
+                arm64->reg(arm64_register::pc, win_emu.process.ki_user_apc_dispatcher);
+                return;
+            }
+
+            auto& emu = vcpu.x64_cpu();
 
             struct
             {
@@ -815,14 +790,21 @@ namespace sogen
                 return false;
             }
 
+            if (thread.registers_in_transit || thread.pending_register_accesses != 0)
+            {
+                return false;
+            }
+
             auto& emu = vcpu.cpu;
             auto& context = win_emu.process;
 
             const auto is_ready = thread.is_thread_ready(win_emu);
             const auto has_pending_status = thread.pending_status.has_value();
             const auto can_dispatch_apcs = thread.apc_alertable && !thread.pending_apcs.empty();
+            const auto can_run_message_hook = !is_ready && thread.message_wait_return_register.has_value() &&
+                                              (win_emu.has_low_level_hook_work(thread.id) || thread.has_hooked_message(win_emu));
 
-            if (!is_ready && !force && !can_dispatch_apcs)
+            if (!is_ready && !force && !can_dispatch_apcs && !can_run_message_hook)
             {
                 return false;
             }
@@ -834,12 +816,11 @@ namespace sogen
                 if (active_thread)
                 {
                     win_emu.callbacks.on_thread_switch(*active_thread, thread);
-                    active_thread->save(emu);
                 }
 
-                vcpu.active_thread = &thread;
+                vcpu.set_active_thread(&thread);
 
-                thread.restore(emu);
+                win_emu.transfer_thread_registers(vcpu, active_thread, thread);
             }
 
             const auto is_first_setup = !thread.setup_done;
@@ -849,6 +830,11 @@ namespace sogen
             {
                 thread.mark_as_ready(STATUS_USER_APC);
                 dispatch_next_apc(win_emu, vcpu, thread);
+            }
+            else if (can_run_message_hook)
+            {
+                // The message syscall runs the hook first when it executes again.
+                thread.restart_message_wait(emu, win_emu.abi());
             }
             else if (is_first_setup)
             {
@@ -885,20 +871,23 @@ namespace sogen
         {
             auto& threads = win_emu.process.threads;
 
-            bool after_active = false;
-            for (auto& t : threads | std::views::values)
+            auto resume_at = vcpu.active_thread ? threads.find(*vcpu.active_thread) : threads.end();
+            if (resume_at != threads.end())
             {
-                if (after_active && predicate(t) && switch_to_thread(win_emu, vcpu, t))
+                ++resume_at;
+            }
+
+            for (auto it = resume_at; it != threads.end(); ++it)
+            {
+                if (predicate(it->second) && switch_to_thread(win_emu, vcpu, it->second))
                 {
                     return true;
                 }
-
-                after_active |= &t == vcpu.active_thread;
             }
 
-            for (auto& t : threads | std::views::values)
+            for (auto it = threads.begin(); it != resume_at; ++it)
             {
-                if (predicate(t) && switch_to_thread(win_emu, vcpu, t))
+                if (predicate(it->second) && switch_to_thread(win_emu, vcpu, it->second))
                 {
                     return true;
                 }
@@ -909,19 +898,21 @@ namespace sogen
 
         bool switch_to_next_thread(windows_emulator& win_emu, vcpu_context& vcpu)
         {
+            const scheduler_clock::scope time_scope{win_emu.scheduling_clock()};
             perform_context_switch_work(win_emu, vcpu);
 
             // Windows boosts a thread whose wait is satisfied, so on a uniprocessor it runs ahead of
             // equal-priority threads that were merely preempted. Without that, every hand-off between
             // waiting threads (posted messages, I/O completions) sits behind a CPU-bound thread's whole
             // time slice.
-            if (vcpu.active_thread && vcpu.active_thread->is_waiting() &&
-                switch_to_next_thread_matching(win_emu, vcpu, [](const emulator_thread& t) { return t.is_waiting(); }))
+            const auto prefer_waiting = vcpu.active_thread && vcpu.active_thread->is_waiting();
+            if (prefer_waiting && switch_to_next_thread_matching(win_emu, vcpu, [](const emulator_thread& t) { return t.is_waiting(); }))
             {
                 return true;
             }
 
-            return switch_to_next_thread_matching(win_emu, vcpu, [](const emulator_thread&) { return true; });
+            return switch_to_next_thread_matching(
+                win_emu, vcpu, [prefer_waiting](const emulator_thread& t) { return !prefer_waiting || !t.is_waiting(); });
         }
 
         struct instruction_tick_clock : utils::tick_clock
@@ -956,28 +947,24 @@ namespace sogen
             return std::make_unique<utils::clock>();
         }
 
-        std::unique_ptr<network::dns_lookup> get_dns_lookup(emulator_interfaces& interfaces)
+        std::unique_ptr<network::dns_lookup> get_dns_lookup(emulator_interfaces& interfaces, const network::network_mode mode)
         {
             if (interfaces.dns_lookup)
             {
                 return std::move(interfaces.dns_lookup);
             }
 
-            return std::make_unique<network::dns_lookup>();
+            return network::create_dns_lookup(mode);
         }
 
-        std::unique_ptr<network::socket_factory> get_socket_factory(emulator_interfaces& interfaces)
+        std::unique_ptr<network::socket_factory> get_socket_factory(emulator_interfaces& interfaces, const network::network_mode mode)
         {
             if (interfaces.socket_factory)
             {
                 return std::move(interfaces.socket_factory);
             }
 
-#ifdef OS_EMSCRIPTEN
-            return network::create_static_socket_factory();
-#else
-            return std::make_unique<network::socket_factory>();
-#endif
+            return network::create_socket_factory(mode);
         }
 
         pipe_ipc_message make_window_created_message(const hwnd window, const uint32_t process_id, const uint32_t thread_id)
@@ -1021,6 +1008,16 @@ namespace sogen
             return create_default_crypt_protect_backend(emulation_root);
         }
 
+        std::unique_ptr<console_backend> get_console_backend(emulator_interfaces& interfaces)
+        {
+            if (interfaces.console)
+            {
+                return std::move(interfaces.console);
+            }
+
+            return create_default_console_backend();
+        }
+
         // The guest must see at least as many logical processors as there are vCPUs, otherwise a
         // thread running on a higher-indexed vCPU would report a processor number the guest
         // considers out of range. The configured fake value still wins when it is larger (e.g. the
@@ -1033,7 +1030,44 @@ namespace sogen
         }
     }
 
-    windows_emulator::windows_emulator(std::unique_ptr<x86_64_emulator> emu, application_settings app_settings,
+    PEMachineType get_application_machine(const emulator_settings& settings, application_settings app_settings)
+    {
+        fixup_application_settings(app_settings);
+        const auto& application = app_settings.application;
+
+        const auto root = settings.emulation_root.empty() ? settings.emulation_root : absolute(settings.emulation_root);
+        file_system file_sys{root.empty() ? root : root / "filesys", settings.root_mode, settings.root_layer};
+        for (const auto& mount : settings.mounts)
+        {
+            file_sys.map(mount.guest_path, mount.host_path, mount.mode);
+        }
+
+        const auto detection = pe_architecture_detector::detect_from_file(file_sys, application);
+        if (!detection.is_valid())
+        {
+            throw std::runtime_error("Cannot determine the machine type of " + application.string() + ": " + detection.error_message);
+        }
+
+        return detection.machine;
+    }
+
+    machine_type get_machine_type(const PEMachineType machine)
+    {
+        switch (machine)
+        {
+        case PEMachineType::AMD64:
+        case PEMachineType::ARM64EC:
+        case PEMachineType::I386:
+            return machine_type::x86_64;
+        case PEMachineType::ARM64:
+            return machine_type::arm64;
+        default:
+            throw std::runtime_error("Unsupported executable machine type: 0x" +
+                                     utils::string::to_hex_number(static_cast<uint16_t>(machine)));
+        }
+    }
+
+    windows_emulator::windows_emulator(std::unique_ptr<guest_machine> emu, application_settings app_settings,
                                        const emulator_settings& settings, emulator_callbacks callbacks, emulator_interfaces interfaces)
         : windows_emulator(std::move(emu), settings, std::move(callbacks), std::move(interfaces))
     {
@@ -1041,28 +1075,40 @@ namespace sogen
         this->application_settings_ = std::move(app_settings);
     }
 
-    windows_emulator::windows_emulator(std::unique_ptr<x86_64_emulator> emu, const emulator_settings& settings,
-                                       emulator_callbacks callbacks, emulator_interfaces interfaces)
+    windows_emulator::windows_emulator(std::unique_ptr<guest_machine> emu, const emulator_settings& settings, emulator_callbacks callbacks,
+                                       emulator_interfaces interfaces)
         : emu_(std::move(emu)),
-          clock_(get_clock(interfaces, this->executed_instructions_, settings.use_relative_time)),
-          dns_lookup_(get_dns_lookup(interfaces)),
-          socket_factory_(get_socket_factory(interfaces)),
+          use_native_timestamp_counter_(!interfaces.clock && !settings.use_relative_time &&
+                                        this->emu_->supports_native_timestamp_counter()),
+          clock_(std::make_unique<scheduler_clock>(get_clock(interfaces, this->executed_instructions_, settings.use_relative_time))),
+          network_mode_(settings.network),
+          dns_lookup_(get_dns_lookup(interfaces, settings.network)),
+          socket_factory_(get_socket_factory(interfaces, settings.network)),
           ui_backend_(get_ui_backend(interfaces)),
           audio_backend_(get_audio_backend(interfaces)),
           crypt_protect_backend_(get_crypt_protect_backend(
               interfaces, settings.emulation_root.empty() ? settings.emulation_root : absolute(settings.emulation_root))),
+          process_manager_(interfaces.processes),
+          console_backend_(get_console_backend(interfaces)),
           emulation_root{settings.emulation_root.empty() ? settings.emulation_root : absolute(settings.emulation_root)},
           fake_env(effective_fake_env(settings, static_cast<uint32_t>(this->emu_->vcpu_count()))),
           callbacks(std::move(callbacks)),
-          file_sys(emulation_root.empty() ? emulation_root : emulation_root / "filesys"),
+          file_sys(emulation_root.empty() ? emulation_root : emulation_root / "filesys", settings.root_mode, settings.root_layer),
           memory(*this->emu_),
           registry(settings.load_registry
                        ? registry_manager{emulation_root.empty() ? settings.registry_directory : emulation_root / "registry"}
                        : registry_manager{}),
-          mod_manager(memory, file_sys, this->callbacks),
-          process(*this->emu_, memory, *this->clock_, this->callbacks),
+          mod_manager(memory, file_sys, this->callbacks, guest_architecture_of(*this->emu_)),
+          process(*this->emu_, memory, *this->clock_, this->callbacks, settings.intercept_kusd, guest_architecture_of(*this->emu_)),
           use_relative_time_(settings.use_relative_time),
-          instruction_precision_(settings.use_instruction_precision && this->emu_->supports_instruction_counting()),
+          // Instruction precision runs through a global execution hook; backends that only count instructions
+          // (single-stepping) cannot provide it.
+          instruction_precision_(settings.use_instruction_precision && this->emu_->get_guest_cpu(0).supports_instruction_counting() &&
+                                 this->emu_->supports_global_memory_execution_hooks()),
+          intercept_rdtsc_(settings.intercept_rdtsc),
+          intercept_kusd_(settings.intercept_kusd),
+          spoof_gpu_features_(settings.spoof_gpu_features),
+          elevated_(settings.elevated),
           vcpu_count_(static_cast<uint32_t>(this->emu_->vcpu_count()))
     {
         if (this->vcpu_count_ == 0)
@@ -1092,7 +1138,7 @@ namespace sogen
         this->vcpus_.reserve(this->vcpu_count_);
         for (uint32_t i = 0; i < this->vcpu_count_; ++i)
         {
-            this->vcpus_.push_back(std::make_unique<vcpu_context>(this->emu_->get_cpu(i)));
+            this->vcpus_.push_back(std::make_unique<vcpu_context>(this->emu_->get_guest_cpu(i)));
         }
 
         this->ui_backend_->set_event_sink([this](const ui_event& event) { this->handle_ui_event(event); });
@@ -1109,9 +1155,14 @@ namespace sogen
         }
 #endif
 
-        for (const auto& mapping : settings.path_mappings)
+        for (const auto& mount : settings.mounts)
         {
-            this->file_sys.map(mapping.first, mapping.second);
+            this->file_sys.map(mount.guest_path, mount.host_path, mount.mode);
+        }
+
+        for (auto& mount : interfaces.mounts)
+        {
+            this->file_sys.mount(mount.guest_path, std::move(mount.provider), mount.mode);
         }
 
         for (const auto& mapping : settings.port_mappings)
@@ -1143,7 +1194,7 @@ namespace sogen
 
         this->version.load_from_registry(this->registry, this->log);
 
-        this->mod_manager.map_main_modules(this->emu(), this->application_settings_.application, this->version, context, this->log);
+        this->mod_manager.map_main_modules(this->vcpu(0).cpu, this->application_settings_.application, this->version, context, this->log);
         this->install_section_first_execution_hooks();
         publish_kernel_event(context, u"\\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
         publish_kernel_event(context, u"\\KernelObjects\\SystemErrorPortReady");
@@ -1152,18 +1203,21 @@ namespace sogen
         const auto* ntdll = this->mod_manager.ntdll;
         const auto* win32u = this->mod_manager.win32u;
 
-        const auto apiset_data = apiset::obtain(this->emulation_root);
+        const auto apiset_data =
+            apiset::obtain(this->file_sys.read_file(this->version.get_system_root() / "System32" / "apisetschema.dll"));
 
         this->process.setup(*this, this->application_settings_, *executable, *ntdll, apiset_data, this->mod_manager.wow64_modules_.ntdll32);
 
         const auto ntdll_data = emu.read_memory(ntdll->image_base, static_cast<size_t>(ntdll->size_of_image));
         const auto win32u_data = emu.read_memory(win32u->image_base, static_cast<size_t>(win32u->size_of_image));
 
-        this->dispatcher.setup(ntdll->exports, ntdll_data, win32u->exports, win32u_data);
+        this->dispatcher.setup(ntdll->exports, ntdll_data, win32u->exports, win32u_data, this->abi().syscall_abi());
 
-        const auto main_thread_id = context.create_thread(this->memory, this->mod_manager.executable->entry_point, 0,
+        const auto initial_argument = this->process.is_wow64_process ? this->process.peb32->value() : this->process.peb64.value();
+        const auto main_thread_id = context.create_thread(this->memory, this->mod_manager.executable->entry_point, initial_argument,
                                                           this->mod_manager.executable->size_of_stack_reserve, 0, true);
 
+        const std::scoped_lock lock(this->kernel_lock_);
         switch_to_thread(*this, this->vcpu(0), main_thread_id);
 
         // The desktop window is created in setup() before any thread exists, so its owning thread id
@@ -1486,7 +1540,7 @@ namespace sogen
                 if (message->type == pipe_ipc_message_type::write)
                 {
                     deliver_bytes_to_named_pipe(this->process, message->pipe_name, message->connection_id, message->to_server,
-                                                message->data, nullptr);
+                                                message->data);
                 }
                 else if (message->type == pipe_ipc_message_type::connect)
                 {
@@ -1658,6 +1712,15 @@ namespace sogen
         this->pending_pipe_waits_.erase(begin, end);
     }
 
+    void windows_emulator::unregister_named_pipe_server(const std::u16string_view short_name)
+    {
+        const auto known = this->known_named_pipe_servers_.find(short_name);
+        if (known != this->known_named_pipe_servers_.end())
+        {
+            this->known_named_pipe_servers_.erase(known);
+        }
+    }
+
     bool windows_emulator::is_named_pipe_server_known(const std::u16string_view short_name)
     {
         return this->known_named_pipe_servers_.contains(short_name) || named_objects::is_pipe_server_published(this->process, short_name);
@@ -1710,9 +1773,12 @@ namespace sogen
         }
 
         static thread_local int idle_spin_count = 0;
+        bool woken_by_signal = false;
 
         while (!switch_to_next_thread(*this, vcpu))
         {
+            woken_by_signal = false;
+
             if (sched_diag)
             {
                 ++idle_spin_count;
@@ -1728,13 +1794,17 @@ namespace sogen
                 // vCPU can pick it up once it becomes ready.
                 vcpu.active_thread->save(vcpu.cpu);
                 vcpu.active_thread = nullptr;
+                this->thread_registers_saved_.notify_all();
             }
 
             const auto host_wait_pending = has_pending_host_wait(this->process);
 
+            ++this->idle_vcpus_;
+
             // Idle: nothing is ready. Release the kernel lock while pumping UI events
             // and sleeping so other threads (UI delivery, vCPU workers) can run.
             lock.unlock();
+            this->debugger_.run_pending_tasks(vcpu.cpu.index());
 
             if (this->vcpu_count_ == 1)
             {
@@ -1754,17 +1824,24 @@ namespace sogen
             }
             else
             {
-                // Only timed waits remain; nothing host-side wakes sooner than wall-clock, so don't busy-spin.
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                woken_by_signal = this->wait_for_idle_wakeup(std::chrono::milliseconds(1));
             }
 
+            --this->idle_vcpus_;
             lock.lock();
+
+            this->drain_low_level_input();
 
             if (this->should_stop)
             {
                 vcpu.switch_thread = needed_switch;
                 return false;
             }
+        }
+
+        if (woken_by_signal)
+        {
+            this->wake_idle_vcpu();
         }
 
         if (sched_diag && needed_switch)
@@ -1778,16 +1855,35 @@ namespace sogen
 
     void windows_emulator::vcpu_worker(vcpu_context& vcpu)
     {
+        vcpu.runner = std::this_thread::get_id();
+        const auto clear_runner = utils::finally([&vcpu] { vcpu.runner = std::thread::id{}; });
+
         std::unique_lock lock(this->kernel_lock_);
 
         while (!this->should_stop)
         {
-            if (vcpu.switch_thread || !vcpu.active_thread || !vcpu.thread().is_thread_ready(*this))
+            // Debugger requests run before the scheduling decision, as the single-vCPU loop does: one of them can
+            // suspend a thread, and running them afterwards would let a suspend land on the thread just chosen, which
+            // would then run a quantum even though the debugger was told the suspend succeeded.
+            lock.unlock();
+            this->debugger_.run_pending_tasks(vcpu.cpu.index());
+            lock.lock();
+
+            // A loop rather than a single check: the register transfer of a switch releases the kernel lock, so the
+            // chosen thread can be terminated or suspended before it runs.
+            bool switched = true;
+            while (vcpu.switch_thread || !vcpu.active_thread || !vcpu.thread().is_thread_ready(*this))
             {
-                if (!this->perform_thread_switch(vcpu, lock))
+                switched = this->perform_thread_switch(vcpu, lock);
+                if (!switched)
                 {
                     break;
                 }
+            }
+
+            if (!switched || this->should_stop)
+            {
+                break;
             }
 
             // Guest code executes with the kernel lock released; hook callbacks
@@ -1806,6 +1902,114 @@ namespace sogen
 
         // One vCPU winding down (process exit, fatal error) ends the whole run.
         this->stop();
+    }
+
+    void windows_emulator::transfer_thread_registers(vcpu_context& vcpu, emulator_thread* outgoing, emulator_thread& incoming)
+    {
+        this->kernel_lock_.assert_held();
+
+        if (this->vcpu_count_ == 1)
+        {
+            if (outgoing)
+            {
+                outgoing->save(vcpu.cpu);
+            }
+
+            incoming.restore(vcpu.cpu, this->process.gdt_base);
+            return;
+        }
+
+        if (outgoing)
+        {
+            outgoing->registers_in_transit = true;
+        }
+        incoming.registers_in_transit = true;
+
+        {
+            this->kernel_lock_.unlock();
+            const auto _ = utils::finally([&] {
+                this->kernel_lock_.lock();
+                if (outgoing)
+                {
+                    outgoing->registers_in_transit = false;
+                }
+                incoming.registers_in_transit = false;
+                this->thread_registers_saved_.notify_all();
+            });
+
+            if (outgoing)
+            {
+                outgoing->save(vcpu.cpu);
+            }
+
+            incoming.load_registers(vcpu.cpu);
+        }
+
+        incoming.refresh_execution_context(vcpu.cpu, this->process.gdt_base);
+    }
+
+    bool windows_emulator::wait_for_thread_registers(vcpu_context& vcpu, emulator_thread& thread)
+    {
+        this->kernel_lock_.assert_held();
+
+        const auto loaded_elsewhere = [&]() -> vcpu_context* {
+            auto* owner = find_vcpu_running_thread(*this, thread);
+            return owner && owner != &vcpu && !owner->active_thread_saved ? owner : nullptr;
+        };
+
+        if (!thread.registers_in_transit && !loaded_elsewhere())
+        {
+            return true;
+        }
+
+        const auto was_saved = std::exchange(vcpu.active_thread_saved, true);
+        ++thread.pending_register_accesses;
+        this->thread_registers_saved_.notify_all();
+        const auto _ = utils::finally([&] {
+            vcpu.active_thread_saved = was_saved;
+            --thread.pending_register_accesses;
+            this->wake_idle_vcpu();
+        });
+
+        while (thread.registers_in_transit || loaded_elsewhere())
+        {
+            if (this->should_stop)
+            {
+                return false;
+            }
+
+            if (auto* owner = thread.registers_in_transit ? nullptr : loaded_elsewhere())
+            {
+                owner->switch_thread = true;
+                owner->cpu.stop();
+            }
+
+            // Bounded, so that the kick is repeated: a stop that reaches a vCPU just before it enters guest code is
+            // lost on WHP.
+            auto* dispatch_vcpu = std::exchange(this->dispatch_vcpu_, nullptr);
+            this->thread_registers_saved_.wait_for(this->kernel_lock_, std::chrono::milliseconds(1));
+            this->dispatch_vcpu_ = dispatch_vcpu;
+        }
+
+        return true;
+    }
+
+    bool windows_emulator::save_dispatching_thread(vcpu_context* vcpu)
+    {
+        if (this->vcpu_count_ == 1 || !vcpu || !vcpu->active_thread || vcpu->active_thread_saved)
+        {
+            return false;
+        }
+
+        vcpu->active_thread->save(vcpu->cpu);
+        vcpu->active_thread_saved = true;
+        this->thread_registers_saved_.notify_all();
+        return true;
+    }
+
+    void windows_emulator::reload_dispatching_thread(vcpu_context& vcpu) const
+    {
+        vcpu.thread().restore(vcpu.cpu, this->process.gdt_base);
     }
 
     bool windows_emulator::activate_thread(vcpu_context& vcpu, const uint32_t id)
@@ -1852,7 +2056,7 @@ namespace sogen
 
         if (!thread.callback_stack.empty() && address == this->process.zw_callback_return)
         {
-            thread.callback_return_rax = vcpu.cpu.reg<uint64_t>(x86_register::rax);
+            thread.callback_return_rax = this->abi().return_value(vcpu.cpu);
         }
 
         ++this->executed_instructions_;
@@ -1921,8 +2125,8 @@ namespace sogen
                 {
                     if (address == site.resolved_addr)
                     {
-                        const auto rcx = vcpu.cpu.reg<uint64_t>(x86_register::rcx);
-                        const auto rdx = vcpu.cpu.reg<uint64_t>(x86_register::rdx);
+                        const auto rcx = vcpu.x64_cpu().reg<uint64_t>(x86_register::rcx);
+                        const auto rdx = vcpu.x64_cpu().reg<uint64_t>(x86_register::rdx);
                         fprintf(stderr, "[MOJO_WRITE_PATH] pid=%d guest_pid=%u tid=%u site=%s rip=0x%llx this=0x%llx arg1=0x%llx\n",
                                 ::getpid(), this->process.process_id, thread.id, site.name, static_cast<unsigned long long>(address),
                                 static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rdx));
@@ -2051,7 +2255,10 @@ namespace sogen
             return;
         }
 
-        this->emu().invalidate_code_cache(address, sizeof(int3));
+        for (const auto& vcpu : this->vcpus_)
+        {
+            vcpu->cpu.invalidate_code_cache(address, sizeof(int3));
+        }
 
         this->process.kernelbase_nls_cache_breakpoint_address = address;
         this->process.kernelbase_nls_cache_breakpoint_original_byte = original;
@@ -2067,8 +2274,11 @@ namespace sogen
         this->emu().try_write_memory(this->process.kernelbase_nls_cache_breakpoint_address,
                                      &this->process.kernelbase_nls_cache_breakpoint_original_byte,
                                      sizeof(this->process.kernelbase_nls_cache_breakpoint_original_byte));
-        this->emu().invalidate_code_cache(this->process.kernelbase_nls_cache_breakpoint_address,
-                                          sizeof(this->process.kernelbase_nls_cache_breakpoint_original_byte));
+        for (const auto& vcpu : this->vcpus_)
+        {
+            vcpu->cpu.invalidate_code_cache(this->process.kernelbase_nls_cache_breakpoint_address,
+                                            sizeof(this->process.kernelbase_nls_cache_breakpoint_original_byte));
+        }
         this->process.kernelbase_nls_cache_breakpoint_address = 0;
     }
 
@@ -2088,7 +2298,7 @@ namespace sogen
             return false;
         }
 
-        auto& acting = vcpu.cpu;
+        auto& acting = vcpu.x64_cpu();
         const auto counter_ptr = acting.reg<uint64_t>(x86_register::rcx);
         const auto rsp = acting.read_stack_pointer();
 
@@ -2157,12 +2367,12 @@ namespace sogen
                         this->process.process_id, static_cast<unsigned long long>(address));
                 fflush(stderr);
             }
-            vcpu.cpu.reg(x86_register::rip, address);
+            vcpu.x64_cpu().reg(x86_register::rip, address);
             return true;
         }
 
         this->disarm_kernelbase_nls_cache_breakpoint();
-        vcpu.cpu.reg(x86_register::rip, address);
+        vcpu.x64_cpu().reg(x86_register::rip, address);
 
         if (address == this->process.kernelbase_entry_point)
         {
@@ -2215,7 +2425,7 @@ namespace sogen
         }
 
         this->process.kernelbase_nls_cache_warming = true;
-        invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
+        invoke_guest_function(thread, vcpu.x64_cpu(), this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
 
         if (!this->uses_instruction_precision())
         {
@@ -2353,6 +2563,16 @@ namespace sogen
             {
                 this->install_section_first_execution_hook(mod, i);
             }
+
+            if (this->debugger_saw_process_ && this->reports_module_to_debugger(mod))
+            {
+                this->report_debug_event({
+                    .kind = process_debug_event_kind::load_dll,
+                    .thread_id = this->current_thread().id,
+                    .base_address = mod.image_base,
+                    .path = u16_to_u8(mod.module_path.u16string()),
+                });
+            }
         });
 
         // try_warm_kernelbase_nls_cache relies on uses_instruction_precision()'s host hook to reach
@@ -2401,6 +2621,15 @@ namespace sogen
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
+            if (this->debugger_saw_process_ && this->reports_module_to_debugger(mod))
+            {
+                this->report_debug_event({
+                    .kind = process_debug_event_kind::unload_dll,
+                    .thread_id = this->current_thread().id,
+                    .base_address = mod.image_base,
+                });
+            }
+
             const auto hooks = this->section_first_execution_hooks_.extract(mod.image_base);
             if (hooks)
             {
@@ -2414,7 +2643,199 @@ namespace sogen
             }
         });
 
-        this->emu().hook_instruction(x86_hookable_instructions::syscall, [&](cpu_interface& cpu, uint64_t) {
+        if (auto* x64 = dynamic_cast<x86_64_emulator*>(this->emu_.get()))
+        {
+            this->setup_x64_hooks(*x64);
+        }
+        else if (auto* arm64 = dynamic_cast<arm64_emulator*>(this->emu_.get()))
+        {
+            this->setup_arm64_hooks(*arm64);
+        }
+        else
+        {
+            throw std::runtime_error("Unsupported Windows guest machine: " + this->emu().get_name());
+        }
+
+        this->emu().hook_memory_violation([&](cpu_interface& cpu, const uint64_t address, const size_t size,
+                                              const memory_operation operation, const memory_violation_type type) {
+            const std::scoped_lock lock(this->kernel_lock_);
+            auto& vcpu = this->vcpu(cpu.index());
+            const scoped_dispatch dispatch(*this, vcpu);
+            auto* x64 = dynamic_cast<x86_64_cpu*>(&vcpu.cpu);
+            if (x64 && x64->reg<uint16_t>(x86_register::cs) == 0x33)
+            {
+                // loading gs selector only works in 64-bit mode
+                const auto required_gs_base = vcpu.thread().gs_segment->get_base();
+                const auto actual_gs_base = x64->get_segment_base(x86_register::gs);
+                if (actual_gs_base != required_gs_base)
+                {
+                    x64->set_segment_base(x86_register::gs, required_gs_base);
+                    return memory_violation_continuation::restart;
+                }
+            }
+
+            if (const auto guarded_address = this->memory.find_guard_page_violation_address(address, size, operation))
+            {
+                // The stack_guard tag is set once at thread creation on the specific region sogen
+                // allocated as the thread's terminal guard buffer, but a guest legitimately re-arming
+                // PAGE_GUARD there (e.g. crypt32.dll's InternalVerifyStackAvailable calling the
+                // standard _resetstkoflw()-style recovery idiom after catching STATUS_STACK_OVERFLOW)
+                // goes through the ordinary NtProtectVirtualMemory path, which has no way to restore an
+                // sogen-internal tag. Real Windows re-evaluates "is this within one page of
+                // DeallocationStack" on every fault rather than consuming a one-shot flag, so check the
+                // thread's actual guard-buffer bounds directly as well.
+                auto& thread = vcpu.thread();
+                constexpr uint64_t page_size = 0x1000;
+                const auto deallocation_stack = thread.stack_base - thread.stack_guard_size;
+                const auto within_stack_guard_buffer =
+                    thread.stack_guard_size != 0 && *guarded_address >= deallocation_stack && *guarded_address < thread.stack_base;
+
+                // stack_guard_size is a whole ALLOCATION_GRANULARITY (64 KiB) buffer, not a single
+                // page: real Windows only treats a fault as terminal (STATUS_STACK_OVERFLOW) when it
+                // lands within one page of DeallocationStack (MiCheckForUserStackOverflow); every other
+                // guard-page hit above that is grown silently, with no exception delivered to the guest.
+                const auto at_true_bottom = within_stack_guard_buffer && *guarded_address < deallocation_stack + page_size;
+                const auto guarded_page = page_align_down(*guarded_address, page_size);
+                const auto page_permissions = this->memory.get_region_info(guarded_page).permissions;
+                const auto is_stack_guard = page_permissions.is_stack_guard() || at_true_bottom;
+
+                this->memory.protect_memory(guarded_page, page_size,
+                                            page_permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
+
+                if (within_stack_guard_buffer && !at_true_bottom)
+                {
+                    return memory_violation_continuation::restart;
+                }
+
+                if (is_stack_guard)
+                {
+                    dispatch_stack_overflow(*this, vcpu, *guarded_address, operation);
+                }
+                else
+                {
+                    dispatch_guard_page_violation(*this, vcpu, *guarded_address, operation);
+                }
+            }
+            else
+            {
+                // A fault on a null/near-null address is almost always a call through a null function
+                // pointer (e.g. a Vulkan entry point the shim doesn't implement). Log the caller's
+                // return address so the missing function's call site can be identified.
+                if (x64 && address < 0x1000)
+                {
+                    const auto is_32bit = is_32bit_code_segment(*x64);
+                    const uint64_t sp = is_32bit ? x64->reg<uint32_t>(x86_register::esp) : x64->read_stack_pointer();
+                    uint64_t return_address = 0;
+                    if (x64->try_read_memory(sp, &return_address, is_32bit ? sizeof(uint32_t) : sizeof(uint64_t)))
+                    {
+                        const auto* mod = this->mod_manager.find_by_address(return_address);
+                        this->log.error("Null-pointer call to 0x%llx; caller return address 0x%llx (%s+0x%llx)\n",
+                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(return_address),
+                                        mod ? mod->name.c_str() : "?",
+                                        static_cast<unsigned long long>(mod ? return_address - mod->image_base : return_address));
+                    }
+
+                    if (std::getenv("EMULATOR_NPC_DIAG"))
+                    {
+                        fprintf(stderr,
+                                "[NPC_DIAG] thread_id=%u vcpu_index=%zu sp=0x%llx eax=0x%llx ecx=0x%llx edx=0x%llx ebx=0x%llx "
+                                "ebp=0x%llx esi=0x%llx edi=0x%llx\n",
+                                vcpu.thread().id, cpu.index(), static_cast<unsigned long long>(sp),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::eax)),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::ecx)),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::edx)),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::ebx)),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::ebp)),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::esi)),
+                                static_cast<unsigned long long>(x64->reg<uint32_t>(x86_register::edi)));
+                        for (int off = -16; off <= 32; off += 4)
+                        {
+                            uint32_t slot = 0;
+                            if (x64->try_read_memory(sp + static_cast<int64_t>(off), &slot, sizeof(slot)))
+                            {
+                                fprintf(stderr, "[NPC_DIAG]   [sp%+d] = 0x%08x\n", off, slot);
+                            }
+                        }
+                    }
+                }
+
+                if (x64 && this->callbacks.on_generic_activity)
+                {
+                    const auto& regions = this->memory.get_reserved_regions();
+                    auto next = regions.upper_bound(address);
+                    std::string neighborhood{};
+                    if (next != regions.begin())
+                    {
+                        const auto prev = std::prev(next);
+                        neighborhood += utils::string::va("prev_region=0x%" PRIx64 "+0x%zx kind=%u", prev->first, prev->second.length,
+                                                          static_cast<uint32_t>(prev->second.kind));
+                    }
+                    if (next != regions.end())
+                    {
+                        neighborhood += utils::string::va("%snext_region=0x%" PRIx64 "+0x%zx kind=%u", neighborhood.empty() ? "" : " ",
+                                                          next->first, next->second.length, static_cast<uint32_t>(next->second.kind));
+                    }
+
+                    const auto ebp = x64->reg<uint64_t>(x86_register::rbp);
+                    uint32_t stack_args[3]{};
+                    x64->try_read_memory(ebp + 8, stack_args, sizeof(stack_args));
+
+                    // For a wild ret/call the frame is already popped, so ebp is useless - the smashed
+                    // frame's remnants still sit around esp ([esp-4] = the popped return address,
+                    // [esp..] = the previous frame's arguments), which is what identifies the caller.
+                    const auto esp = x64->reg<uint64_t>(x86_register::rsp);
+                    std::string stack_window{};
+                    for (int64_t offset = -16; offset <= 40; offset += 4)
+                    {
+                        uint32_t slot = 0;
+                        if (x64->try_read_memory(esp + offset, &slot, sizeof(slot)))
+                        {
+                            stack_window += utils::string::va(" %08x", slot);
+                        }
+                        else
+                        {
+                            stack_window += " ????????";
+                        }
+                    }
+
+                    this->callbacks.on_generic_activity(utils::string::va(
+                        "Memory violation context: addr=0x%" PRIx64 " %s ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
+                        " esp=0x%" PRIx64 " stack[esp-16..esp+40]=%s",
+                        address, neighborhood.c_str(), ebp, stack_args[0], stack_args[1], stack_args[2], esp, stack_window.c_str()));
+                }
+
+                this->callbacks.on_memory_violate(address, size, operation, type);
+                dispatch_access_violation(*this, vcpu, address, operation);
+            }
+
+            return memory_violation_continuation::resume;
+        });
+
+        if (this->uses_instruction_precision())
+        {
+            this->emu().hook_memory_execution([&](cpu_interface& cpu, const uint64_t address) {
+                const std::scoped_lock lock(this->kernel_lock_);
+                auto& vcpu = this->vcpu(cpu.index());
+                const scoped_dispatch dispatch(*this, vcpu);
+                this->on_instruction_execution(vcpu, address); //
+            });
+        }
+        else if (!this->emu().get_guest_cpu(0).is_stop_thread_safe())
+        {
+            // The backend cannot be stopped safely from another thread, so the interrupt thread in start()
+            // is not available for time-slicing. Preempt cooperatively from the CPU thread via a basic-block
+            // hook instead.
+            this->emu().hook_basic_block([&](cpu_interface& cpu, const basic_block& block) {
+                const std::scoped_lock lock(this->kernel_lock_);
+                this->on_basic_block_execution(this->vcpu(cpu.index()), block); //
+            });
+        }
+    }
+
+    void windows_emulator::setup_arm64_hooks(arm64_emulator& emu)
+    {
+        // Handlers that move PC rewind it by the SVC size, so skipping the SVC lands on their target.
+        emu.hook_instruction(arm64_hookable_instructions::svc, [&](cpu_interface& cpu, uint64_t) {
             const std::scoped_lock lock(this->kernel_lock_);
             auto& vcpu = this->vcpu(cpu.index());
             const scoped_dispatch dispatch(*this, vcpu);
@@ -2422,51 +2843,159 @@ namespace sogen
             return instruction_hook_continuation::skip_instruction;
         });
 
-        this->emu().hook_instruction(x86_hookable_instructions::rdtscp, [&](cpu_interface& cpu, uint64_t) {
+        emu.hook_instruction(arm64_hookable_instructions::read_counter, [&](cpu_interface& cpu, const uint64_t destination) {
             const std::scoped_lock lock(this->kernel_lock_);
             auto& vcpu = this->vcpu(cpu.index());
             const scoped_dispatch dispatch(*this, vcpu);
-            auto& acting = vcpu.cpu;
-            this->callbacks.on_rdtscp();
-
-            const auto ticks = this->clock_->timestamp_counter();
-            acting.reg(x86_register::rax, static_cast<uint32_t>(ticks));
-            acting.reg(x86_register::rdx, static_cast<uint32_t>(ticks >> 32));
-
-            // Return the IA32_TSC_AUX value in RCX (low 32 bits)
-            auto tsc_aux = 0; // Need to replace this with proper CPUID later
-            acting.reg(x86_register::rcx, tsc_aux);
-
-            return instruction_hook_continuation::skip_instruction;
-        });
-
-        this->emu().hook_instruction(x86_hookable_instructions::rdtsc, [&](cpu_interface& cpu, uint64_t) {
-            const std::scoped_lock lock(this->kernel_lock_);
-            auto& vcpu = this->vcpu(cpu.index());
-            const scoped_dispatch dispatch(*this, vcpu);
-            auto& acting = vcpu.cpu;
             this->callbacks.on_rdtsc();
 
             const auto ticks = this->clock_->timestamp_counter();
-            acting.reg(x86_register::rax, static_cast<uint32_t>(ticks));
-            acting.reg(x86_register::rdx, static_cast<uint32_t>(ticks >> 32));
-
+            dynamic_cast<arm64_cpu&>(vcpu.cpu).reg(static_cast<arm64_register>(destination), ticks);
             return instruction_hook_continuation::skip_instruction;
         });
 
+        emu.hook_interrupt([&](cpu_interface& cpu, const int exception_class) {
+            const std::scoped_lock lock(this->kernel_lock_);
+            auto& vcpu = this->vcpu(cpu.index());
+            const scoped_dispatch dispatch(*this, vcpu);
+            this->callbacks.on_exception();
+
+            switch (static_cast<arm64_exception_class>(exception_class))
+            {
+            case arm64_exception_class::undefined_instruction:
+                this->callbacks.on_suspicious_activity("Illegal instruction");
+                dispatch_illegal_instruction_violation(*this, vcpu);
+                return;
+            case arm64_exception_class::breakpoint_instruction:
+                this->handle_arm64_breakpoint(vcpu);
+                return;
+            case arm64_exception_class::software_step:
+                // The step completed, so it is reported at the next instruction.
+                vcpu.thread().current_ip = vcpu.cpu.read_instruction_pointer();
+                dispatch_single_step(*this, vcpu);
+                return;
+            default:
+                throw std::runtime_error("Unsupported ARM64 guest exception class " + std::to_string(exception_class));
+            }
+        });
+    }
+
+    // Windows on ARM selects the kernel action by the BRK immediate; unassigned immediates are illegal instructions.
+    void windows_emulator::handle_arm64_breakpoint(vcpu_context& vcpu)
+    {
+        auto& cpu = dynamic_cast<arm64_cpu&>(vcpu.cpu);
+        const auto pc = cpu.read_instruction_pointer();
+
+        switch ((cpu.read_memory<uint32_t>(pc) >> 5) & 0xFFFF)
+        {
+        case 0xF000:
+            this->callbacks.on_suspicious_activity("Breakpoint");
+            dispatch_breakpoint(*this, vcpu);
+            return;
+        case 0xF001:
+            dispatch_exception(*this, vcpu, STATUS_ASSERTION_FAILURE, {});
+            return;
+        case 0xF002: {
+            this->callbacks.on_suspicious_activity("DbgPrint");
+            const auto service = cpu.reg(arm64_register::x16);
+            if (service == BREAKPOINT_PRINT || service == BREAKPOINT_LOAD_SYMBOLS || service == BREAKPOINT_UNLOAD_SYMBOLS ||
+                service == BREAKPOINT_COMMAND_STRING)
+            {
+                // ntdll follows the debug service BRK with BRK #0xF000 for an attached debugger to stop on.
+                cpu.reg(arm64_register::pc, pc + 8);
+            }
+            else
+            {
+                dispatch_breakpoint(*this, vcpu);
+            }
+            return;
+        }
+        case 0xF003:
+            this->callbacks.on_fast_fail(cpu.reg<uint32_t>(arm64_register::w0));
+            this->process.exit_status = STATUS_FAIL_FAST_EXCEPTION;
+            this->stop();
+            return;
+        case 0xF004:
+            dispatch_integer_division_by_zero(*this, vcpu);
+            return;
+        default:
+            this->callbacks.on_suspicious_activity("Illegal instruction");
+            dispatch_illegal_instruction_violation(*this, vcpu);
+            return;
+        }
+    }
+
+    void windows_emulator::setup_x64_hooks(x86_64_emulator& emu)
+    {
+        emu.hook_instruction(x86_hookable_instructions::syscall, [&](cpu_interface& cpu, uint64_t) {
+            const std::scoped_lock lock(this->kernel_lock_);
+            auto& vcpu = this->vcpu(cpu.index());
+            const scoped_dispatch dispatch(*this, vcpu);
+            this->dispatcher.dispatch(*this, vcpu);
+            return instruction_hook_continuation::skip_instruction;
+        });
+
+        // rdtsc/rdtscp are intercepted only when timing must stay exact (the analyzer). Otherwise the
+        // guest reads the host TSC natively - the WHP backend serves the exit with the real TSC and no
+        // kernel lock - removing a hot VM-exit path for games.
+        if (this->intercept_rdtsc_ || !this->use_native_timestamp_counter_)
+        {
+            emu.hook_instruction(x86_hookable_instructions::rdtscp, [&](cpu_interface& cpu, uint64_t) {
+                const std::scoped_lock lock(this->kernel_lock_);
+                auto& vcpu = this->vcpu(cpu.index());
+                const scoped_dispatch dispatch(*this, vcpu);
+                auto& acting = vcpu.x64_cpu();
+                this->callbacks.on_rdtscp();
+
+                if (this->use_native_timestamp_counter_)
+                {
+                    return instruction_hook_continuation::run_instruction;
+                }
+
+                const auto ticks = this->clock_->timestamp_counter();
+                acting.reg(x86_register::rax, static_cast<uint32_t>(ticks));
+                acting.reg(x86_register::rdx, static_cast<uint32_t>(ticks >> 32));
+
+                // Return the IA32_TSC_AUX value in RCX (low 32 bits)
+                auto tsc_aux = 0; // Need to replace this with proper CPUID later
+                acting.reg(x86_register::rcx, tsc_aux);
+
+                return instruction_hook_continuation::skip_instruction;
+            });
+
+            emu.hook_instruction(x86_hookable_instructions::rdtsc, [&](cpu_interface& cpu, uint64_t) {
+                const std::scoped_lock lock(this->kernel_lock_);
+                auto& vcpu = this->vcpu(cpu.index());
+                const scoped_dispatch dispatch(*this, vcpu);
+                auto& acting = vcpu.x64_cpu();
+                this->callbacks.on_rdtsc();
+
+                if (this->use_native_timestamp_counter_)
+                {
+                    return instruction_hook_continuation::run_instruction;
+                }
+
+                const auto ticks = this->clock_->timestamp_counter();
+                acting.reg(x86_register::rax, static_cast<uint32_t>(ticks));
+                acting.reg(x86_register::rdx, static_cast<uint32_t>(ticks >> 32));
+
+                return instruction_hook_continuation::skip_instruction;
+            });
+        }
+
         // TODO: Unicorn needs this - This should be handled in the backend
-        this->emu().hook_instruction(x86_hookable_instructions::invalid, [&](cpu_interface& cpu, uint64_t) {
+        emu.hook_instruction(x86_hookable_instructions::invalid, [&](cpu_interface& cpu, uint64_t) {
             const std::scoped_lock lock(this->kernel_lock_);
             // TODO: Unify icicle & unicorn handling
             dispatch_illegal_instruction_violation(*this, this->vcpu(cpu.index()));
             return instruction_hook_continuation::skip_instruction; //
         });
 
-        this->emu().hook_interrupt([&](cpu_interface& cpu, const int interrupt) {
+        emu.hook_interrupt([&](cpu_interface& cpu, const int interrupt) {
             const std::scoped_lock lock(this->kernel_lock_);
             auto& vcpu = this->vcpu(cpu.index());
             const scoped_dispatch dispatch(*this, vcpu);
-            auto& acting = vcpu.cpu;
+            auto& acting = vcpu.x64_cpu();
             this->callbacks.on_exception();
             const auto eflags = acting.reg<uint32_t>(x86_register::eflags);
 
@@ -2541,192 +3070,6 @@ namespace sogen
                 break;
             }
         });
-
-        this->emu().hook_memory_violation([&](cpu_interface& cpu, const uint64_t address, const size_t size,
-                                              const memory_operation operation, const memory_violation_type type) {
-            const std::scoped_lock lock(this->kernel_lock_);
-            auto& vcpu = this->vcpu(cpu.index());
-            const scoped_dispatch dispatch(*this, vcpu);
-            auto& acting = vcpu.cpu;
-            if (acting.reg<uint16_t>(x86_register::cs) == 0x33)
-            {
-                // loading gs selector only works in 64-bit mode
-                const auto required_gs_base = vcpu.thread().gs_segment->get_base();
-                const auto actual_gs_base = acting.get_segment_base(x86_register::gs);
-                if (actual_gs_base != required_gs_base)
-                {
-                    acting.set_segment_base(x86_register::gs, required_gs_base);
-                    return memory_violation_continuation::restart;
-                }
-            }
-
-            auto region = this->memory.get_region_info(address);
-            if (region.permissions.is_guarded())
-            {
-                // The stack_guard tag is set once at thread creation on the specific region sogen
-                // allocated as the thread's terminal guard buffer, but a guest legitimately re-arming
-                // PAGE_GUARD there (e.g. crypt32.dll's InternalVerifyStackAvailable calling the
-                // standard _resetstkoflw()-style recovery idiom after catching STATUS_STACK_OVERFLOW)
-                // goes through the ordinary NtProtectVirtualMemory path, which has no way to restore an
-                // sogen-internal tag and also merges the freshly-reprotected page with the adjacent
-                // already-committed stack region, permanently losing it. Real Windows re-evaluates
-                // "is this within one page of DeallocationStack" on every fault rather than consuming a
-                // one-shot flag, so check the thread's actual guard-buffer bounds directly as well,
-                // instead of relying solely on a tag a legitimate guest re-arm can silently strip.
-                auto& thread = vcpu.thread();
-                constexpr uint64_t page_size = 0x1000;
-                const auto deallocation_stack = thread.stack_base - thread.stack_guard_size;
-                const auto within_stack_guard_buffer =
-                    thread.stack_guard_size != 0 && address >= deallocation_stack && address < thread.stack_base;
-
-                // stack_guard_size is a whole ALLOCATION_GRANULARITY (64 KiB) buffer, not a single
-                // page: real Windows only ever treats a fault as terminal (STATUS_STACK_OVERFLOW) when
-                // it lands within one page of DeallocationStack (MiCheckForUserStackOverflow); every
-                // other guard-page hit above that is grown silently, with zero exception delivered to
-                // the guest. Collapsing the whole buffer into "always terminal" delivered a fatal
-                // STATUS_STACK_OVERFLOW on the very first touch - observed live as a real guest retry
-                // loop (crypt32.dll's InternalVerifyStackAvailable, called repeatedly by its own,
-                // legitimate recursive caller) hitting the identical "no room" verdict every time,
-                // because sogen's model never actually grew, unlike the real Windows behavior the
-                // retry loop's own author relied on.
-                const auto at_true_bottom = within_stack_guard_buffer && address < deallocation_stack + page_size;
-                const auto is_stack_guard = region.permissions.is_stack_guard() || at_true_bottom;
-
-                if (within_stack_guard_buffer && !at_true_bottom)
-                {
-                    const auto touched_page = page_align_down(address, page_size);
-                    this->memory.protect_memory(touched_page, page_size,
-                                                region.permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
-                    return memory_violation_continuation::restart;
-                }
-
-                // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION, matching real
-                // Windows for a guest-requested PAGE_GUARD page, or STATUS_STACK_OVERFLOW once the
-                // fault has genuinely reached the last page before DeallocationStack.
-                this->memory.protect_memory(region.start, region.length,
-                                            region.permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
-
-                if (is_stack_guard)
-                {
-                    dispatch_stack_overflow(*this, vcpu, address, operation);
-                }
-                else
-                {
-                    dispatch_guard_page_violation(*this, vcpu, address, operation);
-                }
-            }
-            else
-            {
-                // A fault on a null/near-null address is almost always a call through a null function
-                // pointer (e.g. a Vulkan entry point the shim doesn't implement). Log the caller's
-                // return address so the missing function's call site can be identified.
-                if (address < 0x1000)
-                {
-                    const auto sp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp));
-                    uint32_t return_address = 0;
-                    if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
-                    {
-                        const auto* mod = this->mod_manager.find_by_address(return_address);
-                        this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
-                                        static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
-                                        mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
-                    }
-
-                    if (std::getenv("EMULATOR_NPC_DIAG"))
-                    {
-                        auto& t = vcpu.thread();
-                        fprintf(stderr,
-                                "[NPC_DIAG] thread_id=%u vcpu_index=%zu sp=0x%x eax=0x%llx ecx=0x%llx edx=0x%llx ebx=0x%llx "
-                                "ebp=0x%llx esi=0x%llx edi=0x%llx\n",
-                                t.id, cpu.index(), sp, static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::eax)),
-                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::ecx)),
-                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::edx)),
-                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::ebx)),
-                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::ebp)),
-                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::esi)),
-                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::edi)));
-                        for (int off = -16; off <= 32; off += 4)
-                        {
-                            uint32_t slot = 0;
-                            if (acting.try_read_memory(static_cast<uint64_t>(sp + off), &slot, sizeof(slot)))
-                            {
-                                fprintf(stderr, "[NPC_DIAG]   [sp%+d] = 0x%08x\n", off, slot);
-                            }
-                        }
-                    }
-                }
-
-                if (this->callbacks.on_generic_activity)
-                {
-                    const auto& regions = this->memory.get_reserved_regions();
-                    auto next = regions.upper_bound(address);
-                    std::string neighborhood{};
-                    if (next != regions.begin())
-                    {
-                        const auto prev = std::prev(next);
-                        neighborhood += utils::string::va("prev_region=0x%" PRIx64 "+0x%zx kind=%u", prev->first, prev->second.length,
-                                                          static_cast<uint32_t>(prev->second.kind));
-                    }
-                    if (next != regions.end())
-                    {
-                        neighborhood += utils::string::va("%snext_region=0x%" PRIx64 "+0x%zx kind=%u", neighborhood.empty() ? "" : " ",
-                                                          next->first, next->second.length, static_cast<uint32_t>(next->second.kind));
-                    }
-
-                    const auto ebp = acting.reg<uint64_t>(x86_register::rbp);
-                    uint32_t stack_args[3]{};
-                    acting.try_read_memory(ebp + 8, stack_args, sizeof(stack_args));
-
-                    // For a wild ret/call the frame is already popped, so ebp is useless - the smashed
-                    // frame's remnants still sit around esp ([esp-4] = the popped return address,
-                    // [esp..] = the previous frame's arguments), which is what identifies the caller.
-                    const auto esp = acting.reg<uint64_t>(x86_register::rsp);
-                    std::string stack_window{};
-                    for (int64_t offset = -16; offset <= 40; offset += 4)
-                    {
-                        uint32_t slot = 0;
-                        if (acting.try_read_memory(esp + offset, &slot, sizeof(slot)))
-                        {
-                            stack_window += utils::string::va(" %08x", slot);
-                        }
-                        else
-                        {
-                            stack_window += " ????????";
-                        }
-                    }
-
-                    this->callbacks.on_generic_activity(utils::string::va(
-                        "Memory violation context: addr=0x%" PRIx64 " %s ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
-                        " esp=0x%" PRIx64 " stack[esp-16..esp+40]=%s",
-                        address, neighborhood.c_str(), ebp, stack_args[0], stack_args[1], stack_args[2], esp, stack_window.c_str()));
-                }
-
-                this->callbacks.on_memory_violate(address, size, operation, type);
-                dispatch_access_violation(*this, vcpu, address, operation);
-            }
-
-            return memory_violation_continuation::resume;
-        });
-
-        if (this->uses_instruction_precision())
-        {
-            this->emu().hook_memory_execution([&](cpu_interface& cpu, const uint64_t address) {
-                const std::scoped_lock lock(this->kernel_lock_);
-                auto& vcpu = this->vcpu(cpu.index());
-                const scoped_dispatch dispatch(*this, vcpu);
-                this->on_instruction_execution(vcpu, address); //
-            });
-        }
-        else if (!this->emu().is_stop_thread_safe())
-        {
-            // The backend cannot be stopped safely from another thread, so the interrupt thread in start()
-            // is not available for time-slicing. Preempt cooperatively from the CPU thread via a basic-block
-            // hook instead.
-            this->emu().hook_basic_block([&](cpu_interface& cpu, const basic_block& block) {
-                const std::scoped_lock lock(this->kernel_lock_);
-                this->on_basic_block_execution(this->vcpu(cpu.index()), block); //
-            });
-        }
     }
 
     void windows_emulator::on_basic_block_execution(vcpu_context& vcpu, const basic_block&)
@@ -2744,12 +3087,120 @@ namespace sogen
         }
     }
 
+    void windows_emulator::attach_debugger()
+    {
+        this->debugger_.attach();
+        this->process.peb64.access([](PEB64& peb) { peb.BeingDebugged = TRUE; });
+        if (this->process.peb32)
+        {
+            this->process.peb32->access([](PEB32& peb) { peb.BeingDebugged = TRUE; });
+        }
+    }
+
+    void windows_emulator::detach_debugger()
+    {
+        this->debugger_.run_on_emulation_thread(*this, [this] {
+            this->process.peb64.access([](PEB64& peb) { peb.BeingDebugged = FALSE; });
+            if (this->process.peb32)
+            {
+                this->process.peb32->access([](PEB32& peb) { peb.BeingDebugged = FALSE; });
+            }
+        });
+        this->debugger_.detach();
+    }
+
+    uint32_t windows_emulator::report_debug_event(process_debug_event event)
+    {
+        return this->debugger_.report(*this, this->active_vcpu().cpu.index(), std::move(event));
+    }
+
+    void windows_emulator::interrupt_for_debugger()
+    {
+        {
+            const std::scoped_lock lock(this->kernel_lock_);
+            auto& vcpu = this->vcpu(0);
+            if (vcpu.cpu.is_stop_thread_safe())
+            {
+                vcpu.switch_thread = true;
+                vcpu.cpu.stop();
+            }
+        }
+
+        this->wake_idle_vcpu();
+    }
+
+    // Only images backed by a file are reported, which leaves out the emulator's own code (the WOW64 heaven gate).
+    // A WOW64 process's 64-bit modules (native ntdll, wow64*.dll) lie above 4GB, out of a 32-bit debugger's reach.
+    bool windows_emulator::reports_module_to_debugger(const mapped_module& mod) const
+    {
+        if (mod.module_path.empty())
+        {
+            return false;
+        }
+
+        return !this->process.is_wow64_process || mod.image_base + mod.size_of_image <= 0x100000000ULL;
+    }
+
+    // Like the kernel at process creation: the image first, then every module mapped before the first instruction.
+    void windows_emulator::report_debugger_process_start()
+    {
+        if (this->debugger_saw_process_ || !this->debugger_.is_attached())
+        {
+            return;
+        }
+
+        const std::scoped_lock lock(this->kernel_lock_);
+        this->debugger_saw_process_ = true;
+
+        const auto thread_id = this->process.initial_thread_id;
+
+        // The debugger reads and writes the initial thread's registers at these events, so it has to be on the vCPU
+        // already, as for its first time slice.
+        auto& vcpu = this->vcpu(0);
+        if (!vcpu.active_thread)
+        {
+            for (auto& thread : this->process.threads | std::views::values)
+            {
+                if (thread.id == thread_id)
+                {
+                    switch_to_thread(*this, vcpu, thread, true);
+                    break;
+                }
+            }
+        }
+        const auto* executable = this->mod_manager.executable;
+        this->report_debug_event({
+            .kind = process_debug_event_kind::create_process,
+            .thread_id = thread_id,
+            .base_address = executable ? executable->image_base : 0,
+            .start_address = executable ? executable->entry_point : 0,
+            .path = executable ? u16_to_u8(executable->module_path.u16string()) : std::string{},
+        });
+
+        for (const auto& mod : this->mod_manager.modules() | std::views::values)
+        {
+            if (&mod != executable && this->reports_module_to_debugger(mod))
+            {
+                this->report_debug_event({
+                    .kind = process_debug_event_kind::load_dll,
+                    .thread_id = thread_id,
+                    .base_address = mod.image_base,
+                    .path = u16_to_u8(mod.module_path.u16string()),
+                });
+            }
+        }
+    }
+
     void windows_emulator::start(size_t count)
     {
         this->should_stop = false;
         this->last_stop_reason_ = stop_reason::none;
         this->last_stop_detail_.clear();
         this->setup_process_if_necessary();
+
+        this->debugger_.begin_emulation();
+        const auto end_debugger_emulation = utils::finally([this] { this->debugger_.end_emulation(); });
+        this->report_debugger_process_start();
 
         if (count > 0 && this->vcpu_count_ > 1)
         {
@@ -2793,9 +3244,11 @@ namespace sogen
             }
         });
 
-        if (!this->uses_instruction_precision() && this->emu().is_stop_thread_safe())
+        const bool preempt_vcpus = !this->uses_instruction_precision() && this->emu().get_guest_cpu(0).is_stop_thread_safe();
+        const bool refresh_kusd = !this->intercept_kusd_;
+        if (preempt_vcpus || refresh_kusd)
         {
-            interrupt_thread = std::thread([&] {
+            interrupt_thread = std::thread([&, preempt_vcpus, refresh_kusd] {
                 while (!this->should_stop)
                 {
                     std::unique_lock lock{interrupt_mutex};
@@ -2803,7 +3256,18 @@ namespace sogen
                         return this->should_stop.load(); //
                     });
 
-                    if (!this->should_stop)
+                    if (this->should_stop)
+                    {
+                        break;
+                    }
+
+                    if (refresh_kusd)
+                    {
+                        const std::scoped_lock kernel_lock(this->kernel_lock_);
+                        this->process.kusd.refresh();
+                    }
+
+                    if (preempt_vcpus)
                     {
                         // Under the kernel lock so this switch_thread/stop() pair can't straddle a vCPU's
                         // own scheduling step: perform_thread_switch consumes switch_thread (exchange to
@@ -2827,6 +3291,7 @@ namespace sogen
 
         if (this->vcpu_count_ > 1)
         {
+            this->ui_backend_->pump_events();
             // One worker thread per vCPU; this thread pumps UI events until the run ends.
             active_workers = this->vcpu_count_;
             workers.reserve(this->vcpu_count_);
@@ -2861,6 +3326,8 @@ namespace sogen
         }
 
         auto& vcpu = this->vcpu(0);
+        vcpu.runner = std::this_thread::get_id();
+        const auto clear_runner = utils::finally([&vcpu] { vcpu.runner = std::thread::id{}; });
 
         std::unique_lock lock(this->kernel_lock_);
 
@@ -2869,6 +3336,7 @@ namespace sogen
             lock.unlock();
             this->ui_backend_->pump_events();
             this->callbacks.on_event_pump();
+            this->debugger_.run_pending_tasks(vcpu.cpu.index());
             lock.lock();
 
             if (vcpu.switch_thread || !vcpu.thread().is_thread_ready(*this))
@@ -2958,10 +3426,395 @@ namespace sogen
                                 this->process.raw_keyboard_target);
     }
 
+    void windows_emulator::set_foreground_window(const hwnd window)
+    {
+        const auto previous = this->process.foreground_window;
+        if (previous == window)
+        {
+            return;
+        }
+
+        this->process.foreground_window = window;
+
+        if (const auto* previous_window = this->process.windows.get(previous))
+        {
+            if (auto* owner = get_thread_by_id(this->process, previous_window->thread_id); owner && owner->active_window == previous)
+            {
+                owner->set_active_window(0);
+            }
+        }
+
+        if (const auto* new_window = this->process.windows.get(window))
+        {
+            if (auto* owner = get_thread_by_id(this->process, new_window->thread_id))
+            {
+                owner->set_active_window(window);
+            }
+        }
+    }
+
     void windows_emulator::handle_ui_event(const ui_event& event)
     {
         const std::scoped_lock lock(this->kernel_lock_);
-        this->deliver_ui_event(event);
+        this->handle_ui_event_locked(event);
+    }
+
+    void windows_emulator::handle_ui_event_locked(const ui_event& event)
+    {
+        this->kernel_lock_.assert_held();
+
+        const auto hook_id = low_level_hook_id(event.message);
+        auto& pending = this->process.pending_low_level_input;
+
+        if (is_character_message(event.message) && this->process.drop_low_level_characters)
+        {
+            return;
+        }
+
+        if (hook_id == k_wh_keyboard_ll)
+        {
+            this->process.drop_low_level_characters = false;
+        }
+
+        std::vector<uint64_t> hooks{};
+        if (hook_id != 0)
+        {
+            for (auto& thread : this->process.threads | std::views::values)
+            {
+                if (thread.is_terminated())
+                {
+                    continue;
+                }
+
+                for (const auto& hook : thread.low_level_hooks)
+                {
+                    if (hook.id == hook_id)
+                    {
+                        hooks.push_back(hook.handle);
+                    }
+                }
+            }
+
+            // The most recently installed hook runs first.
+            std::ranges::sort(hooks, std::greater{});
+        }
+
+        // Input already waiting for hooks keeps everything after it waiting too, so the guest sees it in order.
+        if (hooks.empty() && (pending.empty() || !is_input_message(event.message)))
+        {
+            this->deliver_ui_event(event);
+            return;
+        }
+
+        auto [screen_x, screen_y] = std::pair{this->process.cursor_x, this->process.cursor_y};
+        if (is_pointer_message(event.message) && !is_mouse_wheel_message(event.message))
+        {
+            std::tie(screen_x, screen_y) = this->cursor_after_pointer_event(event);
+        }
+
+        const auto now = this->clock().steady_now();
+        pending.push_back(process_context::low_level_input{
+            .id = this->process.next_low_level_input_id++,
+            .event = event,
+            .screen_x = screen_x,
+            .screen_y = screen_y,
+            .time = static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()),
+            .hooks = std::move(hooks),
+            .waiting_since = now,
+        });
+
+        if (auto* owner = this->drain_low_level_input())
+        {
+            this->wake_thread(*owner);
+        }
+    }
+
+    std::pair<emulator_thread*, const user_low_level_hook*> windows_emulator::find_low_level_hook(const uint64_t handle)
+    {
+        for (auto& thread : this->process.threads | std::views::values)
+        {
+            if (thread.is_terminated())
+            {
+                continue;
+            }
+
+            for (const auto& hook : thread.low_level_hooks)
+            {
+                if (hook.handle == handle)
+                {
+                    return {&thread, &hook};
+                }
+            }
+        }
+
+        return {};
+    }
+
+    // Windows passes input on to the next hook when a low-level hook does not return within LowLevelHooksTimeout, and
+    // ignores the result of a hook that returns later. Since Windows 7 it also silently removes that hook, so a thread
+    // that installs one and never pumps messages delays only the first input, not every one.
+    emulator_thread* windows_emulator::drain_low_level_input()
+    {
+        constexpr auto low_level_hooks_timeout = std::chrono::seconds(1);
+
+        auto& pending = this->process.pending_low_level_input;
+        const auto now = this->clock().steady_now();
+        while (!pending.empty())
+        {
+            auto& front = pending.front();
+            const auto timed_out = now - front.waiting_since > low_level_hooks_timeout;
+            if (front.in_progress && !timed_out)
+            {
+                return nullptr;
+            }
+
+            while (!front.in_progress && !front.hooks.empty() && !this->find_low_level_hook(front.hooks.front()).second)
+            {
+                front.hooks.erase(front.hooks.begin());
+            }
+
+            if (timed_out && !front.hooks.empty())
+            {
+                const auto stalled = front.hooks.front();
+                for (auto& thread : this->process.threads | std::views::values)
+                {
+                    if (std::erase_if(thread.low_level_hooks,
+                                      [stalled](const user_low_level_hook& hook) { return hook.handle == stalled; }) != 0)
+                    {
+                        std::erase(thread.running_low_level_inputs, front.id);
+                    }
+                }
+
+                front.hooks.erase(front.hooks.begin());
+                front.in_progress = false;
+                front.waiting_since = now;
+                continue;
+            }
+
+            if (front.hooks.empty())
+            {
+                const auto event = front.event;
+                pending.erase(pending.begin());
+                if (!pending.empty())
+                {
+                    pending.front().waiting_since = now;
+                }
+
+                this->deliver_ui_event(event);
+                continue;
+            }
+
+            return this->find_low_level_hook(front.hooks.front()).first;
+        }
+
+        return nullptr;
+    }
+
+    std::optional<std::pair<process_context::low_level_input, user_low_level_hook>> windows_emulator::begin_low_level_hook(
+        emulator_thread& thread)
+    {
+        if (!this->has_low_level_hook_work(thread.id))
+        {
+            return std::nullopt;
+        }
+
+        auto& front = this->process.pending_low_level_input.front();
+        front.in_progress = true;
+        front.waiting_since = this->clock().steady_now();
+        thread.running_low_level_inputs.push_back(front.id);
+        return std::pair{front, *this->find_low_level_hook(front.hooks.front()).second};
+    }
+
+    void windows_emulator::finish_low_level_hook(emulator_thread& thread, const bool swallow)
+    {
+        if (thread.running_low_level_inputs.empty())
+        {
+            return;
+        }
+
+        const auto id = thread.running_low_level_inputs.back();
+        thread.running_low_level_inputs.pop_back();
+
+        auto& pending = this->process.pending_low_level_input;
+        if (pending.empty() || !pending.front().in_progress || pending.front().id != id)
+        {
+            return;
+        }
+
+        const auto now = this->clock().steady_now();
+        auto& front = pending.front();
+        front.in_progress = false;
+        front.waiting_since = now;
+        if (swallow)
+        {
+            this->process.drop_low_level_characters = is_key_down_message(front.event.message);
+            pending.erase(pending.begin());
+
+            while (this->process.drop_low_level_characters && !pending.empty() && is_character_message(pending.front().event.message))
+            {
+                pending.erase(pending.begin());
+            }
+
+            if (!pending.empty())
+            {
+                pending.front().waiting_since = now;
+            }
+        }
+        else if (!front.hooks.empty())
+        {
+            front.hooks.erase(front.hooks.begin());
+        }
+
+        if (auto* owner = this->drain_low_level_input())
+        {
+            this->wake_thread(*owner);
+        }
+    }
+
+    bool windows_emulator::has_low_level_hook_work(const uint32_t thread_id)
+    {
+        this->drain_low_level_input();
+
+        const auto& pending = this->process.pending_low_level_input;
+        if (pending.empty() || pending.front().in_progress || pending.front().hooks.empty())
+        {
+            return false;
+        }
+
+        const auto* owner = this->find_low_level_hook(pending.front().hooks.front()).first;
+        return owner && owner->id == thread_id;
+    }
+
+    // Kick the vCPU running the thread so it promptly re-checks its message queue; if the thread is not running on
+    // any vCPU right now, fall back to vCPU 0 to force a reschedule that can pick up the now-ready thread.
+    void windows_emulator::wake_thread(emulator_thread& thread)
+    {
+        auto* running_on = find_vcpu_running_thread(*this, thread);
+        auto& vcpu = running_on ? *running_on : this->vcpu(0);
+        vcpu.switch_thread = true;
+        vcpu.cpu.stop();
+    }
+
+    std::pair<int32_t, int32_t> windows_emulator::cursor_after_pointer_event(const ui_event& event) const
+    {
+        int32_t cursor_x = this->process.cursor_x;
+        int32_t cursor_y = this->process.cursor_y;
+        if (event.relative_motion || event.cursor_target)
+        {
+            if (event.cursor_target)
+            {
+                std::tie(cursor_x, cursor_y) = *event.cursor_target;
+            }
+            else
+            {
+                cursor_x += event.relative_motion->first;
+                cursor_y += event.relative_motion->second;
+            }
+            if (const auto& clip = this->process.cursor_clip)
+            {
+                const auto left = static_cast<int32_t>(clip->left);
+                const auto top = static_cast<int32_t>(clip->top);
+                cursor_x = std::clamp(cursor_x, left, std::max(left, static_cast<int32_t>(clip->right) - 1));
+                cursor_y = std::clamp(cursor_y, top, std::max(top, static_cast<int32_t>(clip->bottom) - 1));
+            }
+        }
+        else if (const auto origin = get_client_origin_relative_to_ancestor(this->process, event.window, 0))
+        {
+            cursor_x = origin->x + point_x(event.lParam);
+            cursor_y = origin->y + point_y(event.lParam);
+        }
+
+        return {cursor_x, cursor_y};
+    }
+
+    void windows_emulator::update_key_state(const ui_event& event)
+    {
+        const auto virtual_key = static_cast<uint8_t>(event.wParam & 0xFF);
+        if (virtual_key == VK_PACKET)
+        {
+            return;
+        }
+
+        const bool down = event.message == WM_KEYDOWN || event.message == WM_SYSKEYDOWN;
+        const auto set = [&](const uint8_t key) {
+            auto& state = this->process.key_state[key];
+            if (down && (state & 0x80) == 0)
+            {
+                this->process.async_key_state[key] = 1;
+                if (key == VK_CAPITAL || key == VK_NUMLOCK || key == VK_SCROLL)
+                {
+                    state ^= 0x01;
+                }
+            }
+            state = static_cast<uint8_t>((down ? 0x80 : 0) | (state & 0x01));
+        };
+
+        const auto side = side_virtual_key(static_cast<uint32_t>(event.wParam & 0xFF), event.lParam);
+        set(side);
+        for (const auto& [generic, left, right] : modifier_sides)
+        {
+            if (side == left || side == right)
+            {
+                const bool any_down = ((this->process.key_state[left] | this->process.key_state[right]) & 0x80) != 0;
+                if (any_down && (this->process.key_state[generic] & 0x80) == 0)
+                {
+                    this->process.async_key_state[generic] = 1;
+                }
+                this->process.key_state[generic] = any_down ? 0x80 : 0;
+            }
+        }
+    }
+
+    ui_event windows_emulator::resolve_injected_event(const ui_event& event) const
+    {
+        if (!event.injected)
+        {
+            return event;
+        }
+
+        auto resolved = event;
+        const auto down = [&](const uint32_t key) { return (this->process.key_state[key] & 0x80) != 0; };
+
+        if (is_keyboard_message(event.message))
+        {
+            const auto virtual_key = static_cast<uint32_t>(event.wParam & 0xFF);
+            const bool up = event.message == WM_KEYUP || event.message == WM_SYSKEYUP;
+            const bool alt = virtual_key == VK_MENU || down(VK_MENU);
+            const bool system_key = (alt || virtual_key == VK_F10) && !down(VK_CONTROL);
+            if (system_key)
+            {
+                resolved.message = up ? WM_SYSKEYUP : WM_SYSKEYDOWN;
+            }
+            else
+            {
+                resolved.message = up ? WM_KEYUP : WM_KEYDOWN;
+            }
+
+            constexpr uint64_t context_bit = 1ull << 29;
+            constexpr uint64_t previous_state_bit = 1ull << 30;
+            resolved.lParam &= ~(context_bit | previous_state_bit);
+            resolved.lParam |= (alt && system_key) ? context_bit : 0;
+            resolved.lParam |=
+                (up || (virtual_key != VK_PACKET && down(side_virtual_key(virtual_key, event.lParam)))) ? previous_state_bit : 0;
+            return resolved;
+        }
+
+        if (is_pointer_message(event.message))
+        {
+            uint64_t flags = 0;
+            for (const auto& [key, flag] :
+                 {std::pair{VK_LBUTTON, MK_LBUTTON}, std::pair{VK_RBUTTON, MK_RBUTTON}, std::pair{VK_SHIFT, MK_SHIFT},
+                  std::pair{VK_CONTROL, MK_CONTROL}, std::pair{VK_MBUTTON, MK_MBUTTON}, std::pair{VK_XBUTTON1, MK_XBUTTON1},
+                  std::pair{VK_XBUTTON2, MK_XBUTTON2}})
+            {
+                const bool pressed =
+                    mouse_button_virtual_key(event.message, event.wParam) == key ? is_mouse_button_down_message(event.message) : down(key);
+                flags |= pressed ? static_cast<uint64_t>(flag) : 0;
+            }
+            resolved.wParam = (event.wParam & 0xFFFF0000) | flags;
+        }
+
+        return resolved;
     }
 
     bool windows_emulator::forward_pointer_input_to_foreign_children(const hwnd parent, const uint32_t message, const uint64_t w_param,
@@ -3294,9 +4147,9 @@ namespace sogen
         }
     }
 
-    void windows_emulator::deliver_ui_event(const ui_event& original_event)
+    void windows_emulator::deliver_ui_event(const ui_event& queued_event)
     {
-        auto event = original_event;
+        auto event = this->resolve_injected_event(queued_event);
         if (is_keyboard_message(event.message) && this->process.focus_window != 0 && this->process.focus_window != event.window)
         {
             const auto focus = this->process.focus_window;
@@ -3313,6 +4166,19 @@ namespace sogen
             }
         }
 
+        if (event.message == WM_SIZE)
+        {
+            this->resize_window_from_host(event.window, event.wParam == SIZE_MAXIMIZED, point_x(event.lParam), point_y(event.lParam));
+            return;
+        }
+
+        if (event.message == WM_MOVE)
+        {
+            const auto [x, y] = event.host_position.value_or(std::pair{point_x(event.lParam), point_y(event.lParam)});
+            this->move_window_from_host(event.window, x, y);
+            return;
+        }
+
         const auto* win = this->process.windows.get(event.window);
         if (!win)
         {
@@ -3325,22 +4191,44 @@ namespace sogen
             return;
         }
 
+        const auto previous_foreground = this->process.foreground_window;
+
         msg m{};
         m.window = event.window;
         m.message = event.message;
         m.wParam = event.wParam;
         m.lParam = event.lParam;
 
+        if (event.injected && is_keyboard_message(event.message) && thread->focus_window != 0)
+        {
+            if (const auto* focus = this->process.windows.get(thread->focus_window); focus && focus->thread_id == win->thread_id)
+            {
+                m.window = thread->focus_window;
+            }
+        }
+
         if (is_pointer_message(event.message))
         {
-            // Track the cursor in screen coordinates (top-level window origin + window-local position) so
-            // GetCursorPos reflects it, and treat the window the user is pointing at as the foreground one.
-            int32_t new_cursor_x = this->process.cursor_x;
-            int32_t new_cursor_y = this->process.cursor_y;
-            if (const auto origin = get_window_origin_relative_to_ancestor(this->process, event.window, 0))
+            // Track the cursor in screen coordinates (client origin + client-local position) so GetCursorPos
+            // reflects it, and treat the window the user is pointing at as the foreground one.
+            const auto origin = get_client_origin_relative_to_ancestor(this->process, event.window, 0);
+            auto l_param = event.lParam;
+            const auto [new_cursor_x, new_cursor_y] = this->cursor_after_pointer_event(event);
+            int32_t raw_dx = new_cursor_x - this->process.cursor_x;
+            int32_t raw_dy = new_cursor_y - this->process.cursor_y;
+            if (event.relative_motion || event.cursor_target)
             {
-                new_cursor_x = origin->x + point_x(event.lParam);
-                new_cursor_y = origin->y + point_y(event.lParam);
+                // Like a ClipCursor-confined cursor on Windows: the position stops at the clip rectangle while the
+                // raw motion keeps flowing.
+                if (event.relative_motion)
+                {
+                    raw_dx = event.relative_motion->first;
+                    raw_dy = event.relative_motion->second;
+                }
+                if (origin)
+                {
+                    l_param = pack_point(new_cursor_x - origin->x, new_cursor_y - origin->y);
+                }
             }
 
             // A game using raw input for mouse-look reads relative deltas from WM_INPUT, not WM_MOUSEMOVE.
@@ -3351,11 +4239,9 @@ namespace sogen
             {
                 if (event.message == WM_MOUSEMOVE)
                 {
-                    const int32_t dx = new_cursor_x - this->process.cursor_x;
-                    const int32_t dy = new_cursor_y - this->process.cursor_y;
-                    if (dx != 0 || dy != 0)
+                    if (raw_dx != 0 || raw_dy != 0)
                     {
-                        this->deliver_raw_mouse_input(dx, dy, 0);
+                        this->deliver_raw_mouse_input(raw_dx, raw_dy, 0);
                     }
                 }
                 else if (const uint16_t buttons = raw_mouse_button_flags(event.message, event.wParam); buttons != 0)
@@ -3368,9 +4254,9 @@ namespace sogen
 
             this->process.cursor_x = new_cursor_x;
             this->process.cursor_y = new_cursor_y;
-            this->process.foreground_window = event.window;
+            this->set_foreground_window(event.window);
 
-            const auto target = route_pointer(this->process, event.window, point_x(event.lParam), point_y(event.lParam));
+            const auto target = route_pointer(this->process, event.window, point_x(l_param), point_y(l_param));
             if (!is_mouse_wheel_message(event.message) &&
                 this->forward_pointer_input_to_foreign_children(target.window, event.message, event.wParam, target.x, target.y))
             {
@@ -3386,11 +4272,11 @@ namespace sogen
         {
             // The window just became active/focused: make it the foreground window so polling APIs
             // (GetForegroundWindow/GetActiveWindow) agree with the activation the game just received.
-            this->process.foreground_window = event.window;
+            this->set_foreground_window(event.window);
         }
         else if ((event.message == WM_ACTIVATE && event.wParam == 0) && this->process.foreground_window == event.window)
         {
-            this->process.foreground_window = 0;
+            this->set_foreground_window(0);
         }
 
         // Mirror the foreground window into the shared SERVERINFO so the guest's client-side
@@ -3410,18 +4296,10 @@ namespace sogen
         switch (event.message)
         {
         case WM_KEYDOWN:
-        case WM_SYSKEYDOWN: {
-            const auto virtual_key = static_cast<uint8_t>(event.wParam & 0xFF);
-            if ((this->process.key_state[virtual_key] & 0x80) == 0)
-            {
-                this->process.async_key_state[virtual_key] = 1;
-            }
-            this->process.key_state[virtual_key] = 0x80;
-            break;
-        }
+        case WM_SYSKEYDOWN:
         case WM_KEYUP:
         case WM_SYSKEYUP:
-            this->process.key_state[static_cast<uint8_t>(event.wParam & 0xFF)] = 0;
+            this->update_key_state(event);
             break;
         default:
             if (const auto virtual_key = mouse_button_virtual_key(event.message, event.wParam); virtual_key != 0)
@@ -3458,17 +4336,98 @@ namespace sogen
 
         thread->post_message(*this, m, true);
 
+        if (event.injected && is_key_down_message(event.message))
+        {
+            const auto virtual_key = static_cast<uint32_t>(event.wParam & 0xFF);
+            const auto character =
+                virtual_key == VK_PACKET ? event.injected_character : key_character(virtual_key, this->process.key_state);
+            if (character != 0)
+            {
+                msg character_message = m;
+                character_message.message = event.message == WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR;
+                character_message.wParam = character;
+                thread->post_message(*this, character_message, true);
+            }
+        }
+
         if (event.message == WM_CLOSE || event.message == WM_COMMAND || is_key_down_message(event.message) ||
             is_mouse_button_message(event.message) || is_mouse_wheel_message(event.message))
         {
-            // Kick the vCPU currently running the target thread so it promptly re-checks its message
-            // queue; if the thread is not running on any vCPU right now, fall back to vCPU 0 to force a
-            // reschedule that can pick up the now-ready thread.
-            auto* running_on = find_vcpu_running_thread(*this, *thread);
-            auto& vcpu = running_on ? *running_on : this->vcpu(0);
-            vcpu.switch_thread = true;
-            vcpu.cpu.stop();
+            this->wake_thread(*thread);
         }
+
+        if (this->process.foreground_window != previous_foreground)
+        {
+            this->apply_cursor_capture();
+        }
+    }
+
+    void windows_emulator::move_window_from_host(const hwnd window_handle, const int32_t x, const int32_t y)
+    {
+        auto* win = this->process.windows.get(window_handle);
+        if (!win || (win->x == x && win->y == y))
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        win->x = x;
+        win->y = y;
+        win->sync_guest_rects();
+
+        msg m{};
+        m.window = window_handle;
+        m.message = WM_MOVE;
+        m.lParam = pack_point(win->client_x(), win->client_y());
+        thread->post_message(*this, m, true);
+        this->wake_thread(*thread);
+    }
+
+    void windows_emulator::resize_window_from_host(const hwnd window_handle, const bool maximized, const int32_t client_width,
+                                                   const int32_t client_height)
+    {
+        auto* win = this->process.windows.get(window_handle);
+        if (!win)
+        {
+            return;
+        }
+
+        const bool was_maximized = (win->style & WS_MAXIMIZE) != 0;
+        if (win->client_width() == client_width && win->client_height() == client_height && was_maximized == maximized)
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        const auto insets = win->nonclient_insets();
+        win->width = client_width + insets.left + insets.right;
+        win->height = client_height + insets.top + insets.bottom;
+        win->style = maximized ? (win->style | WS_MAXIMIZE) : (win->style & ~WS_MAXIMIZE);
+        win->guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = win->style; });
+        win->sync_guest_rects();
+
+        win->update_rect = RECT{.left = 0, .top = 0, .right = win->client_width(), .bottom = win->client_height()};
+        win->update_pending = true;
+        win->erase_pending = true;
+        thread->mark_queue_status_changed(QS_PAINT);
+
+        msg m{};
+        m.window = window_handle;
+        m.message = WM_SIZE;
+        m.wParam = maximized ? SIZE_MAXIMIZED : SIZE_RESTORED;
+        m.lParam = pack_point(win->client_width(), win->client_height());
+        thread->post_message(*this, m, true);
+        this->wake_thread(*thread);
     }
 
     void windows_emulator::dump_exception_trace()
@@ -3509,23 +4468,44 @@ namespace sogen
         }
     }
 
-    bool windows_emulator::try_signal_guest_event(const handle event_handle)
+    void windows_emulator::request_guest_event_signal(const handle event_handle, const uint32_t maximum_pending)
     {
-        if (!this->kernel_lock_.try_lock())
         {
-            return false;
+            const std::lock_guard lock{this->pending_event_signals_mutex_};
+            auto& pending = this->pending_event_signals_[event_handle.bits];
+            pending = std::min(pending + 1, maximum_pending);
         }
 
-        const std::lock_guard<kernel_lock> lock{this->kernel_lock_, std::adopt_lock};
+        this->credit_idle_wakeup();
+    }
 
-        auto* entry = this->process.events.get(event_handle);
-        if (!entry)
+    void windows_emulator::apply_pending_guest_event_signals()
+    {
+        this->kernel_lock_.assert_held();
+
+        const std::lock_guard lock{this->pending_event_signals_mutex_};
+
+        for (auto it = this->pending_event_signals_.begin(); it != this->pending_event_signals_.end();)
         {
-            return false;
-        }
+            auto* entry = this->process.events.get(make_handle(it->first));
+            if (!entry)
+            {
+                it = this->pending_event_signals_.erase(it);
+                continue;
+            }
 
-        entry->set_signaled(true);
-        return true;
+            if (!entry->is_signaled())
+            {
+                entry->set_signaled(true);
+                if (--it->second == 0)
+                {
+                    it = this->pending_event_signals_.erase(it);
+                    continue;
+                }
+            }
+
+            ++it;
+        }
     }
 
     void windows_emulator::dump_lock_profile()
@@ -3553,12 +4533,56 @@ namespace sogen
 
     void windows_emulator::stop()
     {
-        this->should_stop = true;
+        {
+            const std::lock_guard lock{this->idle_wakeup_mutex_};
+            this->should_stop = true;
+        }
+
+        this->idle_wakeup_cv_.notify_all();
+        this->thread_registers_saved_.notify_all();
 
         for (uint32_t i = 0; i < this->vcpu_count_; ++i)
         {
-            this->vcpu(i).cpu.stop();
+            // A backend whose stop is not thread-safe races with its own execution when stopped from another thread,
+            // such as a Python thread timing out a run. Its vCPU picks up should_stop at the next time-slice yield.
+            auto& vcpu = this->vcpu(i);
+            if (vcpu.cpu.is_stop_thread_safe() || vcpu.runner.load() == std::this_thread::get_id())
+            {
+                vcpu.cpu.stop();
+            }
         }
+    }
+
+    void windows_emulator::wake_idle_vcpu()
+    {
+        if (this->idle_vcpus_.load() != 0)
+        {
+            this->credit_idle_wakeup();
+        }
+    }
+
+    void windows_emulator::credit_idle_wakeup()
+    {
+        {
+            const std::lock_guard lock{this->idle_wakeup_mutex_};
+            this->pending_idle_wakeups_ = std::min(this->pending_idle_wakeups_ + 1, this->vcpu_count_);
+        }
+
+        this->idle_wakeup_cv_.notify_one();
+    }
+
+    bool windows_emulator::wait_for_idle_wakeup(const std::chrono::milliseconds timeout)
+    {
+        std::unique_lock lock{this->idle_wakeup_mutex_};
+        this->idle_wakeup_cv_.wait_for(lock, timeout, [this] { return this->pending_idle_wakeups_ > 0 || this->should_stop; });
+
+        if (this->pending_idle_wakeups_ == 0)
+        {
+            return false;
+        }
+
+        --this->pending_idle_wakeups_;
+        return true;
     }
 
     void windows_emulator::register_factories(utils::buffer_deserializer& buffer)
@@ -3571,8 +4595,8 @@ namespace sogen
             return module_manager_wrapper{this->mod_manager}; //
         });
 
-        buffer.register_factory<x64_emulator_wrapper>([this] {
-            return x64_emulator_wrapper{this->emu()}; //
+        buffer.register_factory<guest_machine_wrapper>([this] {
+            return guest_machine_wrapper{this->emu()}; //
         });
 
         buffer.register_factory<windows_emulator_wrapper>([this] {
@@ -3587,13 +4611,65 @@ namespace sogen
             return socket_factory_wrapper{this->socket_factory()}; //
         });
 
+        buffer.register_factory<file_system_wrapper>([this] {
+            return file_system_wrapper{this->file_sys}; //
+        });
+
         buffer.register_factory<window>([this] {
             return window{this->emu()}; //
         });
+
+        buffer.register_factory<menu>([this] { return menu{this->emu()}; });
+        buffer.register_factory<accelerator_table>([this] { return accelerator_table{this->emu()}; });
+    }
+
+    void windows_emulator::request_suspend()
+    {
+        const std::scoped_lock lock(this->kernel_lock_);
+        if (std::ranges::any_of(this->process.devices | std::views::values,
+                                [](const io_device_container& device) { return device.suspends_at_frame_end(); }))
+        {
+            this->suspend_requested_ = true;
+            return;
+        }
+
+        this->stop();
+    }
+
+    bool windows_emulator::take_suspend_request()
+    {
+        return this->suspend_requested_.exchange(false);
+    }
+
+    void windows_emulator::cancel_suspend_request()
+    {
+        this->suspend_requested_ = false;
+    }
+
+    void windows_emulator::ensure_serialization_support() const
+    {
+        for (const auto& device : this->process.devices | std::views::values)
+        {
+            if (!device.supports_serialization())
+            {
+                throw std::runtime_error("The device " + u16_to_u8(device.get_device_path()) + " does not support snapshots");
+            }
+        }
+    }
+
+    void windows_emulator::prepare_serialization()
+    {
+        this->ensure_serialization_support();
+        for (auto& device : this->process.devices | std::views::values)
+        {
+            device.prepare_serialization(*this);
+        }
     }
 
     void windows_emulator::serialize(utils::buffer_serializer& buffer) const
     {
+        this->ensure_serialization_support();
+
         buffer.write(this->application_settings_);
         buffer.write(this->setup_completed_);
         buffer.write(this->executed_instructions_);
@@ -3609,6 +4685,7 @@ namespace sogen
         this->mod_manager.serialize(buffer);
         this->dispatcher.serialize(buffer);
         this->process.serialize(buffer, this->vcpus_[0]->active_thread);
+        this->process.section_views.serialize(buffer, this->memory);
     }
 
     void windows_emulator::deserialize(utils::buffer_deserializer& buffer)
@@ -3631,8 +4708,12 @@ namespace sogen
         this->version.deserialize(buffer);
         this->registry.deserialize_runtime_state(buffer);
 
+        this->process.prepare_for_state_restore(*this);
         this->memory.unmap_all_memory();
         this->clear_section_first_execution_hooks();
+        this->ui().reset();
+        this->audio().stop();
+        this->console().reset();
 
         // Match raw serialize() above; do not use backend snapshot mode here.
         this->emu().deserialize_state(buffer, false);
@@ -3640,127 +4721,82 @@ namespace sogen
         this->mod_manager.deserialize(buffer);
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
-        this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
+        emulator_thread* restored_thread{};
+        this->process.deserialize(buffer, restored_thread);
+        this->vcpus_[0]->set_active_thread(restored_thread);
+        this->process.section_views.deserialize(buffer);
+        this->process.restore_after_state_restore(*this);
 
-        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never
-        // ran map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered - without
-        // this, any thread created after deserialize (in this object) would fall back to the
-        // non-heap-allocated NlsCache placeholder and hit the STATUS_HEAP_CORRUPTION class of bug this
-        // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
-        // already registered it (the common case: deserializing into an already-running emulator).
+        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never ran
+        // map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered.
         this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
-        this->restore_ui_backend();
+        this->ui().set_cursor_visibility(this->process.cursor_show_count >= 0 && this->process.cursor_shape_visible);
+        this->apply_cursor_capture();
+        this->release_held_input();
     }
 
-    void windows_emulator::restore_ui_backend()
+    // Nothing is held when a saved process continues, so what was held when it was saved is released, the way the guest
+    // would have seen it happen.
+    void windows_emulator::release_held_input()
     {
-        this->ui().reset();
-        this->audio().stop();
-
-        std::vector<const window*> pending{};
-        pending.reserve(this->process.windows.size());
-        for (const auto& [index, win] : this->process.windows)
+        for (uint32_t key = 0; key < this->process.key_state.size(); ++key)
         {
-            (void)index;
-            if (win.host_surface_window)
+            if ((this->process.key_state[key] & 0x80) == 0)
             {
-                pending.push_back(&win);
-            }
-        }
-
-        std::unordered_set<hwnd> created{};
-        const auto dependency_ready = [&](const hwnd handle) {
-            if (handle == 0)
-            {
-                return true;
+                continue;
             }
 
-            const auto* dependency = this->process.windows.get(handle);
-            return !dependency || !dependency->host_surface_window || created.contains(handle);
-        };
-
-        const auto create_window = [&](const window& win) {
-            const auto child = (win.style & WS_CHILD) != 0;
-            uint32_t control_id = 0;
-            if (child)
+            if (key == VK_LBUTTON || key == VK_RBUTTON || key == VK_MBUTTON || key == VK_XBUTTON1 || key == VK_XBUTTON2)
             {
-                if (const auto guest_window = win.guest.try_read())
-                {
-                    control_id = static_cast<uint32_t>(guest_window->wID);
-                }
+                this->process.key_state[key] = 0;
+                continue;
             }
 
-            this->ui().create_window(ui_window_desc{
-                .handle = win.handle,
-                .parent = child ? win.parent_handle : 0,
-                .owner = child ? 0 : win.owner_handle,
-                .rect = {.left = win.x, .top = win.y, .right = win.x + win.width, .bottom = win.y + win.height},
-                .client_insets = {},
-                .class_name = std::u16string{normalize_builtin_window_class_name(win.class_name)},
-                .title = win.name,
-                .style = win.style,
-                .ex_style = win.ex_style,
-                .control_id = control_id,
-                .visible = (win.style & WS_VISIBLE) != 0,
-                .enabled = (win.style & WS_DISABLED) == 0,
-                .top_level = !child,
+            const bool alt_held = (this->process.key_state[VK_MENU] & 0x80) != 0;
+            constexpr uint64_t release_flags = 0xC0000001;
+            this->handle_ui_event(ui_event{
+                .window = this->process.foreground_window,
+                .message = static_cast<uint32_t>(alt_held ? WM_SYSKEYUP : WM_KEYUP),
+                .wParam = key,
+                .lParam = release_flags | (static_cast<uint64_t>(vk_to_scan_code(static_cast<uint16_t>(key))) << 16),
             });
-            created.insert(win.handle);
-        };
 
-        while (!pending.empty())
+            // Delivering the release does not clear the key when there is no window to deliver it to.
+            this->process.key_state[key] &= 0x01;
+        }
+    }
+
+    uint64_t windows_emulator::highest_user_address() const
+    {
+        if (!this->process.is_wow64_process)
         {
-            bool made_progress = false;
-            for (auto it = pending.begin(); it != pending.end();)
-            {
-                const auto& win = **it;
-                if (dependency_ready(win.parent_handle) && dependency_ready(win.owner_handle))
-                {
-                    create_window(win);
-                    it = pending.erase(it);
-                    made_progress = true;
-                }
-                else
-                {
-                    ++it;
-                }
-            }
+            return MAX_ALLOCATION_END_EXCL - 1;
+        }
+        const auto* executable = this->mod_manager.executable;
+        return (executable && (executable->characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE)) ? 0xFFFEFFFF : 0x7FFEFFFF;
+    }
 
-            if (!made_progress)
-            {
-                create_window(*pending.front());
-                pending.erase(pending.begin());
-            }
+    // The guest's ClipCursor is process-wide; the host confines whichever window is in the foreground, in relative mode while
+    // the guest cursor is hidden.
+    void windows_emulator::apply_cursor_capture()
+    {
+        std::optional<ui_rect> clip{};
+        if (const auto& rect = this->process.cursor_clip)
+        {
+            clip = ui_rect{.left = rect->left, .top = rect->top, .right = rect->right, .bottom = rect->bottom};
         }
 
-        for (const auto& [index, win] : this->process.windows)
-        {
-            (void)index;
-            if (!win.host_surface_window || (win.style & WS_CHILD) != 0)
-            {
-                continue;
-            }
-
-            const auto surface = this->process.gdi_window_surfaces.find(static_cast<uint32_t>(win.handle));
-            if (surface == this->process.gdi_window_surfaces.end() || surface->second.width == 0 || surface->second.height == 0 ||
-                surface->second.pixels.empty())
-            {
-                continue;
-            }
-
-            const auto& restored = surface->second;
-            this->ui().present_surface(win.handle, ui_surface_desc{
-                                                       .width = static_cast<int>(restored.width),
-                                                       .height = static_cast<int>(restored.height),
-                                                       .stride = static_cast<int>(restored.width * sizeof(uint32_t)),
-                                                       .format = ui_surface_format::bgra8,
-                                                       .pixels = restored.pixels.data(),
-                                                   });
-        }
+        // SDL's relative mode pins the cursor to a pixel in the window's center but may leave it visible. Only raw motion
+        // reaches the guest then, just as with a hidden cursor.
+        const bool hidden = this->process.cursor_show_count < 0 || !this->process.cursor_shape_visible;
+        const bool pinned = clip && clip->right - clip->left <= 2 && clip->bottom - clip->top <= 2;
+        this->ui().set_cursor_clip(this->process.foreground_window, clip, clip.has_value() && (hidden || pinned));
     }
 
     void windows_emulator::save_snapshot()
     {
+        this->prepare_serialization();
+
         utils::buffer_serializer buffer{};
 
         buffer.write(this->setup_completed_);
@@ -3777,6 +4813,7 @@ namespace sogen
         this->mod_manager.serialize(buffer);
         this->dispatcher.serialize(buffer);
         this->process.serialize(buffer, this->vcpus_[0]->active_thread);
+        this->process.section_views.serialize(buffer, this->memory);
 
         this->process_snapshot_ = buffer.move_buffer();
     }
@@ -3799,24 +4836,29 @@ namespace sogen
         this->version.deserialize(buffer);
         this->registry.deserialize_runtime_state(buffer);
 
+        this->process.prepare_for_state_restore(*this);
         this->memory.unmap_all_memory();
         this->clear_section_first_execution_hooks();
+        this->ui().reset();
+        this->audio().stop();
+        this->console().reset();
 
         this->emu().deserialize_state(buffer, false);
         this->memory.deserialize_memory_state(buffer, false);
         this->mod_manager.deserialize(buffer);
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
-        this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
+        emulator_thread* restored_thread{};
+        this->process.deserialize(buffer, restored_thread);
+        this->vcpus_[0]->set_active_thread(restored_thread);
+        this->process.section_views.deserialize(buffer);
+        this->process.restore_after_state_restore(*this);
 
-        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never
-        // ran map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered - without
-        // this, any thread created after deserialize (in this object) would fall back to the
-        // non-heap-allocated NlsCache placeholder and hit the STATUS_HEAP_CORRUPTION class of bug this
-        // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
-        // already registered it (the common case: deserializing into an already-running emulator).
+        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never ran
+        // map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered.
         this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
-        this->restore_ui_backend();
+        this->ui().set_cursor_visibility(this->process.cursor_show_count >= 0 && this->process.cursor_shape_visible);
+        this->apply_cursor_capture();
     }
 
 } // namespace sogen

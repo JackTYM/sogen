@@ -1,15 +1,15 @@
 <h1 align="center">
-	<a href="https://github.com/momo5502/sogen"><img src="https://momo5502.com/sogen/banner.png" height="300" /></a>
+	<a href="https://github.com/momo5502/sogen"><img src="https://momo5502.com/sogen/sogen.svg" height="200" /></a>
 	<br>
-	<a href="https://github.com/momo5502/sogen?tab=GPL-2.0-1-ov-file"><img src="https://img.shields.io/github/license/momo5502/sogen?color=00B0F8"/></a>
+	<a href="https://discord.sogen.dev"><img src="https://img.shields.io/badge/discord-come%20chat-00B0F8?logo=discord&logoColor=white"/></a>
 	<a href="https://github.com/momo5502/sogen/actions"><img src="https://img.shields.io/github/actions/workflow/status/momo5502/sogen/build.yml?branch=main&label=build"/></a>
 	<a href="https://github.com/momo5502/sogen/issues"><img src="https://img.shields.io/github/issues/momo5502/sogen?color=F8B000"/></a>
 	<img src="https://img.shields.io/github/commit-activity/m/momo5502/sogen?color=FF3131"/>
 </h1>
 
-Sogen runs Windows and Linux programs without a real operating system, and lets you see and control everything they do.
+Sogen runs Windows, Linux and [macOS](#macos-programs-rudimentary) programs, without a real operating system: It lets you see and control everything they do.
 
-Instead of reimplementing thousands of OS APIs, Sogen emulates binaries at the CPU and syscall level and runs the **real system DLLs**, so behavior closely matches the real OS.
+Instead of reimplementing thousands of OS APIs, Sogen emulates binaries at CPU and syscall level and runs the **real system DLLs**, so behavior closely matches the real OS.
 
 Every instruction, memory access and API call can be hooked, inspected or rewritten, runs are fully deterministic, and the entire emulator state can be snapshotted and restored.
 
@@ -19,8 +19,10 @@ Built in C++ and powered by the CPU backend of your choice:
 - [icicle-emu](https://github.com/icicle-emu/icicle-emu)
 - [Hyper-V (WHP)](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform)
 - [KVM](https://www.kernel.org/doc/html/latest/virt/kvm/api.html)
+- [FEX](https://fex-emu.com)
 
 Try it out: <a href="https://sogen.dev">sogen.dev</a>  
+Join the community: <a href="https://discord.sogen.dev">Discord</a>  
 &nbsp;  
 
 ## Key Features
@@ -123,4 +125,37 @@ cmake --preset=vs2022
 
 ```bash
 analyzer.exe C:\example.exe
+```
+
+By default, the guest has no access to the host network. Guest sockets use an in-process loopback, DNS queries resolve to no addresses, and the Steam bridge is disabled. To give the guest access to the host network, add `--network live`:
+
+```bash
+analyzer.exe --network live C:\example.exe
+```
+
+The guest file system is read-only by default, and guest writes fail with `STATUS_ACCESS_DENIED`. Use
+`--root-mode rw` to let the guest change the emulation root, or the host drives when no root is set. Use
+`--mount HOST:GUEST[:MODE]` to add a host file or directory at a guest path, for example
+`--mount .\out:C:\out:rw`. See [docs/filesystem.md](docs/filesystem.md) for the details of mounts and modes.
+
+Windows ARM64 executables run the same way, from an emulation root created with [create-root.bat](https://github.com/momo5502/sogen/blob/main/src/tools/create-root.bat) on a Windows ARM64 machine. They run on WHP on Windows ARM64, on Hypervisor.framework on Apple Silicon and on Unicorn elsewhere.
+
+`--backend` overrides environment-based selection. Outside Windows ARM64, where Unicorn's ARM64 backend is not built, `EMULATOR_UNICORN=1` runs ARM64 guests on Unicorn instead of the hypervisor.
+
+## macOS Programs (Rudimentary)
+
+macOS support is at an early stage. Sogen runs x86-64 macOS command-line programs through the real dyld and the system's dyld shared cache, which is enough for simple tools like `echo`. Most other programs still stop at an unimplemented syscall.
+
+1\. Build an emulation root on a Mac whose system still ships x86-64 slices. The script copies dyld, `/bin/echo` and the x86-64 shared cache:
+
+```bash
+src/tools/create-macos-root.sh /tmp/macos-root
+```
+
+The macOS license does not allow redistributing the root or running it on non-Apple hardware, so it is not available for download and must stay on the Mac that built it.
+
+2\. Run a program from the root by setting `EMULATOR_MACOS=1`:
+
+```bash
+EMULATOR_MACOS=1 build/release/artifacts/analyzer --root /tmp/macos-root /tmp/macos-root/bin/echo hello
 ```

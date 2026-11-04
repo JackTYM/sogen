@@ -12,6 +12,7 @@
 #define LPC_DEBUG_EVENT        8
 #define LPC_ERROR_EVENT        9
 #define LPC_CONNECTION_REQUEST 10
+#define LPC_CONNECTION_REPLY   11
 #define LPC_NO_IMPERSONATE     0x4000
 #define LPC_KERNELMODE_MESSAGE 0x8000
 
@@ -76,14 +77,51 @@ namespace sogen
 #define ALPC_MESSAGE_TOKEN_ATTRIBUTE    0x08000000
 #define ALPC_MESSAGE_DIRECT_ATTRIBUTE   0x04000000
 
+#define ALPC_PORFLG_ALLOW_LPC_REQUESTS  0x00020000
+
+    template <typename Traits>
+    struct ALPC_PORT_ATTRIBUTES
+    {
+        ULONG Flags;
+        SECURITY_QUALITY_OF_SERVICE SecurityQos;
+        Traits::SIZE_T MaxMessageLength;
+        Traits::SIZE_T MemoryBandwidth;
+        Traits::SIZE_T MaxPoolUsage;
+        Traits::SIZE_T MaxSectionSize;
+        Traits::SIZE_T MaxViewSize;
+        Traits::SIZE_T MaxTotalSectionSize;
+        ULONG DupObjectTypes;
+        ULONG Reserved;
+    };
+
+    template <typename Traits>
+    struct ALPC_BASIC_INFORMATION
+    {
+        ULONG Flags;
+        ULONG SequenceNo;
+        Traits::PVOID PortContext;
+    };
+
     template <typename Traits>
     struct ALPC_HANDLE_ATTR
     {
         ULONG Flags;
-        typename Traits::HANDLE Handle;
+        Traits::HANDLE Handle;
         ULONG ObjectType;
         ULONG DesiredAccess; // GrantedAccess on receive
     };
+
+    template <typename Traits>
+    struct ALPC_DATA_VIEW_ATTR
+    {
+        ULONG Flags;
+        Traits::HANDLE SectionHandle;
+        Traits::PVOID ViewBase;
+        Traits::SIZE_T ViewSize;
+    };
+
+    static_assert(sizeof(ALPC_DATA_VIEW_ATTR<EmulatorTraits<Emu32>>) == 16);
+    static_assert(sizeof(ALPC_DATA_VIEW_ATTR<EmulatorTraits<Emu64>>) == 32);
 
     template <typename Traits>
     struct PORT_DATA_ENTRY
@@ -99,6 +137,29 @@ namespace sogen
         Traits::PVOID SecurityQos;
         Traits::HANDLE ContextHandle;
     };
+
+    template <typename Traits>
+    struct ALPC_CONTEXT_ATTR
+    {
+        Traits::PVOID PortContext;
+        Traits::PVOID MessageContext;
+        ULONG Sequence;
+        ULONG MessageId;
+        ULONG CallbackId;
+    };
+
+    static_assert(sizeof(ALPC_CONTEXT_ATTR<EmulatorTraits<Emu32>>) == 20);
+    static_assert(sizeof(ALPC_CONTEXT_ATTR<EmulatorTraits<Emu64>>) == 32);
+
+    template <typename Traits>
+    struct ALPC_PORT_ASSOCIATE_COMPLETION_PORT
+    {
+        Traits::PVOID CompletionKey;
+        Traits::HANDLE CompletionPort;
+    };
+
+    static_assert(sizeof(ALPC_PORT_ASSOCIATE_COMPLETION_PORT<EmulatorTraits<Emu32>>) == 8);
+    static_assert(sizeof(ALPC_PORT_ASSOCIATE_COMPLETION_PORT<EmulatorTraits<Emu64>>) == 16);
 
     // NOLINTEND(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)
 } // namespace sogen

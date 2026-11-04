@@ -48,6 +48,14 @@ assert hasattr(win, "create_application")
 assert mod.create_empty is win.create_empty
 assert mod.create_application is win.create_application
 
+for bad_network, expected_error in (("none", ValueError), (1, TypeError)):
+    try:
+        win.create_empty(emulation_root=emulator_root, network=bad_network)
+    except expected_error:
+        pass
+    else:
+        raise AssertionError(f"network={bad_network!r} must raise {expected_error.__name__}")
+
 emu = win.create_empty(emulation_root=emulator_root)
 assert emu.backend_name in {"Unicorn Engine", "icicle-emu", "Windows Hypervisor Platform"}
 assert hasattr(emu, "read_memory")
@@ -70,6 +78,15 @@ assert hasattr(emu, "save_snapshot")
 assert hasattr(emu, "restore_snapshot")
 assert hasattr(emu, "serialize_state")
 assert hasattr(emu, "deserialize_state")
+
+wide = bytes(range(16))
+emu.write_register_bytes(mod.Register.xmm0, wide)
+assert emu.read_register_bytes(mod.Register.xmm0, 16) == wide
+emu.write_register(mod.Register.rax, 0xFFFFFFFFFFFFFFFF)
+emu.write_register_bytes(mod.Register.rax, b"\x01")
+assert emu.read_register(mod.Register.rax) == 1
+assert emu.read_register_bytes(mod.Register.rax, 16) == b"\x01" + bytes(15)
+
 emu.callbacks.on_stdout = lambda s: None
 emu.process.callbacks.on_thread_create = lambda h, t: None
 emu.callbacks.on_module_load = lambda m: None
@@ -110,7 +127,8 @@ with tempfile.TemporaryDirectory(prefix="sogen-python-") as temp_dir:
     app = win.create_application(
         r"C:\test-sample.exe",
         emulation_root=emulator_root,
-        path_mappings={r"C:\a.txt": mapped_file},
+        mounts=[(mapped_file, r"C:\a.txt", "rw")],
+        network="live",
         port_mappings={28970: 28980},
     )
 
@@ -132,6 +150,25 @@ with tempfile.TemporaryDirectory(prefix="sogen-python-") as temp_dir:
     assert all(arg in {0, 1} for arg in sleep_hits["args"])
 
     app = None
+    gc.collect()
+
+    teb_app = win.create_application(r"C:\test-sample.exe", emulation_root=emulator_root)
+    teb_app.setup_process_if_necessary()
+    teb = teb_app.read_register(mod.Register.gs_base)
+    assert teb != 0
+    # NT_TIB.Self: the TEB points to itself.
+    assert int.from_bytes(teb_app.read_memory(teb + 0x30, 8), "little") == teb
+    teb_app = None
+    gc.collect()
+
+    fail_fast_app = win.create_application(
+        r"C:\test-sample.exe",
+        emulation_root=emulator_root,
+        command_line=r'"C:\test-sample.exe" -fail-fast',
+    )
+    fail_fast_app.start()
+    assert fail_fast_app.process.exit_status == 0xE0001234, f"exit: {fail_fast_app.process.exit_status}"
+    fail_fast_app = None
     gc.collect()
 
 # temporary hook lifetime smoke test: returned Hook object must not be kept in Python
@@ -219,6 +256,47 @@ if hook_sample.exists():
     gc.collect()
 else:
     print(f"[test.py] hook-sample not found at {hook_sample}; skipping intercept smoke", flush=True)
+
+# dns_resolver kwarg: a Python callable that pins what the guest's DNS resolves
+# to. Assert the kwarg is accepted and that returning None (defer) vs a literal
+# IP both behave. We can't easily drive a guest DNS query in this smoke test, so
+# the callable is exercised directly is not possible from Python; instead verify
+# the wiring is accepted and does not perturb a normal run.
+dns_calls = {"count": 0}
+
+
+def on_resolve(hostname, family):
+    dns_calls["count"] += 1
+    # Pin one host, defer everything else to the default resolver.
+    if hostname.lower() == "sogen.test":
+        return ["127.0.0.1"]
+    return None
+
+
+dns_app = win.create_application(
+    r"C:\test-sample.exe",
+    emulation_root=emulator_root,
+    network="live",
+    root_mode="rw",
+    dns_resolver=on_resolve,
+)
+socket_activity = []
+dns_app.callbacks.on_stdout = lambda text: None
+dns_app.callbacks.on_socket_activity = lambda action, address: socket_activity.append((action, address))
+dns_app.start()
+print(
+    f"[test.py:dns] exit_status={dns_app.process.exit_status}"
+    f" resolver_calls={dns_calls['count']}"
+    f" stop_reason={dns_app.last_stop_reason}",
+    flush=True,
+)
+assert dns_app.process.exit_status == 0, (
+    f"dns_resolver run exited {dns_app.process.exit_status}; the kwarg must not perturb a normal run"
+)
+assert ("bind", "127.0.0.1:28970") in socket_activity, socket_activity
+assert ("sendto", "127.0.0.1:28970") in socket_activity, socket_activity
+dns_app = None
+gc.collect()
 
 emu = None
 mod = None

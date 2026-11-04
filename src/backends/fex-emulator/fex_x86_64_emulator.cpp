@@ -1,4 +1,4 @@
-// _GNU_SOURCE is required for mremap() (used to alias host memory into the guest address space).
+// _GNU_SOURCE exposes the Linux host VM and signal definitions used by this backend.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -6,88 +6,92 @@
 #define FEX_EMULATOR_IMPL
 #include "fex_x86_64_emulator.hpp"
 #include "fex_x86_64_common.hpp"
-#include "fex_x86_64_marshal.hpp"
 
-// ---------------------------------------------------------------------------------------------------
-// FEX-Emu backend (basic support).
-//
-// FEX (https://fex-emu.com) is an in-process x86/x86-64 -> AArch64 binary translator. Unlike the
-// Unicorn/Icicle/KVM backends, FEX does NOT manage a sandboxed guest address space: it executes the
-// translated guest inside the *host* process and treats guest virtual addresses as host virtual
-// addresses (a 1:1 mapping). Consequences that shape this backend:
-//
-//   * map_memory() is a real mmap(MAP_FIXED) at the guest address; read/write_memory() is a direct
-//     host memcpy once the range is known to be mapped.
-//   * The guest runs natively (JITed): memory/execution/basic-block hooks are accepted for API
-//     compatibility but never fire.
-//   * Guest `syscall` instructions are routed back to sogen through a FEXCore::HLE::SyscallHandler,
-//     which invokes the registered syscall instruction-hook. That is what lets the Windows emulation
-//     layer service NT syscalls.
-//
-// Real multi-vCPU support: one FEXCore::Context::Context per bitness (context_/context32_, shared
-// across every vCPU) drives N InternalThreadStates via FEXCore's own multi-thread-per-context
-// embedding model. Each vCPU's own execution state (active thread/context, signal-handling
-// bookkeeping, per-vCPU GDT, per-vCPU sigaltstack) lives on a dedicated fex_vcpu object
-// (mirroring whp_x86_64_emulator's whp_vcpu); fex_x86_64_emulator itself owns everything
-// machine-wide (both contexts, memory-region/MMIO/gate-crossing tables, hook maps) and exposes
-// vcpus_ via the standard vcpu_count()/get_cpu() facade, with every inherited cpu-interface
-// virtual on the emulator itself forwarding to vcpus_[0] for backward-compatible single-facade
-// callers (the loader/setup path).
-//
-// The functional target of this file is Darwin on Apple Silicon (FEX only JITs to ARM64): the signal
-// handlers, MMIO fault emulation, and 16KB/4KB page reconciliation below are all Darwin-only. The
-// AArch64 Linux path compiles (CI build coverage) but has none of that runtime support and is not
-// expected to run; Android is excluded outright by the CMake gate. The file is written against the
-// FEXCore embedding API; spots that depend on FEX-version-specific internals are marked TODO(fex).
-// ---------------------------------------------------------------------------------------------------
+#include "address_utils.hpp"
 
+#if !defined(__APPLE__) && !defined(__linux__)
+#error "The FEX backend supports only Darwin and Linux hosts"
+#endif
+
+// FEX (https://fex-emu.com) is an in-process x86-64 -> AArch64 binary translator. Unlike the
+// Unicorn/Icicle/KVM backends it does not manage a sandboxed guest address space: the translated
+// guest executes inside the host process with guest VA == host VA. So map_memory() is a real
+// mmap(MAP_FIXED) at the guest address and read/write_memory() a direct host memcpy, and - as with
+// KVM - there is no per-access or per-instruction instrumentation point, so memory/execution/block
+// hooks are accepted for API compatibility but never fire. Guest `syscall` instructions come back
+// through a FEXCore::HLE::SyscallHandler that invokes the registered syscall instruction hook.
+//
+// The functional targets are Darwin on Apple Silicon and Linux (including Android) on AArch64; the
+// signal handlers and MMIO fault emulation below support both. Linux currently requires a 4KB host
+// page; the 16KB/4KB page reconciliation and MAP_JIT handling are Darwin-only.
+
+#include <cinttypes>
 #include <cstdlib>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <unistd.h>
 
-// backtrace()/backtrace_symbols() are used unconditionally by the std::terminate handler below
-// (initialize_context()). SOGEN_ENABLE_FEX only ever enables this backend on Linux or Darwin (see
-// the top-level CMakeLists.txt gate), and both platforms' libc provide <execinfo.h>, so this
-// include does not need to be Apple-only.
+#ifdef __linux__
+#if !defined(__ANDROID__) || __ANDROID_API__ >= 33
 #include <execinfo.h>
+#endif
+#include <asm/hwcap.h>
+#include <dirent.h>
+#include <linux/prctl.h>
+#include <sys/auxv.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#else
+#include <execinfo.h>
+#endif
 
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/arm/thread_status.h>
-#include <signal.h>
-#include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include <libproc.h>
-#include <mach-o/dyld.h>
 #endif
 
 #include <atomic>
+#include <array>
 #include <bit>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <algorithm>
+#include <charconv>
+#include <ranges>
+#include <string_view>
 
-#include <utils/interval_set.hpp>
 #include <utils/object.hpp>
+#include <utils/io.hpp>
+#include <utils/finally.hpp>
+#include <utils/host_watchpoints.hpp>
+#include <utils/shared_host_buffer.hpp>
 
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
 // the CMake glue gates this whole target behind SOGEN_ENABLE_FEX so non-ARM builds never reach here.
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/Context.h>
-#include <FEXCore/Utils/ArchHelpers/Arm64.h>
 #include <FEXCore/Core/CoreState.h>
 #include <FEXCore/Core/HostFeatures.h>
 #include <FEXCore/Core/SignalDelegator.h>
@@ -97,6 +101,7 @@
 #include <FEXCore/Utils/LongJump.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/AllocatorHooks.h>
+#include <FEXCore/Utils/ArchHelpers/Arm64.h>
 
 namespace sogen::fex
 {
@@ -107,92 +112,275 @@ namespace sogen::fex
     {
         constexpr size_t page_size = 0x1000;
 
-        // On Apple Silicon macOS, every process has a mandatory, unshrinkable 4GB __PAGEZERO
-        // segment - the entire address range a real 32-bit x86 (WoW64) guest process needs (image
-        // base, stack, heap, both 32-bit ntdll/kernel32) is permanently unmappable there. FEXCore's
-        // JIT rebases every 32-bit-mode guest memory dereference/instruction fetch by a
-        // per-Context, runtime-configurable offset (FEXCore::Context::Config.Wow64GuestRebaseValue,
-        // set via SetWow64GuestRebaseValue - see its doc comment, public Context.h) so real host
-        // memory can back 32-bit guest addresses at guest_addr + that offset instead. Everything
-        // above this backend (sogen's PE loader, syscall handlers) continues to deal exclusively in
-        // ordinary guest addresses, unaware this translation exists.
-        //
-        // wow64_guest_rebase_default is only the FIRST candidate this backend's own
-        // reserve_wow64_host_window() tries (see its doc comment for the full rationale - in short,
-        // no single fixed compile-time offset is safe: what host VA is actually free depends on
-        // what else this specific process/machine has already mapped, which a hardcoded guess
-        // cannot account for). It's also the value used unconditionally on any platform where that
-        // dynamic search doesn't run (e.g. Linux ARM64 - this backend is shared, not Apple-
-        // exclusive), preserving this backend's original, pre-dynamic-rebase behavior there exactly.
-        constexpr uint64_t wow64_guest_rebase_default = 0x400000000ULL;
+        // Coarse enough that streaming accesses to tracked memory fault rarely, fine enough that flushing or invalidating a
+        // chunk stays cheap.
+        constexpr size_t tracking_chunk_size = 0x10000;
 
-        // A 32-bit x86 guest's entire architectural address space is bounded by its 32-bit
-        // pointers: [0, 4GB). This is the ONLY range that ever needs the wow64 rebase applied, and
-        // it must stay separate from the rebase offset itself: real 64-bit ntdll/win32u modules are
-        // placed starting at memory_manager's DEFAULT_ALLOCATION_ADDRESS_64BIT, which is exactly
-        // 4GB - i.e. below a 16GB rebase offset - so using the rebase offset as the bound would
-        // rebase a wow64 process's real 64-bit ntdll in [4GB, 16GB) right along with genuine 32-bit
-        // addresses, corrupting where its real host memory lives relative to where context_'s
-        // 64-bit JIT - which applies no internal rebase of its own, see GuestMemoryRebase()'s
-        // Config.Is64BitMode() gate in deps/FEX - expects to find it.
-        constexpr uint64_t wow64_guest_address_space_size = 0x100000000ULL;
+        // The part of the guest address space a WoW64 process's 32-bit code can address.
+        constexpr uint64_t low_guest_window_size = 0x100000000ULL;
 
-        int traced_munmap(void* addr, size_t length, const char* site)
+        // Guest memory above 4GB is placed in one window that every process reserves at the same address, so a saved
+        // process finds its addresses free again in a new one. Android's 39-bit address space leaves this range alone.
+#ifndef __APPLE__
+        constexpr uint64_t guest_arena_base = 0x1000000000ULL;
+#endif
+        constexpr uint64_t guest_arena_size = 0x4000000000ULL;
+
+#ifdef __linux__
+        constexpr uint64_t guest_address_space_end = 0x00007ffffffeffffULL + 1;
+
+#ifndef MAP_FIXED_NOREPLACE
+        constexpr int MAP_FIXED_NOREPLACE = 0x100000;
+#endif
+
+        std::vector<host_reserved_range> read_host_mappings_linux(const uint64_t window_start, const uint64_t window_end)
         {
-            static const bool trace_munmap = ::getenv("SOGEN_TRACE_MUNMAP") != nullptr;
-            if (trace_munmap)
+            std::vector<std::byte> data;
+            if (!utils::io::read_file("/proc/self/maps", &data))
             {
-                fprintf(stderr, "[munmap-trace] site=%s addr=%p len=0x%zx\n", site, addr, length);
-                fflush(stderr);
+                throw std::runtime_error("FEX backend failed to enumerate host mappings");
             }
-            return ::munmap(addr, length);
+
+            const std::string_view maps{reinterpret_cast<const char*>(data.data()), data.size()};
+
+            std::vector<host_reserved_range> ranges;
+
+            for (auto line : maps | std::views::split('\n'))
+            {
+                const auto dash = std::ranges::find(line, '-');
+                if (dash == line.end())
+                {
+                    continue;
+                }
+
+                uint64_t mapping_start, mapping_end;
+
+                const char* begin = std::to_address(line.begin());
+                const char* separator = std::to_address(dash);
+                const char* end = std::to_address(line.end());
+
+                const auto [p1, ec1] = std::from_chars(begin, separator, mapping_start, 16);
+                const auto [p2, ec2] = std::from_chars(separator + 1, end, mapping_end, 16);
+
+                if (ec1 != std::errc{} || ec2 != std::errc{})
+                {
+                    continue;
+                }
+
+                const auto hit_start = std::max(mapping_start, window_start);
+                const auto hit_end = std::min(mapping_end, window_end);
+
+                if (hit_start < hit_end)
+                {
+                    ranges.push_back({
+                        .address = hit_start,
+                        .size = static_cast<size_t>(hit_end - hit_start),
+                    });
+                }
+            }
+
+            return ranges;
         }
 
-        // The 64-bit user code-segment selector (matches sogen::wow64::heaven_gate::kUserCodeSelector
-        // in src/windows-emulator/wow64_heaven_gate.hpp - kept as a local constant to avoid pulling
-        // the windows-emulator include tree into this backend). A gate crossing whose target CS is
-        // this selector is entering 64-bit mode (context_); anything else (0x23, the 32-bit compat
-        // selector) is entering 32-bit mode (context32_). See perform_gate_crossing.
-        constexpr uint16_t wow64_user_code_selector_64bit = 0x33;
+        struct host_mapping_info
+        {
+            uint64_t start{};
+            uint64_t offset{};
+            uint32_t device_major{};
+            uint32_t device_minor{};
+            uint64_t inode{};
+            bool shared{};
+        };
+
+        std::optional<host_mapping_info> find_host_mapping(const uint64_t address)
+        {
+            std::vector<std::byte> data;
+            if (!utils::io::read_file("/proc/self/maps", &data))
+            {
+                return std::nullopt;
+            }
+
+            const std::string maps{reinterpret_cast<const char*>(data.data()), data.size()};
+            size_t line_start = 0;
+            while (line_start < maps.size())
+            {
+                const auto line_end = std::min(maps.find('\n', line_start), maps.size());
+                const auto line = maps.substr(line_start, line_end - line_start);
+                line_start = line_end + 1;
+
+                unsigned long long start = 0;
+                unsigned long long end = 0;
+                char permissions[5]{};
+                unsigned long long offset = 0;
+                unsigned int major = 0;
+                unsigned int minor = 0;
+                unsigned long long inode = 0;
+                if (std::sscanf(line.c_str(), "%llx-%llx %4s %llx %x:%x %llu", &start, &end, permissions, &offset, &major, &minor,
+                                &inode) != 7)
+                {
+                    continue;
+                }
+
+                if (address >= start && address < end)
+                {
+                    return host_mapping_info{
+                        .start = start,
+                        .offset = offset,
+                        .device_major = major,
+                        .device_minor = minor,
+                        .inode = inode,
+                        .shared = permissions[3] == 's',
+                    };
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        // Nothing names the descriptor a mapping was made through, and a driver can scope mmap offsets to the open file
+        // that created them (a Mali context, for one), so a file that is open more than once is not mapped again.
+        int find_open_file(const host_mapping_info& mapping)
+        {
+            DIR* directory = ::opendir("/proc/self/fd");
+            if (!directory)
+            {
+                return -1;
+            }
+
+            int result = -1;
+            while (const dirent* entry = ::readdir(directory))
+            {
+                const int fd = std::atoi(entry->d_name);
+                struct stat status{};
+                if (entry->d_name[0] == '.' || fd == ::dirfd(directory) || ::fstat(fd, &status) != 0)
+                {
+                    continue;
+                }
+
+                if (status.st_ino == mapping.inode && major(status.st_dev) == mapping.device_major &&
+                    minor(status.st_dev) == mapping.device_minor)
+                {
+                    if (result >= 0)
+                    {
+                        result = -1;
+                        break;
+                    }
+                    result = fd;
+                }
+            }
+
+            ::closedir(directory);
+            return result;
+        }
+
+        // Makes the shared host memory at source also appear at target. A file-backed mapping (a GPU driver's device
+        // file, a memfd) is mapped again from its file, which goes through the driver's own mmap and so stays coherent;
+        // mremap can only duplicate anonymous shared memory. Private memory cannot be aliased at all.
+        bool alias_shared_mapping(const uint64_t source, const size_t size, const uint64_t target)
+        {
+            const auto mapping = find_host_mapping(source);
+            if (!mapping || !mapping->shared)
+            {
+                return false;
+            }
+
+            if (const int fd = mapping->inode != 0 ? find_open_file(*mapping) : -1; fd >= 0)
+            {
+                const auto file_offset = static_cast<off_t>(mapping->offset + (source - mapping->start));
+                return ::mmap(reinterpret_cast<void*>(target), size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, file_offset) !=
+                       MAP_FAILED;
+            }
+
+            return ::mremap(reinterpret_cast<void*>(source), 0, size, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(target)) !=
+                   MAP_FAILED;
+        }
+
+        FEXCore::HostFeatures fetch_host_features_linux()
+        {
+            FEXCore::HostFeatures features{};
+
+            const unsigned long hwcap = ::getauxval(AT_HWCAP);
+            const unsigned long hwcap2 = ::getauxval(AT_HWCAP2);
+
+            const auto has = [hwcap](unsigned long flag) { return (hwcap & flag) != 0; };
+            const auto has2 = [hwcap2](unsigned long flag) { return (hwcap2 & flag) != 0; };
+
+            features.SupportsAES = has(HWCAP_AES);
+            features.SupportsCRC = has(HWCAP_CRC32);
+            features.SupportsAtomics = has(HWCAP_ATOMICS);
+            features.SupportsRCPC = has(HWCAP_LRCPC);
+            features.SupportsTSOImm9 = has(HWCAP_ILRCPC);
+            features.SupportsSHA = has(HWCAP_SHA1) && has(HWCAP_SHA2);
+            features.SupportsPMULL_128Bit = has(HWCAP_PMULL);
+            features.SupportsFCMA = has(HWCAP_FCMA);
+            features.SupportsFlagM = has(HWCAP_FLAGM);
+
+            features.SupportsRAND = has2(HWCAP2_RNG);
+            features.SupportsFlagM2 = has2(HWCAP2_FLAGM2);
+            features.SupportsFRINTTS = has2(HWCAP2_FRINT);
+            features.SupportsECV = has2(HWCAP2_ECV);
+            features.SupportsAFP = has2(HWCAP2_AFP);
+            features.SupportsRPRES = has2(HWCAP2_RPRES);
+            features.SupportsWFXT = has2(HWCAP2_WFXT);
+            features.SupportsSVEBitPerm = has2(HWCAP2_SVEBITPERM);
+
+#ifdef HWCAP2_CSSC
+            features.SupportsCSSC = has2(HWCAP2_CSSC);
+#endif
+
+#ifdef HWCAP2_MOPS
+            features.SupportsMOPS = has2(HWCAP2_MOPS);
+#endif
+
+            features.SupportsSVE128 = has2(HWCAP2_SVE2);
+            if (features.SupportsSVE128)
+            {
+                const int sve_vl = ::prctl(PR_SVE_GET_VL);
+                if (sve_vl >= 0)
+                {
+                    features.SupportsSVE256 = (sve_vl & PR_SVE_VL_LEN_MASK) >= 32;
+                }
+            }
+
+            // AVX can make FEX emit paired SIMD loads, which MMIO emulation doesn't support yet.
+            features.SupportsAVX = false;
+            features.SupportsAES256 = features.SupportsAES && features.SupportsAVX;
+
+            const long dcache_line = ::sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+            const long icache_line = ::sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
+            features.DCacheLineSize = dcache_line > 0 ? static_cast<uint32_t>(dcache_line) : 64;
+            features.ICacheLineSize = icache_line > 0 ? static_cast<uint32_t>(icache_line) : 64;
+            features.SupportsCacheMaintenanceOps = true;
+
+            uint64_t dczid = 0;
+            __asm__ volatile("mrs %0, dczid_el0" : "=r"(dczid));
+            features.SupportsCLZERO = (dczid & (1ULL << 4)) == 0 && (4ULL << (dczid & 0xF)) == 64;
+
+            const long logical_cpus = ::sysconf(_SC_NPROCESSORS_ONLN);
+            features.CPUMIDRs.assign(logical_cpus > 0 ? static_cast<size_t>(logical_cpus) : 1, 0u);
+
+            features.SupportsCPUIndexInTPIDRRO = false;
+
+            return features;
+        }
+#endif
 
 #ifdef __APPLE__
-        // FEXCore's own JITWriteScope (deps/FEX/FEXCore/include/FEXCore/Utils/AllocatorHooks.h) is a
-        // plain ctor/dtor boolean toggle around pthread_jit_write_protect_np, not a nesting counter.
-        // FEXCore::CPU::Arm64JITCore::ExitFunctionLink and its two delinker helpers (JIT.cpp) patch an
-        // already-JIT-compiled call site - self-modifying code needing write-protect disabled - but
-        // were written with no JITWriteScope of their own (upstream FEX targets Linux, which has no
-        // per-thread MAP_JIT W^X concept). Our own wrapper around Pointers.ExitFunctionLink brackets
-        // that call with a toggle to cover it, but ExitFunctionLink's "not yet compiled" path calls
-        // CompileBlock, which uses ITS OWN nested JITWriteScope - and that nested scope's destructor
-        // re-enables write-protect *before* control returns to our still-writing outer call, faulting
-        // on the self-modifying store with a real (not synthetic) protection violation.
+        // FEXCore's JITWriteScope (FEXCore/Utils/AllocatorHooks.h) toggles pthread_jit_write_protect_np
+        // per call, not via a nesting counter, so bracketing our own call to Pointers.ExitFunctionLink
+        // is not enough: its "not yet compiled" path calls CompileBlock, whose own nested JITWriteScope
+        // re-enables write protection before control returns to our still-writing outer call, faulting
+        // on the self-modifying store. Interposing pthread_jit_write_protect_np to make it reentrant
+        // does not work either - every route to the real implementation from inside the interposer
+        // resolves back to the replacement.
         //
-        // Interposing pthread_jit_write_protect_np itself (via the __interpose section) to make it
-        // reentrant is not viable: both escape hatches for reaching the *real* implementation from
-        // inside the interposer - dlsym(RTLD_NEXT, ...) and dlopen(RTLD_NOLOAD)+dlsym-by-handle -
-        // resolve back to the interposed replacement itself, because dyld's __interpose rewrite here
-        // isn't scoped to "other images calling in" the way DYLD_INTERPOSE is normally described;
-        // there's no reliable way to bypass it once installed for this exact symbol name process-wide.
-        //
-        // Instead: react to the fault itself. The *executing* code at the moment of the crash
-        // (ExitFunctionLink, a plain libFEXCore.dylib function) is not MAP_JIT memory - only the
-        // CodeBuffer it writes into is - so leaving write-protect disabled for longer than strictly
-        // necessary is harmless as long as it's re-enabled before control returns to actually
-        // executing JIT-compiled (MAP_JIT) code again. See handle_fault_signal's SEGV_ACCERR branch:
-        // on a protection fault whose PC lands outside the dispatcher/guest range entirely (i.e.
-        // inside FEXCore's own regular code, not a Break-op trampoline), disable write-protect and
-        // retry the same faulting instruction rather than treating it as unhandled. Bounded per fault
-        // address so a genuinely different bug can't spin forever.
-        //
-        // A std::unordered_map<uint64_t, int> is not viable here: operator[] can insert a node or
-        // trigger a rehash - both call into the heap allocator - and this code runs inside a real
-        // hardware signal handler that can interrupt program execution at an arbitrary point,
-        // including mid-malloc()/free() of a totally unrelated allocation. Calling a non-async-
-        // signal-safe function from a signal handler in that situation is undefined behavior and can
-        // corrupt the allocator's internal free-list/lock if re-entered. A small fixed-size,
-        // non-allocating array, linear-scanned, is genuinely async-signal-safe. Per-vCPU (fex_vcpu
-        // member, not a file-scope global): under real multi-vCPU concurrency, more than one host
-        // thread can be mid-retry at the same time, and a shared array would race across vCPUs.
+        // So the fault is reacted to instead: handle_fault_signal's SEGV_ACCERR branch disables write
+        // protection and retries when the faulting PC is FEXCore's own code, not MAP_JIT memory,
+        // bounded per fault address so a different bug cannot spin. The bound lives in a fixed array
+        // rather than an unordered_map since operator[] can rehash and is unsafe to call from a signal
+        // handler that may interrupt an unrelated malloc()/free(). Each vCPU keeps its own slots, since
+        // every vCPU's host thread can be mid-retry at the same time; within one vCPU at most one
+        // address is ever mid-retry, so eight slots suffice.
         struct jit_write_protect_retry_slot
         {
             uint64_t address = 0;
@@ -203,10 +391,14 @@ namespace sogen::fex
 
         constexpr size_t jit_write_protect_retry_slot_count = 8;
 
-        // A burst of retries for the same address within this window counts toward the retry bound;
-        // a gap at least this long since the address last faulted means it's being reused healthily
-        // (a fresh, unrelated race resolved in the meantime), not spinning - see
-        // jit_write_protect_retry_count_for's doc comment.
+        struct jit_write_protect_retries
+        {
+            std::array<jit_write_protect_retry_slot, jit_write_protect_retry_slot_count> slots{};
+            size_t next_evict = 0;
+        };
+
+        // A gap at least this long since an address last faulted means the site is being reused
+        // healthily rather than spinning, so its retry budget is reset.
         constexpr uint64_t jit_write_protect_retry_reset_window_ns = 100'000'000; // 100ms
 
         uint64_t monotonic_now_ns()
@@ -214,6 +406,39 @@ namespace sogen::fex
             struct timespec ts{};
             ::clock_gettime(CLOCK_MONOTONIC, &ts);
             return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL + static_cast<uint64_t>(ts.tv_nsec);
+        }
+
+        // Resets the counter when the address has not faulted within the window: otherwise a site that
+        // legitimately resolves this race many times over a long run would exhaust its budget and turn a
+        // benign race into a hard crash. Async-signal-safe: fixed-array scan, no allocation, and
+        // clock_gettime(CLOCK_MONOTONIC) is vDSO-backed.
+        int& jit_write_protect_retry_count_for(jit_write_protect_retries& retries, const uint64_t fault_addr)
+        {
+            const uint64_t now_ns = monotonic_now_ns();
+            jit_write_protect_retry_slot* free_slot = nullptr;
+            for (auto& slot : retries.slots)
+            {
+                if (slot.used && slot.address == fault_addr)
+                {
+                    if (now_ns - slot.last_fault_ns > jit_write_protect_retry_reset_window_ns)
+                    {
+                        slot.count = 0;
+                    }
+                    slot.last_fault_ns = now_ns;
+                    return slot.count;
+                }
+                if (free_slot == nullptr && !slot.used)
+                {
+                    free_slot = &slot;
+                }
+            }
+
+            auto& slot = (free_slot != nullptr) ? *free_slot : retries.slots[retries.next_evict++ % jit_write_protect_retry_slot_count];
+            slot.address = fault_addr;
+            slot.count = 0;
+            slot.used = true;
+            slot.last_fault_ns = now_ns;
+            return slot.count;
         }
 
         // Apple Silicon's fixed host mmap/mprotect granularity (no way to get 4KB host pages).
@@ -229,14 +454,44 @@ namespace sogen::fex
             return (value + host_page_size_apple - 1) & ~(host_page_size_apple - 1);
         }
 
-        // Decodes just enough of an AArch64 "Load register" instruction to service an mmio_region
-        // fault: destination register, transfer size, and zero/sign extension. Deliberately does not
-        // decode the addressing mode (immediate, unscaled, register-offset, ...) - the effective
-        // address is already known exactly (it's the fault address FEXCore's guest-VA==host-VA model
-        // uses directly), so only the fields the "Load/store register" encoding class keeps at fixed
-        // bit positions across every addressing-mode sub-form are needed (size/opc at [31:30]/[23:22],
-        // Rt at [4:0] - see the AArch64 ISA's C4.1.3 "Loads and stores" encoding table). Stores are not
-        // decoded: this backend's only MMIO consumer is read-only (see mmio_region's doc comment).
+        void report_missing_watchpoints_once()
+        {
+            static std::once_flag reported;
+            std::call_once(reported, [] {
+                if (utils::host_watchpoints::capacity() == 0)
+                {
+                    fprintf(stderr, "[FEX backend] Hardware watchpoints are unavailable or owned by a debugger: a no-access 4KB "
+                                    "page sharing a 16KB host page with accessible memory will not fault\n");
+                }
+            });
+        }
+
+        constexpr size_t pages_per_host_page_apple = host_page_size_apple / page_size;
+        constexpr uint64_t no_generation_apple = ~uint64_t{0};
+
+        struct watchpoint_set
+        {
+            std::array<utils::host_watchpoints::range, 16> ranges{};
+            size_t count{};
+
+            std::span<const utils::host_watchpoints::range> span() const
+            {
+                return {this->ranges.data(), this->count};
+            }
+
+            bool operator==(const watchpoint_set& other) const
+            {
+                return std::ranges::equal(this->span(), other.span());
+            }
+        };
+#endif
+
+        // Decodes only what an mmio_region fault needs: destination register, transfer size and
+        // extension. The addressing mode is deliberately not decoded - the effective address is already
+        // known, being the fault address itself under guest VA == host VA - so only the fields the
+        // "Load/store register" class keeps at fixed bit positions across every sub-form are read
+        // (size/opc at [31:30]/[23:22], Rt at [4:0]; AArch64 ISA C4.1.3). Stores are not decoded: this
+        // backend's only MMIO consumer is read-only.
         struct decoded_arm64_load
         {
             uint32_t size = 0; // bytes: 1, 2, 4, 8, 16
@@ -283,9 +538,9 @@ namespace sogen::fex
                 {0xF8600800U, 8, false, true},  // LDR Xt (register)
             };
 
-            // "Load register (unscaled immediate, LDUR)" - same top22+low-bits mask width as the
-            // register-offset form above, but bit21=0 (vs. 1) and bits[11:10]="00" (vs. "10"); the
-            // 9-bit signed immediate at bits[20:12] is variable/unchecked, same as Rn/Rt.
+            // "Load register (unscaled immediate)" - LDUR plus FEAT_LRCPC2's LDAPUR family. Both
+            // use a signed imm9 in bits[20:12], so the same top22+low-bits mask handles them while
+            // ignoring the immediate, Rn and Rt.
             static constexpr encoding unscaled_loads[] = {
                 {0x38400000U, 1, false, false},        // LDURB
                 {0x38800000U, 1, true, true},          // LDURSB, 64-bit dest
@@ -297,6 +552,16 @@ namespace sogen::fex
                 {0xB8800000U, 4, true, true},          // LDURSW
                 {0xF8400000U, 8, false, true},         // LDUR Xt
                 {0x3CC00000U, 16, false, false, true}, // LDUR Qt
+
+                {0x19400000U, 1, false, false}, // LDAPURB
+                {0x19800000U, 1, true, true},   // LDAPURSB, 64-bit dest
+                {0x19C00000U, 1, true, false},  // LDAPURSB, 32-bit dest
+                {0x59400000U, 2, false, false}, // LDAPURH
+                {0x59800000U, 2, true, true},   // LDAPURSH, 64-bit dest
+                {0x59C00000U, 2, true, false},  // LDAPURSH, 32-bit dest
+                {0x99400000U, 4, false, false}, // LDAPUR Wt
+                {0x99800000U, 4, true, true},   // LDAPURSW
+                {0xD9400000U, 8, false, true},  // LDAPUR Xt
             };
 
             // "Load-acquire register (LDAPR/LDAPRB/LDAPRH, and the older base LDAR/LDARB/LDARH from
@@ -370,35 +635,12 @@ namespace sogen::fex
             return std::nullopt;
         }
 
-        // Decodes an AArch64 "Store-release register" (STLR/STLRB/STLRH) instruction - the
-        // counterpart to decode_arm64_load's LDAR/LDAPR handling, used only for the misaligned-atomic
-        // fallback in handle_fault_signal (see its doc comment), never for mmio_region (this backend's
-        // only MMIO consumer is read-only). Same fixed-Rm, no-addressing-mode shape as LDAR/LDAPR.
+        // Store-release forms (STLR/STLRB/STLRH and STLUR/STLURB/STLURH), the counterpart to
+        // decode_arm64_load's LDAR/LDAPR/LDAPUR handling.
         //
-        // Deliberately does NOT also decode plain STR/STUR (unlike decode_arm64_load, which does
-        // cover the equivalent plain-load forms): broadening this table to cover them for
-        // handle_general_memory_violation's Category-3 "false fault" case causes a real,
-        // reproducible hang isolated to this table specifically (decode_arm64_load's equivalent
-        // plain-load coverage is safe - the KUSD/MMIO path already exercises it) with a root cause
-        // that is not yet understood, so this table must stay narrow. Category-3 false-fault
-        // emulation is therefore currently limited to loads and STLR-family stores; a plain-store
-        // false fault falls through to a crash instead of being emulated.
-        //
-        // This has a real, understood downstream consequence beyond just that crash, tracked
-        // separately: handle_general_memory_violation also uses this same decoder to classify a
-        // fault's memory_operation (write vs. read) for the *genuine* protection-violation dispatch
-        // path, not just the false-fault path. A plain (non-atomic) STR to memory that IS mapped
-        // read-only is therefore misclassified as a read: since the page's shadow entry declares
-        // read permission, the "read" appears legitimate and is routed into the false-fault
-        // recovery paths, which both fail for a genuine protection violation - the fault then
-        // surfaces as an UNHANDLED host signal that aborts the whole emulator process, instead of
-        // being delivered to the guest as STATUS_ACCESS_VIOLATION. Any guest that deliberately
-        // writes to read-only memory and catches the resulting exception (packers/DRM protections
-        // do this routinely) hits this. A plain store to UNMAPPED memory does reach the guest as an
-        // exception, but with the read/write flag (ExceptionInformation[0]) wrongly reporting a
-        // read. Not fixed here since a safe fix needs a classification-only check independent of
-        // this decode table (which is unsafe to broaden, per the hang above) and that hasn't been
-        // implemented/verified yet.
+        // Deliberately narrow: adding plain STR/STUR causes a reproducible hang in false-fault
+        // emulation, isolated to this table (root cause not yet understood; decode_arm64_load's
+        // equivalent plain-load coverage is safe).
         struct decoded_arm64_store
         {
             uint32_t size = 0; // bytes: 1, 2, 4, 8
@@ -420,8 +662,18 @@ namespace sogen::fex
                 {0xC89FFC00U, 8}, // STLR Xt
             };
 
+            // FEAT_LRCPC2 store-release with signed imm9. FEX emits these when SupportsTSOImm9 is
+            // enabled; unlike ordinary STUR, they retain release ordering and require natural alignment.
+            static constexpr encoding unscaled_stores[] = {
+                {0x19000000U, 1}, // STLURB
+                {0x59000000U, 2}, // STLURH
+                {0x99000000U, 4}, // STLUR Wt
+                {0xD9000000U, 8}, // STLUR Xt
+            };
+
             const uint32_t rt = insn & 0x1FU;
             const uint32_t fixed = insn & 0xFFFFFC00U;
+            const uint32_t unscaled_fixed = insn & 0xFFE00C00U;
 
             for (const auto& enc : stores)
             {
@@ -431,9 +683,16 @@ namespace sogen::fex
                 }
             }
 
+            for (const auto& enc : unscaled_stores)
+            {
+                if (unscaled_fixed == enc.value)
+                {
+                    return decoded_arm64_store{enc.size, rt};
+                }
+            }
+
             return std::nullopt;
         }
-#endif
 
         bool is_page_aligned(const uint64_t value)
         {
@@ -459,15 +718,11 @@ namespace sogen::fex
         }
 
 #ifdef __APPLE__
-        // Apple Silicon's kernel categorically refuses simultaneous write+exec on any mapping that
-        // isn't MAP_JIT-backed (mprotect fails outright with EACCES) - unlike Linux, where W^X for
-        // guest memory is advisory at best. This is independent of the 16KB/4KB reconciliation
-        // above: even a single guest region directly requesting RWX hits it, which real PE loaders
-        // do routinely (map .text RWX to patch ASLR relocations, then narrow to RX before the module
-        // ever executes). Favoring write over exec here handles that common, well-defined sequence
-        // correctly; it would be wrong for a page that is genuinely written and executed in the same
-        // window without an intervening apply_memory_protection call, which is not how real PE
-        // loading behaves.
+        // Apple Silicon's kernel refuses simultaneous write+exec on any non-MAP_JIT mapping (mprotect
+        // fails with EACCES), unlike Linux where guest W^X is advisory. Real PE loaders hit this
+        // routinely: map .text RWX to apply relocations, then narrow to RX before executing. Favoring
+        // write handles that sequence; it would be wrong for a page genuinely written and executed in
+        // the same window without an intervening apply_memory_protection call, which PE loading is not.
         int to_prot_apple(const memory_permission permissions)
         {
             int prot = to_prot(permissions);
@@ -478,67 +733,72 @@ namespace sogen::fex
             return prot;
         }
 
-        // Places a fresh anonymous mapping at exactly `target`, never replacing anything already
-        // there. Unlike posix mmap(MAP_FIXED) - which the BSD mmap syscall always pairs with
-        // VM_FLAGS_OVERWRITE (bsd/kern/kern_mman.c) and which therefore deletes-then-inserts over the
-        // target range before placing the new mapping - plain VM_FLAGS_FIXED skips that delete step
-        // and just fails cleanly with KERN_NO_SPACE/KERN_MEMORY_PRESENT if any part of the range isn't
-        // free. That distinction matters here: the delete step raises a fatal, uncatchable EXC_GUARD
-        // (GUARD_TYPE_VIRT_MEMORY / kGUARD_EXC_DEALLOC_GAP, osfmk/vm/vm_map.c's vm_map_delete()) the
-        // moment any part of the deleted range turns out to be unmapped - which every genuinely
-        // first-touch placement in this backend guarantees, since the whole point of placing one is
-        // that nothing is there yet.
-        kern_return_t map_fixed_anonymous_apple(void* target, size_t size, vm_prot_t cur_protection, vm_prot_t max_protection)
+        vm_prot_t to_vm_prot(const int prot)
         {
-            auto placed = reinterpret_cast<mach_vm_address_t>(target);
-            const kern_return_t result = mach_vm_map(mach_task_self(), &placed, size, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
-                                                     cur_protection, max_protection, VM_INHERIT_DEFAULT);
-            if (result == KERN_SUCCESS && reinterpret_cast<void*>(placed) != target)
+            vm_prot_t result = VM_PROT_NONE;
+            if ((prot & PROT_READ) != 0)
             {
-                mach_vm_deallocate(mach_task_self(), placed, size);
-                return KERN_NO_SPACE;
+                result |= VM_PROT_READ;
+            }
+            if ((prot & PROT_WRITE) != 0)
+            {
+                result |= VM_PROT_WRITE;
+            }
+            if ((prot & PROT_EXEC) != 0)
+            {
+                result |= VM_PROT_EXECUTE;
             }
             return result;
         }
 
-        // Like map_fixed_anonymous_apple, but for callers where `target` may legitimately already be
-        // covered by a reservation this backend itself made earlier - e.g. a page inside the wow64
-        // host window's up-front PROT_NONE placeholder (reserve_wow64_host_window), which every wow64
-        // guest page commit lands inside without sogen's own per-page bookkeeping having claimed it
-        // yet. Tries the plain, gap-checked placement first; only on KERN_NO_SPACE/KERN_MEMORY_PRESENT
-        // - meaning something is already mapped there in full, so no gap exists - does it retry with
-        // VM_FLAGS_OVERWRITE, which is safe precisely because that first call just proved there is no
-        // gap for vm_map_delete() to trip on.
-        kern_return_t map_fixed_anonymous_apple_replace(void* target, size_t size, vm_prot_t cur_protection, vm_prot_t max_protection)
+        // Replaces whatever is mapped at [target, target + size) with fresh anonymous memory. BSD mmap(MAP_FIXED) over a
+        // range whose entry is not a plain anonymous one (e.g. a mach_vm_remap alias of KUSER_SHARED_DATA's backing) raises
+        // a fatal, uncatchable EXC_GUARD (GUARD_TYPE_VIRT_MEMORY / kGUARD_EXC_DEALLOC_GAP, osfmk/vm/vm_map.c's
+        // vm_map_delete()); mach_vm_map with VM_FLAGS_OVERWRITE does not. The max protection must stay VM_PROT_ALL, or a
+        // later mprotect could never make the range accessible again.
+        bool replace_with_anonymous_apple(const uint64_t target, const size_t size, const int protection)
         {
-            const kern_return_t result = map_fixed_anonymous_apple(target, size, cur_protection, max_protection);
-            if (result != KERN_NO_SPACE && result != KERN_MEMORY_PRESENT)
-            {
-                return result;
-            }
-
-            auto placed = reinterpret_cast<mach_vm_address_t>(target);
-            const kern_return_t overwrite_result =
-                mach_vm_map(mach_task_self(), &placed, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, FALSE,
-                            cur_protection, max_protection, VM_INHERIT_DEFAULT);
-            if (overwrite_result == KERN_SUCCESS && reinterpret_cast<void*>(placed) != target)
-            {
-                mach_vm_deallocate(mach_task_self(), placed, size);
-                return KERN_NO_SPACE;
-            }
-            return overwrite_result;
+            auto placed = static_cast<mach_vm_address_t>(target);
+            const kern_return_t result =
+                ::mach_vm_map(mach_task_self(), &placed, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, FALSE,
+                              to_vm_prot(protection), VM_PROT_ALL, VM_INHERIT_DEFAULT);
+            return result == KERN_SUCCESS && placed == target;
         }
 
-        kern_return_t traced_map_fixed_anonymous_apple_replace(void* target, size_t size, vm_prot_t cur_protection,
-                                                               vm_prot_t max_protection, const char* site)
+        constexpr uint64_t data_abort_from_lower_el = 0x24;
+        constexpr uint64_t watchpoint_from_lower_el = 0x34;
+
+        uint64_t exception_class(const uint64_t esr)
         {
-            const kern_return_t result = map_fixed_anonymous_apple_replace(target, size, cur_protection, max_protection);
-            if (::getenv("SOGEN_TRACE_MMAP") != nullptr)
+            constexpr uint64_t exception_class_shift = 26;
+            constexpr uint64_t exception_class_mask = 0x3F;
+            return (esr >> exception_class_shift) & exception_class_mask;
+        }
+
+        bool is_watchpoint_exception(const uint64_t esr)
+        {
+            return exception_class(esr) == watchpoint_from_lower_el;
+        }
+
+        // Arm ARM, ESR_EL1 ISS for data aborts and watchpoints: WnR is set for every cache maintenance fault (CM). x86
+        // checks the CLFLUSH/CLFLUSHOPT/CLWB that FEX emits as DC CIVAC/CVAC like a byte load (Intel SDM vol. 2A, CLFLUSH).
+        std::optional<memory_operation> memory_access_operation(const uint64_t esr)
+        {
+            constexpr uint64_t cache_maintenance = 1ULL << 8;
+            constexpr uint64_t write_not_read = 1ULL << 6;
+
+            const auto syndrome_class = exception_class(esr);
+            if (syndrome_class != data_abort_from_lower_el && syndrome_class != watchpoint_from_lower_el)
             {
-                fprintf(stderr, "[mmap-trace] site=%s addr=%p len=0x%zx kern_return=%d\n", site, target, size, static_cast<int>(result));
-                fflush(stderr);
+                return std::nullopt;
             }
-            return result;
+
+            if ((esr & cache_maintenance) != 0 || (esr & write_not_read) == 0)
+            {
+                return memory_operation::read;
+            }
+
+            return memory_operation::write;
         }
 #endif
 
@@ -670,28 +930,78 @@ namespace sogen::fex
             bool owned = true; // false for map_host_memory aliases we must not munmap
         };
 
-        // FEX runs the guest natively with guest VA == host VA, so there is no per-instruction hook to
-        // intercept a specific address the way an interpreted backend can - every access to this
-        // backend's only current MMIO consumer, KUSER_SHARED_DATA, would otherwise cost a real
-        // hardware fault + signal round-trip (measured as the dominant cost of a whole run when guest
-        // code polls it at high frequency, e.g. a loading-screen timer). At its raw guest address
-        // (0x7ffe0000) the region falls inside __PAGEZERO and truly cannot be backed by real memory
-        // (confirmed via both mmap(MAP_FIXED) and mach_vm_allocate) - but for a wow64 process it is
-        // rebased above 4GB like any other sub-4GB guest address (see wow64_guest_rebase), where real
-        // backing is possible. map_mmio opportunistically mmaps read-only real memory there and keeps
-        // it fresh once per quantum (see refresh_mmio_backings); host_backing stays null wherever the
-        // real mapping isn't possible (e.g. a native 64-bit process), and the region falls back to the
-        // original always-unmapped, fault-and-emulate behavior via handle_mmio_fault. Read-only either
-        // way: this backend's only consumer treats guest writes as a no-op, so a write here is left to
-        // surface as a normal access violation, matching real Windows (KUSER_SHARED_DATA is read-only
-        // user-mapped memory there too) - not a general MMIO implementation.
+        // A chunk of tracked memory is write-protected until its first write, which marks it written, and inaccessible
+        // while stale, until its first access brings its cache lines up to date. Guest code and the emulator only access
+        // tracked memory on the thread running the guest, which also changes the tracking, and the faults recording those
+        // accesses arrive as signals on that thread; the state is atomic for those signals, not for other threads.
+        struct tracked_chunk
+        {
+            std::atomic<bool> written{};
+            std::atomic<bool> stale{};
+        };
+
+        struct tracked_range
+        {
+            size_t size = 0;
+            std::vector<tracked_chunk> chunks;
+        };
+
+        struct chunk_run
+        {
+            uint64_t address = 0;
+            size_t size = 0;
+
+            template <typename F>
+            void add(const uint64_t chunk_address, const size_t chunk_size, F&& f)
+            {
+                if (this->size != 0 && this->address + this->size != chunk_address)
+                {
+                    this->finish(f);
+                }
+                if (this->size == 0)
+                {
+                    this->address = chunk_address;
+                }
+                this->size += chunk_size;
+            }
+
+            template <typename F>
+            void finish(F&& f)
+            {
+                if (this->size != 0)
+                {
+                    f(this->address, this->size);
+                    this->size = 0;
+                }
+            }
+        };
+
+        enum class tracked_access : uint8_t
+        {
+            none,
+            read_only,
+            full,
+        };
+
+        // The guest runs natively with guest VA == host VA, so there is no per-instruction hook to
+        // intercept a specific address. The only MMIO consumer here is KUSER_SHARED_DATA at 0x7ffe0000.
+        // Inside the low guest window it is backed by read-only host memory that is refreshed before every
+        // guest entry and after every syscall, as the KVM backend does, so a guest write surfaces as a normal
+        // access violation like on real Windows. Outside it, the region is left unmapped and every access
+        // faults into handle_mmio_fault: on Darwin the address then falls inside the mandatory __PAGEZERO
+        // segment and cannot be backed by real memory (confirmed via both mmap(MAP_FIXED) and mach_vm_allocate).
+        // Not a general MMIO implementation.
         struct mmio_region
         {
             uint64_t address = 0;
             size_t size = 0;
             mmio_read_callback read_cb;
-            void* host_backing = nullptr;
-            size_t host_backing_size = 0;
+            utils::shared_host_buffer backing{};
+
+            bool is_backed() const
+            {
+                return this->backing.data() != nullptr;
+            }
         };
 
         struct hook_entry
@@ -700,11 +1010,9 @@ namespace sogen::fex
             instruction_hook_callback callback;
         };
 
-        // A patched (0xCC-planted) breakpoint's saved state. Refcounted: more than one
-        // execution_hook_entry can target the same address, and the byte is only ever restored once
-        // the last one is deleted. `applied` distinguishes an actually-planted 0xCC from a breakpoint
-        // temporarily "suspended" (original_byte known, but not currently written) while its own
-        // step-over is in flight - see try_apply_patched_execution_breakpoint's callers.
+        // A planted 0xCC is the only way this backend observes execution of a single address. Several hooks can share an
+        // address, and the original byte is only restored once the last one is deleted. A breakpoint whose original byte
+        // is known but not planted is suspended while a vCPU steps over the original instruction.
         struct patched_execution_breakpoint
         {
             std::optional<std::byte> original_byte{};
@@ -724,23 +1032,141 @@ namespace sogen::fex
             memory_execution_hook_callback callback{};
         };
 
-#ifdef __APPLE__
-        // The x86 EFLAGS trap-flag bit, used by this backend's own internal single-step
-        // implementation (start(1) and breakpoint step-over both arm it directly on the guest's
-        // rflags rather than relying on any FEXCore-level single-step primitive).
         constexpr uint64_t trap_flag_bit = 0x100;
 
-        // Per-vCPU record of an in-flight internal single-step (either an explicit start(1), or a
-        // breakpoint's automatic step-over of its own restored original instruction). Saved/restored
-        // around arming/consuming the trap flag so a step never leaks TF into the guest's own EFLAGS,
-        // and never clobbers a TF the guest had already armed for its own single-step trap.
+        // An internal single step (start(1), or the step over a patched breakpoint's original instruction) sets TF in the
+        // guest's rflags. The guest's own TF is restored afterwards, and a #DB the guest asked for itself still reaches it.
         struct pending_execution_step
         {
             bool had_trap_flag{};
             std::optional<uint64_t> patched_breakpoint{};
             bool stop_after_step{};
         };
+
+        // The tables shared by all vCPUs are guarded by one shared_mutex. Fault handlers read them as well, and a host
+        // access the emulator makes while holding the lock (a write to tracked memory, say) faults on the same thread, so
+        // the depth of locks a thread holds lets the handler tell whether it may take the lock or already has it.
+        thread_local size_t t_tables_lock_depth = 0;
+
+        class tables_lock
+        {
+          public:
+            tables_lock(std::shared_mutex& mutex, const bool exclusive)
+                : mutex_(mutex),
+                  exclusive_(exclusive)
+            {
+                if (this->exclusive_)
+                {
+                    this->mutex_.lock();
+                }
+                else
+                {
+                    this->mutex_.lock_shared();
+                }
+                ++t_tables_lock_depth;
+            }
+
+            ~tables_lock()
+            {
+                --t_tables_lock_depth;
+                if (this->exclusive_)
+                {
+                    this->mutex_.unlock();
+                }
+                else
+                {
+                    this->mutex_.unlock_shared();
+                }
+            }
+
+            tables_lock(const tables_lock&) = delete;
+            tables_lock& operator=(const tables_lock&) = delete;
+
+          private:
+            std::shared_mutex& mutex_;
+            bool exclusive_;
+        };
+
+        class signal_tables_lock
+        {
+          public:
+            explicit signal_tables_lock(std::shared_mutex& mutex)
+            {
+                if (t_tables_lock_depth == 0)
+                {
+                    this->lock_.emplace(mutex, false);
+                }
+            }
+
+          private:
+            std::optional<tables_lock> lock_{};
+        };
+
+        // x86 keeps unaligned loads and stores single-copy atomic as long as they stay inside one cache line (Intel SDM
+        // vol. 3A, 9.1.1), and the faulted LDAR/LDAPR/STLR carried acquire/release ordering, so emulating one with a plain
+        // memcpy could let another vCPU observe a torn value. On Apple Silicon, which always has LSE2, accesses inside one
+        // aligned 16-byte window go through 128-bit atomics; without LSE2 a 128-bit atomic load is a compare-and-swap,
+        // which faults on read-only memory. Other accesses are serialized against each other and fenced, since no
+        // AArch64 primitive is wide enough to reproduce x86's guarantee for them.
+        std::atomic_flag g_wide_misaligned_access_lock = ATOMIC_FLAG_INIT;
+
+#ifdef __APPLE__
+        bool contained_in_atomic_window(const uint64_t address, const uint32_t size)
+        {
+            constexpr uint64_t window_mask = ~uint64_t{15};
+            return (address & window_mask) == ((address + size - 1) & window_mask);
+        }
 #endif
+
+        template <typename F>
+        void with_wide_misaligned_access_lock(F&& f)
+        {
+            while (g_wide_misaligned_access_lock.test_and_set(std::memory_order_acquire))
+            {
+            }
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            f();
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            g_wide_misaligned_access_lock.clear(std::memory_order_release);
+        }
+
+        void read_memory_single_copy_atomic(const uint64_t address, void* out, const uint32_t size)
+        {
+#ifdef __APPLE__
+            if (contained_in_atomic_window(address, size))
+            {
+                const uint64_t window = address & ~uint64_t{15};
+                const auto value = __atomic_load_n(reinterpret_cast<const unsigned __int128*>(window), __ATOMIC_SEQ_CST);
+                std::memcpy(out, reinterpret_cast<const std::byte*>(&value) + (address - window), size);
+                return;
+            }
+#endif
+
+            with_wide_misaligned_access_lock([&] { std::memcpy(out, reinterpret_cast<const void*>(address), size); });
+        }
+
+        void write_memory_single_copy_atomic(const uint64_t address, const void* data, const uint32_t size)
+        {
+#ifdef __APPLE__
+            if (contained_in_atomic_window(address, size))
+            {
+                const uint64_t window = address & ~uint64_t{15};
+                auto* const target = reinterpret_cast<unsigned __int128*>(window);
+                auto expected = __atomic_load_n(target, __ATOMIC_RELAXED);
+                while (true)
+                {
+                    auto desired = expected;
+                    std::memcpy(reinterpret_cast<std::byte*>(&desired) + (address - window), data, size);
+                    if (__atomic_compare_exchange_n(target, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+                    {
+                        return;
+                    }
+                }
+            }
+#endif
+
+            with_wide_misaligned_access_lock([&] { std::memcpy(reinterpret_cast<void*>(address), data, size); });
+        }
 
 #ifdef __APPLE__
         bool sysctl_flag(const char* name)
@@ -754,12 +1180,10 @@ namespace sogen::fex
             return value != 0;
         }
 
-        // Real Apple Silicon feature detection via sysctlbyname's hw.optional.arm.* namespace, in
-        // place of FEXCore's own FetchHostFeatures() (Linux-only: reads MIDR_EL1, which isn't
-        // EL0-readable/trap-emulated on Darwin the way arm64 Linux's kernel does it). Confirmed
-        // present on Apple Silicon (M-series) via `sysctl -a | grep hw.optional`; anything not
-        // confirmed present, or without a clear ARM-feature mapping, is conservatively left false -
-        // that only costs codegen quality, never correctness.
+        // Replaces FEXCore's own FetchHostFeatures(), which is Linux-only: it reads MIDR_EL1, neither
+        // EL0-readable nor trap-emulated on Darwin. Anything not confirmed present in
+        // hw.optional.arm.*, or without a clear ARM-feature mapping, is left false - that costs codegen
+        // quality, never correctness.
         FEXCore::HostFeatures fetch_host_features_apple()
         {
             FEXCore::HostFeatures features{};
@@ -792,23 +1216,22 @@ namespace sogen::fex
             // No Apple Silicon hardware supports SVE/SVE2 as of this writing.
             features.SupportsSVE128 = false;
             features.SupportsSVE256 = false;
+            // AVX can make FEX emit paired SIMD loads, which MMIO emulation doesn't support yet.
             features.SupportsAVX = false;
+            features.SupportsAES256 = features.SupportsAES && features.SupportsAVX;
             features.SupportsSVEBitPerm = false;
 
-            // TPIDRRO_EL0 is not confirmed to carry a CPU index on Darwin the way arm64 Linux's
-            // kernel populates it; the fork's DEF_OP(ProcessorID) treats the non-TPIDRRO fallback as
-            // unsupported (matching the Windows/wine precedent), so leaving this false means a guest
-            // RDTSCP/RDPID will hard-error rather than silently read garbage. Known gap, not a
-            // correctness risk: real-world guest code rarely depends on RDTSCP/RDPID succeeding.
+            // TPIDRRO_EL0 is not confirmed to carry a CPU index on Darwin, and DEF_OP(ProcessorID)
+            // treats the non-TPIDRRO fallback as unsupported (matching the Windows/wine precedent), so
+            // leaving this false makes a guest RDTSCP/RDPID hard-error rather than read garbage.
             features.SupportsCPUIndexInTPIDRRO = false;
 
-            // FEXCore's CPUID brand-string leaves (0x80000002-4) index PerCPUData, whose size is
-            // CPUMIDRs.size(); an empty CPUMIDRs leaves PerCPUData empty and the leaf null-derefs
-            // its ProductName. Linux's FetchHostFeatures() populates this by reading MIDR_EL1 per
-            // core, which is unavailable from EL0 on Darwin. Report the host logical-CPU count with
-            // a placeholder MIDR of 0: the M-series parts aren't in FEXCore's MIDR table anyway, so
-            // it resolves to the "Unknown ARM CPU" brand string (FEXCore's own fallback) rather
-            // than crashing, and keeps the guest-visible core count (derived from Cores) realistic.
+            // FEXCore's CPUID brand-string leaves (0x80000002-4) index PerCPUData, sized from CPUMIDRs;
+            // an empty CPUMIDRs null-derefs the leaf's ProductName. Linux populates it from per-core
+            // MIDR_EL1, unavailable from EL0 on Darwin, so the host logical-CPU count is reported with a
+            // placeholder MIDR of 0: M-series parts are absent from FEXCore's MIDR table anyway, so it
+            // resolves to FEXCore's own "Unknown ARM CPU" fallback while keeping the guest-visible core
+            // count realistic.
             uint32_t logical_cpus = 1;
             size_t logical_cpus_len = sizeof(logical_cpus);
             if (::sysctlbyname("hw.logicalcpu", &logical_cpus, &logical_cpus_len, nullptr, 0) != 0 || logical_cpus == 0)
@@ -819,89 +1242,83 @@ namespace sogen::fex
 
             return features;
         }
+#endif
 
-        // Guards against a second live FEX emulator instance in this process - fault routing below
-        // uses one shared, process-wide sigaction handler, and only one instance may ever install it
-        // (reachable e.g. via the Python bindings constructing two emulators). Unrelated to per-vCPU
-        // fault routing, which is t_current_vcpu below: FEXCore's own real Linux embedding
-        // (SignalDelegator::HandleSignal) validates exactly this split - one shared handler, routed
-        // per-thread via a thread-keyed lookup, not a single global "the" active instance.
+        // Signal handlers cannot be non-static member functions, hence the indirection.
         fex_x86_64_emulator* g_active_emulator = nullptr;
 
-        // POSIX synchronous signals (SIGSEGV/SIGBUS/SIGILL/SIGTRAP) always deliver to the thread that
-        // caused them, so a thread_local pointer to whichever fex_vcpu this host thread is currently
-        // driving is a lock-free, correct way to route a fault to the right vCPU's state under
-        // multi-vCPU. Set/cleared by fex_vcpu::start() for the duration of guest execution; null on
-        // any other thread (UI pump, watchdog), which correctly falls through fault_signal_handler to
-        // the existing unhandled-crash report instead of misrouting to some arbitrary vCPU.
-        thread_local fex_vcpu* t_current_vcpu = nullptr;
-
-        // RAII guard for t_current_vcpu, scoped to fex_vcpu::start()'s ExecuteThread loop.
-        struct current_vcpu_scope
-        {
-            explicit current_vcpu_scope(fex_vcpu& vcpu)
-            {
-                t_current_vcpu = &vcpu;
-            }
-
-            ~current_vcpu_scope()
-            {
-                t_current_vcpu = nullptr;
-            }
-
-            current_vcpu_scope(const current_vcpu_scope&) = delete;
-            current_vcpu_scope& operator=(const current_vcpu_scope&) = delete;
-        };
+        // A synchronous fault is delivered to the host thread that raised it, so the vCPU running guest code on that
+        // thread is the one the fault belongs to.
+        thread_local fex_vcpu* t_running_vcpu = nullptr;
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
 
-        // Returns the previously active instance (nullptr if none), for the caller - a member
-        // function of the now-complete fex_x86_64_emulator, unlike this free function - to stash in
-        // previous_active_emulator_ and restore on destruction.
-        [[nodiscard]] fex_x86_64_emulator* install_fault_signal_handlers(fex_x86_64_emulator& emulator)
+        // FEXCore's Break stubs use SIGILL for HLT/UDF and SIGTRAP for BRK, including x86 INT3, so both
+        // must reach the same host-fault dispatcher as SIGSEGV/SIGBUS.
+        constexpr std::array<int, 4> fault_signals = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP};
+
+        // The handlers installed before the first emulator's, which get the faults this backend does not handle. On
+        // Android that is the crash reporter writing a tombstone.
+        std::array<struct sigaction, fault_signals.size()> g_previous_fault_actions{};
+        bool g_previous_fault_actions_saved = false;
+
+        // A dedicated alternate stack, so a second signal arriving while this handler is already
+        // running does not nest on the faulting thread's potentially near-exhausted stack. The
+        // alternate stack is per host thread, and every vCPU runs guest code on its own thread.
+        void ensure_alternate_signal_stack()
+        {
+            thread_local std::array<std::byte, 64 * 1024> alt_stack{};
+            thread_local bool installed = false;
+            if (installed)
+            {
+                return;
+            }
+
+            stack_t stack{};
+            stack.ss_sp = alt_stack.data();
+            stack.ss_size = alt_stack.size();
+            ::sigaltstack(&stack, nullptr);
+            installed = true;
+        }
+
+        void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
         {
             // Fault routing is process-global (one sigaction handler set, one active-instance
-            // pointer), but a strictly nested second instance is legitimate: NtCreateUserProcess runs
-            // a child windows_emulator synchronously to completion on the same host thread while the
-            // parent's own instance is blocked inside that same syscall handler, so the two never
-            // execute guest code concurrently and routing faults to whichever is innermost is correct.
-            // Save-and-swap rather than refuse outright; the returned previous instance is restored
-            // once the child's destructor runs (see ~fex_x86_64_emulator).
-            auto* const previous = g_active_emulator;
+            // pointer). A second live instance would silently receive the first one's faults, so
+            // refuse it outright - reachable e.g. via the Python bindings constructing two emulators.
+            if (g_active_emulator != nullptr)
+            {
+                throw std::runtime_error("Only one FEX emulator instance can be active per process");
+            }
+
             g_active_emulator = &emulator;
 
-            struct sigaction action = {};
+            ensure_alternate_signal_stack();
+
+            struct sigaction action{};
             action.sa_sigaction = fault_signal_handler;
             action.sa_flags = SA_SIGINFO | SA_ONSTACK;
             sigemptyset(&action.sa_mask);
 
-            ::sigaction(SIGSEGV, &action, nullptr);
-            ::sigaction(SIGBUS, &action, nullptr);
-            ::sigaction(SIGILL, &action, nullptr);
-
-            // FEXCore's IR "Break" op (see handle_fault_signal's FaultToTopAndGeneratedException
-            // comment) models x86 HLT/UD2/INT3/INT1/INTO/unhandled-INT-N uniformly via distinct native
-            // trap instructions chosen per Dispatcher.cpp's GuestSignal_SIG* stubs: HLT/UDF raise
-            // SIGILL, BRK raises SIGTRAP. INT3 (x86_64_dbgbreak/DebugBreak()) goes through the SIGTRAP
-            // stub - without a handler registered here, that BRK was an entirely unhandled hardware
-            // trap, terminating the process (exit 128+SIGTRAP) instead of reaching the vector-dispatch
-            // logic below, which already handles vector 3 (breakpoint) correctly once it runs.
-            ::sigaction(SIGTRAP, &action, nullptr);
-
-            return previous;
+            // FEXCore's IR "Break" op models x86 HLT/UD2/INT3/INT1/INTO uniformly via distinct native
+            // traps chosen per Dispatcher.cpp's GuestSignal_SIG* stubs: HLT/UDF raise SIGILL, BRK raises
+            // SIGTRAP. INT3 (DebugBreak()) goes through the SIGTRAP stub, so without a handler here that
+            // BRK is an unhandled hardware trap terminating the process, instead of reaching the vector
+            // dispatch below, which handles vector 3 correctly.
+            for (size_t i = 0; i < fault_signals.size(); ++i)
+            {
+                ::sigaction(fault_signals[i], &action, g_previous_fault_actions_saved ? nullptr : &g_previous_fault_actions[i]);
+            }
+            g_previous_fault_actions_saved = true;
         }
 
-        // FEXCore::CPU::Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call
-        // site once its target block becomes known - self-modifying code, writing directly into a
-        // MAP_JIT code buffer. It doesn't bracket that write with a JIT-write-protect toggle (see
-        // FEXCore::Allocator::JITWriteScope) because it's written for Linux, which has no per-thread
-        // W^X state to worry about; on Apple Silicon the write faults with a real (not synthetic)
-        // protection violation, since MAP_JIT enforces write-XOR-execute per calling thread, not per
-        // mapping. FEXCore::HLE::CpuStateFrame::Pointers.ExitFunctionLink is a plain function-pointer
-        // slot JIT-compiled code calls through (see JIT.cpp's InitThreadPointers), so it can be
-        // intercepted here with a toggling wrapper instead of touching deps/FEX. Write-once (guarded
-        // by an atomic default of 0): every vCPU's thread shares the same original function pointer,
-        // so only the first thread to install the wrapper needs to capture it.
+#ifdef __APPLE__
+        // Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call site once its target
+        // block is known, writing straight into a MAP_JIT code buffer without a JITWriteScope, because
+        // it is written for Linux, which has no per-thread W^X state. Pointers.ExitFunctionLink is a
+        // plain function-pointer slot JIT code calls through (JIT.cpp's InitThreadPointers), so it can
+        // be wrapped here instead of patching deps/FEX.
+        // Every vCPU thread shares the same original function, so the first thread to install the wrapper records it.
         std::atomic<uint64_t> g_original_exit_function_link{0};
 
         uint64_t exit_function_link_jit_write_wrapper(FEXCore::Core::CpuStateFrame* frame, void* record)
@@ -909,43 +1326,32 @@ namespace sogen::fex
             using exit_function_link_fn = uint64_t (*)(FEXCore::Core::CpuStateFrame*, void*);
             const auto real = reinterpret_cast<exit_function_link_fn>(g_original_exit_function_link.load());
 
+            // pthread_jit_write_protect_np is per-thread and exclusive with execute permission on this
+            // thread's MAP_JIT pages: leaving it disabled past this call would fault the next guest
+            // instruction fetch on this thread, not just widen an otherwise-harmless window.
             ::pthread_jit_write_protect_np(0);
             const uint64_t result = real(frame, record);
             ::pthread_jit_write_protect_np(1);
             return result;
         }
 
-        // ===========================================================================================
-        // FEXCore-internal host allocation arena (Apple, guest VA == host VA).
+        // Under guest VA == host VA, FEXCore's own internal buffers (obtained via a raw ::mmap(NULL,
+        // ...), uncoordinated with sogen's bookkeeping) can land inside the guest's own address space,
+        // so an ordinary guest write into a buffer placed there corrupts FEXCore's state (the
+        // long-standing __tree_balance_after_insert / AddBlockLink corruption).
         //
-        // This backend runs guest VA == host VA, so any host allocation the kernel is free to place
-        // wherever it likes can land inside the guest's own address space. FEXCore obtains all of its
-        // internal buffers - the BlockLinks red-black-tree storage (fextl monotonic buffer resource),
-        // the JIT CodeBuffer, and the dispatcher - through FEXCore::Allocator::mmap(nullptr, ...) (via
-        // Allocator::VirtualAlloc), which by default is a raw ::mmap(NULL, ...) with zero coordination
-        // with sogen's guest bookkeeping. When one of those buffers happens to be placed at a host
-        // address the guest also owns, an ordinary guest SIMD/vector store silently overwrites
-        // FEXCore's own bookkeeping - the root cause of the long-standing __tree_balance_after_insert /
-        // AddBlockLink corruption (a wild guest store scribbling a live BlockLinks tree node with
-        // packed 16-bit-lane vector data).
-        //
-        // Fix: reserve one large host arena up-front, register its whole range as a reserved_host_range
-        // (so sogen's memory manager steers every guest allocation away from it - a genuine two-way
-        // exclusion), and satisfy every FEXCore::Allocator::mmap(nullptr, ...) request from inside it.
-        // Non-executable requests are placed with MAP_FIXED over the reserved region. Executable
-        // (MAP_JIT) requests cannot use MAP_FIXED - Apple rejects MAP_JIT|MAP_FIXED with EINVAL - so
-        // the sub-region is unmapped first and MAP_JIT is requested with the hole's address as a
-        // (non-fixed) hint, which the kernel reliably honors because nothing else competes for space
-        // inside the arena. The result is verified to land inside the arena or the request fails
-        // loudly (ENOMEM) rather than silently falling back to an unconstrained mapping that would
-        // reintroduce the exact aliasing hazard this exists to prevent.
-        // ===========================================================================================
+        // So one large host arena is reserved up front and registered as a reserved_host_range for a
+        // two-way exclusion, and every FEXCore::Allocator::mmap(nullptr, ...) is satisfied from inside
+        // it. Non-executable requests use MAP_FIXED; executable (MAP_JIT) ones cannot - Apple rejects
+        // MAP_JIT|MAP_FIXED with EINVAL - so the sub-region is unmapped first and MAP_JIT gets the
+        // hole's address as a non-fixed hint, reliable since nothing else competes for space inside the
+        // arena. The result is verified to land inside the arena and fails loudly rather than silently
+        // falling back to an unconstrained mapping that would reintroduce the hazard.
         class fex_internal_arena
         {
           public:
-            // Sized to comfortably exceed any realistic FEXCore-internal need (BlockLinks growth, the
-            // JIT CodeBuffer and its growth, the dispatcher) for a full game/application workload.
-            // Pure VA reservation (PROT_NONE) until sub-regions are actually committed.
+            // Pure VA reservation (PROT_NONE) until sub-regions are committed, sized to exceed any
+            // realistic FEXCore-internal need for a full application workload.
             static constexpr size_t arena_size = 0x1'0000'0000ULL; // 4 GiB
 
             static fex_internal_arena& instance()
@@ -954,23 +1360,8 @@ namespace sogen::fex
                 return arena;
             }
 
-            // Reserve the arena and install the FEXCore allocator hooks. Must run before the first
-            // FEXCore-internal allocation (context/CodeBuffer creation) and before the memory
-            // manager first queries reserved_host_ranges(). Idempotent.
-            //
-            // This runs before notify_process_bitness (bitness isn't known yet at CPU-backend
-            // construction time), so if the kernel's ASLR happens to place this arena's own
-            // mmap(nullptr, ...) inside [wow64_guest_rebase, wow64_guest_rebase +
-            // wow64_guest_address_space_size), that later reservation (see
-            // reserve_wow64_host_window's doc comment) finds the window already occupied - by us -
-            // and skips itself, silently losing the fix it exists to provide. Bitness isn't known
-            // here, so just always avoid that range for the arena's own placement (harmless for a
-            // non-wow64 process too - the arena has no reason to prefer any particular address).
-            // Bounded retry: an ordinary mmap(nullptr, ...) with no hint gets a fresh ASLR pick each
-            // call, so a handful of retries converges quickly; give up and accept the collision
-            // rather than spin forever on a determined adversary (in which case
-            // reserve_wow64_host_window's own probe-and-skip still keeps this safe, just without
-            // the improvement).
+            // Must run before the first FEXCore-internal allocation (context/CodeBuffer creation) and
+            // before the memory manager first queries reserved_host_ranges(). Idempotent.
             void install()
             {
                 if (this->base_ != 0)
@@ -978,29 +1369,7 @@ namespace sogen::fex
                     return;
                 }
 
-                void* base = MAP_FAILED;
-                constexpr int max_attempts = 8;
-                for (int attempt = 0; attempt < max_attempts; ++attempt)
-                {
-                    void* candidate = ::mmap(nullptr, arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                    if (candidate == MAP_FAILED)
-                    {
-                        break;
-                    }
-
-                    const auto candidate_addr = reinterpret_cast<uint64_t>(candidate);
-                    const auto candidate_end = candidate_addr + arena_size;
-                    const bool overlaps_wow64_window = candidate_addr < wow64_guest_rebase_default + wow64_guest_address_space_size &&
-                                                       candidate_end > wow64_guest_rebase_default;
-                    if (!overlaps_wow64_window)
-                    {
-                        base = candidate;
-                        break;
-                    }
-
-                    traced_munmap(candidate, arena_size, "arena_install_retry");
-                }
-
+                void* base = ::mmap(nullptr, arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 if (base == MAP_FAILED)
                 {
                     throw std::runtime_error("Failed to reserve FEXCore-internal host arena");
@@ -1011,17 +1380,6 @@ namespace sogen::fex
 
                 FEXCore::Allocator::mmap = &fex_internal_arena::hook_mmap;
                 FEXCore::Allocator::munmap = &fex_internal_arena::hook_munmap;
-
-                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
-                {
-                    const auto main_image_base = reinterpret_cast<uint64_t>(_dyld_get_image_header(0));
-                    fprintf(stderr,
-                            "[alloc-fail-trace] fex_internal_arena::install: arena_base=0x%llx arena_end=0x%llx "
-                            "main_image_base=0x%llx\n",
-                            static_cast<unsigned long long>(this->base_), static_cast<unsigned long long>(this->base_ + arena_size),
-                            static_cast<unsigned long long>(main_image_base));
-                    fflush(stderr);
-                }
             }
 
             uintptr_t base() const
@@ -1058,9 +1416,7 @@ namespace sogen::fex
                 return this->base_ != 0 && a >= this->base_ && a < this->base_ + arena_size;
             }
 
-            // Reserve `size` bytes of VA inside the arena. Reuses a freed block (first fit, splitting
-            // any remainder back onto the free list) before extending the bump cursor. Returns 0 on
-            // exhaustion. Caller holds lock_.
+            // Returns 0 on exhaustion. Caller holds lock_.
             uintptr_t reserve(const size_t size)
             {
                 for (auto it = this->free_list_.begin(); it != this->free_list_.end(); ++it)
@@ -1116,25 +1472,21 @@ namespace sogen::fex
 
                 if (flags & MAP_JIT)
                 {
-                    // FEXCore's CodeBuffer sizes its request to include a trailing guard page at the
-                    // very end (see CPUBackend.h's UsableSize(): AllocatedSize - FEX_HOST_PAGE_SIZE) and
-                    // tries to mprotect(PROT_NONE) that last page itself. That mprotect() call always
-                    // fails on Apple Silicon (EACCES) - MAP_JIT protection can only be fixed at mmap()
-                    // time, not adjusted after the fact by an ordinary mprotect() - which is exactly the
-                    // "Failed to mprotect last page of code buffer" diagnostic CPUBackend.cpp logs.
-                    // Provide a REAL guard here instead: make only the leading portion (excluding that
-                    // final host page) the actual executable MAP_JIT mapping, and simply never touch the
-                    // trailing page - it stays part of the arena's permanent PROT_NONE reservation, which
-                    // genuinely faults on any access, landing exactly where UsableSize() already expects
-                    // the buffer to end. `Ptr`/`AllocatedSize` as seen by the caller are unaffected; only
-                    // how much of that byte range is truly writable/executable changes. Skipped for
-                    // requests no bigger than one host page (e.g. Dispatcher's fixed-size, guardless
-                    // buffer) so a small allocation isn't shrunk into uselessness.
+                    // FEXCore's CodeBuffer sizes its request to include a trailing guard page
+                    // (CPUBackend.h's UsableSize(): AllocatedSize - FEX_HOST_PAGE_SIZE) and
+                    // mprotect(PROT_NONE)s that page itself. That always fails on Apple Silicon with
+                    // EACCES - MAP_JIT protection is fixed at mmap() time and cannot be adjusted
+                    // afterwards - which is the "Failed to mprotect last page of code buffer" diagnostic
+                    // CPUBackend.cpp logs. A real guard is provided instead: only the leading portion
+                    // becomes the executable MAP_JIT mapping and the trailing page stays part of the
+                    // arena's permanent PROT_NONE reservation, faulting on any access exactly where
+                    // UsableSize() expects the buffer to end. Skipped at or below one host page so a
+                    // small allocation (the Dispatcher's guardless buffer) is not shrunk into uselessness.
                     const size_t exec_size = rounded > host_page_size_apple ? rounded - host_page_size_apple : rounded;
 
                     // MAP_JIT | MAP_FIXED is rejected on Apple, so punch a hole in the arena and place
                     // the executable mapping there via a (non-fixed) address hint the kernel honors.
-                    traced_munmap(reinterpret_cast<void*>(slot), exec_size, "jit_hole_punch");
+                    ::munmap(reinterpret_cast<void*>(slot), exec_size);
                     void* result = ::mmap(reinterpret_cast<void*>(slot), exec_size, prot, flags, fd, offset);
                     if (result == reinterpret_cast<void*>(slot))
                     {
@@ -1145,7 +1497,7 @@ namespace sogen::fex
                     // the aliasing hazard, so fail loudly instead of handing it back.
                     if (result != MAP_FAILED)
                     {
-                        traced_munmap(result, exec_size, "jit_hole_rollback");
+                        ::munmap(result, exec_size);
                     }
                     // Restore the arena's PROT_NONE reservation over the whole slot (including the guard
                     // portion) so it never becomes an unmapped gap the guest could be handed.
@@ -1164,7 +1516,7 @@ namespace sogen::fex
             {
                 if (!this->owns(addr))
                 {
-                    return traced_munmap(addr, length, "arena_release_foreign");
+                    return ::munmap(addr, length);
                 }
 
                 const size_t rounded = host_page_align_up_apple(length);
@@ -1193,29 +1545,100 @@ namespace sogen::fex
         };
 #endif
 
-        // A registered WoW64 bitness mode-switch point (see x86_emulator::register_gate_crossing).
-        struct gate_crossing
+#ifdef __linux__
+        template <typename Context>
+        Context* find_aarch64_context(ucontext_t* context, uint32_t magic)
         {
-            uint64_t address = 0;
-            size_t size = 0;
-            x86_64_cpu::gate_crossing_kind kind = x86_64_cpu::gate_crossing_kind::heaven_gate;
+            auto* current = reinterpret_cast<_aarch64_ctx*>(context->uc_mcontext.__reserved);
+            const auto* end = context->uc_mcontext.__reserved + sizeof(context->uc_mcontext.__reserved);
+            while (reinterpret_cast<const uint8_t*>(current) + sizeof(*current) <= end && current->size >= sizeof(*current))
+            {
+                if (current->magic == magic && current->size >= sizeof(Context))
+                {
+                    return reinterpret_cast<Context*>(current);
+                }
+                current = reinterpret_cast<_aarch64_ctx*>(reinterpret_cast<uint8_t*>(current) + current->size);
+            }
+            return nullptr;
+        }
+
+        bool is_write_fault(ucontext_t* context)
+        {
+            constexpr uint64_t esr_write_not_read = 1ULL << 6;
+            const auto* esr = find_aarch64_context<esr_context>(context, ESR_MAGIC);
+            return esr != nullptr && (esr->esr & esr_write_not_read) != 0;
+        }
+
+        // arm64 kernels with 4KB pages have 39 or 48 virtual address bits, and ones with 64KB pages 42 or 52, but
+        // mmap hands out nothing above 47 bits unless asked to.
+        uint64_t find_host_address_end()
+        {
+            for (const int bits : {47, 42})
+            {
+                const uint64_t end = uint64_t{1} << bits;
+                auto* probe = reinterpret_cast<void*>(end - page_size);
+                void* result =
+                    ::mmap(probe, page_size, PROT_NONE, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                if (result != MAP_FAILED)
+                {
+                    ::munmap(result, page_size);
+                }
+                if (result == probe || (result == MAP_FAILED && errno == EEXIST))
+                {
+                    return end;
+                }
+            }
+
+            return uint64_t{1} << 39;
+        }
+#endif
+
+        // Under guest VA == host VA, the stack the OS picks for a new vCPU worker thread can land where the guest is about
+        // to place memory. Worker stacks are therefore handed out from one region reserved up front.
+        class fex_worker_stack_arena
+        {
+          public:
+            static constexpr size_t max_workers = 64;
+            static constexpr size_t stack_size = 8 * 1024 * 1024;
+
+            static fex_worker_stack_arena& instance()
+            {
+                static fex_worker_stack_arena arena;
+                return arena;
+            }
+
+            bool get(const size_t vcpu_index, void*& stack_base, size_t& out_stack_size)
+            {
+                if (vcpu_index >= max_workers)
+                {
+                    return false;
+                }
+
+                std::call_once(this->reserved_, [this] {
+                    void* base = ::mmap(nullptr, max_workers * stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    this->base_ = base == MAP_FAILED ? 0 : reinterpret_cast<uintptr_t>(base);
+                });
+
+                if (this->base_ == 0)
+                {
+                    return false;
+                }
+
+                stack_base = reinterpret_cast<void*>(this->base_ + vcpu_index * stack_size);
+                out_stack_size = stack_size;
+                return true;
+            }
+
+          private:
+            std::once_flag reserved_;
+            uintptr_t base_ = 0;
         };
+    }
 
-    } // namespace
+    class fex_x86_64_emulator;
 
-    // The collision exception thrown by reserve_guest_address_range/sync_host_page_apple's
-    // first-claim paths must be sogen::host_memory_collision from memory_interface.hpp - the type
-    // the catch sites in memory_manager/module_mapping/section syscalls are compiled against. A
-    // backend-local equivalent class is NOT interchangeable: it is a different type, so every catch
-    // falls through to a broader catch (const std::exception&) and a recoverable placement
-    // collision becomes a fatal syscall failure.
-    using sogen::host_memory_collision;
-
-    // -----------------------------------------------------------------------------------------------
-    // The syscall handler bridges FEX's guest `syscall` exits to the registered instruction hook.
-    // Method bodies are defined out of line (after fex_x86_64_emulator and fex_vcpu are complete)
-    // since they touch both classes' internals.
-    // -----------------------------------------------------------------------------------------------
+    // Bridges FEX's guest `syscall` exits to the registered instruction hook. Method bodies are out of
+    // line, after fex_x86_64_emulator is complete, since they touch its internals.
     class fex_syscall_handler final : public FEXCore::HLE::SyscallHandler
     {
       public:
@@ -1229,31 +1652,47 @@ namespace sogen::fex
 
         uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* frame, FEXCore::HLE::SyscallArguments* args) override;
         FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* thread, uint64_t address) override;
+        void MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* thread, uint64_t start, uint64_t length) override;
         std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(FEXCore::Core::InternalThreadState* thread,
                                                                                       uint64_t guest_addr) override;
-#ifdef __APPLE__
-        void MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* thread, uint64_t start, uint64_t length) override;
-#endif
 
       private:
         fex_x86_64_emulator& emulator_;
     };
 
-    // -----------------------------------------------------------------------------------------------
-    // fex_vcpu: owns everything describing one running guest vCPU's execution state, mirroring
-    // whp_x86_64_emulator's whp_vcpu. Method bodies that touch fex_x86_64_emulator's internals are
-    // defined out of line, after that class is complete.
-    // -----------------------------------------------------------------------------------------------
+    // memory_violation_hooks_/interrupt_hooks_ callbacks are backend-agnostic windows-emulator code
+    // that allocates, logs and mutates STL containers freely. That is fine from normal call context
+    // (where KVM/Unicorn invoke them) but not from inside handle_fault_signal, which can interrupt
+    // an unrelated malloc()/free() on this thread - a confirmed, ASLR-timing-dependent heap
+    // corruption hazard. So the handler stashes plain data here instead and forces ExecuteThread to
+    // unwind back to run() via ThreadStopHandlerAddress, without touching stop_requested_; run()
+    // dispatches the hook in normal context and resumes by re-entering ExecuteThread, which always
+    // restarts from CurrentFrame->State.rip.
+    enum class pending_fault_kind
+    {
+        none,
+        memory_violation,
+        interrupt,
+    };
+
+    struct pending_fault_dispatch
+    {
+        pending_fault_kind kind = pending_fault_kind::none;
+        uint64_t address = 0;
+        size_t size = 0;
+        memory_operation operation{};
+        memory_violation_type type{};
+        int vector = 0;
+    };
+
     class fex_vcpu final : public x86_64_cpu
     {
       public:
-        explicit fex_vcpu(fex_x86_64_emulator& emulator, size_t index)
+        fex_vcpu(fex_x86_64_emulator& emulator, const size_t index)
             : emulator_(emulator),
               index_(index)
         {
         }
-
-        ~fex_vcpu() override;
 
         size_t index() const override
         {
@@ -1263,13 +1702,148 @@ namespace sogen::fex
         memory_interface& memory() override;
         const memory_interface& memory() const override;
 
+        bool read_descriptor_table(int reg, descriptor_table_register& table) override
+        {
+            // FEX is a user-mode emulator: there is no real IDT, and the GDT is synthesized internally.
+            // Only report the GDT base we were handed via load_gdt(); everything else is unsupported.
+            if (reg == static_cast<int>(x86_register::gdtr))
+            {
+                table.base = this->gdt_base_;
+                table.limit = this->gdt_limit_;
+                return true;
+            }
+            return false;
+        }
+
         void start(size_t count) override;
-        void stop() override;
 
-        size_t read_raw_register(int reg, void* value, size_t size) override;
-        size_t write_raw_register(int reg, const void* value, size_t size) override;
+        void stop() override
+        {
+            this->stop_requested_ = true;
+            this->request_thread_stop();
+        }
 
-        bool read_descriptor_table(int reg, descriptor_table_register& table) override;
+        size_t read_raw_register(int reg, void* value, size_t size) override
+        {
+            const auto xreg = static_cast<x86_register>(reg);
+            const auto mapping = detail::map_register(xreg);
+            auto& state = this->cpu_state();
+
+            switch (mapping.kind)
+            {
+            case detail::register_kind::gpr: {
+                uint64_t raw = state.gregs[mapping.gpr.index] >> (mapping.gpr.byte_offset * 8);
+                std::memcpy(value, &raw, (std::min)(size, mapping.gpr.width));
+                return size;
+            }
+            case detail::register_kind::rip:
+                std::memcpy(value, &state.rip, (std::min)(size, sizeof(state.rip)));
+                return size;
+            case detail::register_kind::flags: {
+                const uint64_t rflags = this->read_rflags();
+                std::memcpy(value, &rflags, (std::min)(size, sizeof(rflags)));
+                return size;
+            }
+            case detail::register_kind::xmm:
+                // Low 128 bits of the (possibly AVX) vector register.
+                std::memcpy(value, &state.xmm.avx.data[mapping.index][0], (std::min)(size, size_t{16}));
+                return size;
+            case detail::register_kind::mm:
+                std::memcpy(value, &state.mm[mapping.index][0], (std::min)(size, size_t{16}));
+                return size;
+            case detail::register_kind::mxcsr:
+                std::memcpy(value, &state.mxcsr, (std::min)(size, sizeof(state.mxcsr)));
+                return size;
+            case detail::register_kind::fcw:
+                std::memcpy(value, &state.FCW, (std::min)(size, sizeof(state.FCW)));
+                return size;
+            case detail::register_kind::fs_base:
+                std::memcpy(value, &state.fs_cached, (std::min)(size, sizeof(state.fs_cached)));
+                return size;
+            case detail::register_kind::gs_base:
+                std::memcpy(value, &state.gs_cached, (std::min)(size, sizeof(state.gs_cached)));
+                return size;
+            case detail::register_kind::segment: {
+                const uint16_t selector = this->segment_selector(mapping.index);
+                std::memcpy(value, &selector, (std::min)(size, sizeof(selector)));
+                return size;
+            }
+            case detail::register_kind::fsw:
+            case detail::register_kind::unsupported:
+            default:
+                // Unknown/unsupported register: report zeroed value rather than throwing, matching the
+                // lenient behavior of the other backends for rarely-used registers.
+                std::memset(value, 0, size);
+                return size;
+            }
+        }
+
+        size_t write_raw_register(int reg, const void* value, size_t size) override
+        {
+            const auto xreg = static_cast<x86_register>(reg);
+            const auto mapping = detail::map_register(xreg);
+            auto& state = this->cpu_state();
+
+            switch (mapping.kind)
+            {
+            case detail::register_kind::gpr: {
+                auto& slot = state.gregs[mapping.gpr.index];
+                if (mapping.gpr.width == 8)
+                {
+                    std::memcpy(&slot, value, sizeof(slot));
+                }
+                else if (mapping.gpr.zero_extend_32)
+                {
+                    uint32_t v = 0;
+                    std::memcpy(&v, value, sizeof(v));
+                    slot = v; // 32-bit writes clear the high 32 bits
+                }
+                else
+                {
+                    uint64_t incoming = 0;
+                    std::memcpy(&incoming, value, mapping.gpr.width);
+                    const auto shift = mapping.gpr.byte_offset * 8;
+                    const uint64_t mask = ((1ULL << (mapping.gpr.width * 8)) - 1) << shift;
+                    slot = (slot & ~mask) | ((incoming << shift) & mask);
+                }
+                return size;
+            }
+            case detail::register_kind::rip:
+                std::memcpy(&state.rip, value, (std::min)(size, sizeof(state.rip)));
+                return size;
+            case detail::register_kind::flags: {
+                uint64_t rflags = 0;
+                std::memcpy(&rflags, value, (std::min)(size, sizeof(rflags)));
+                this->write_rflags(rflags);
+                return size;
+            }
+            case detail::register_kind::xmm:
+                std::memcpy(&state.xmm.avx.data[mapping.index][0], value, (std::min)(size, size_t{16}));
+                return size;
+            case detail::register_kind::mm:
+                std::memcpy(&state.mm[mapping.index][0], value, (std::min)(size, size_t{16}));
+                return size;
+            case detail::register_kind::mxcsr:
+                std::memcpy(&state.mxcsr, value, (std::min)(size, sizeof(state.mxcsr)));
+                return size;
+            case detail::register_kind::fcw:
+                std::memcpy(&state.FCW, value, (std::min)(size, sizeof(state.FCW)));
+                return size;
+            case detail::register_kind::fs_base:
+                std::memcpy(&state.fs_cached, value, (std::min)(size, sizeof(state.fs_cached)));
+                return size;
+            case detail::register_kind::gs_base:
+                std::memcpy(&state.gs_cached, value, (std::min)(size, sizeof(state.gs_cached)));
+                return size;
+            case detail::register_kind::segment:
+                this->set_segment_selector(mapping.index, value, size);
+                return size;
+            case detail::register_kind::fsw:
+            case detail::register_kind::unsupported:
+            default:
+                return size;
+            }
+        }
 
         std::vector<std::byte> save_registers() const override;
         void restore_registers(const std::vector<std::byte>& register_data) override;
@@ -1284,181 +1858,188 @@ namespace sogen::fex
             return false;
         }
 
-        // FEXCore's INT3 handling (OpcodeDispatcher.cpp) sets SetRIPToNext, so the RIP observed once
-        // the breakpoint fault surfaces here is already one past the 0xCC byte - unlike KVM/WHP, which
-        // both catch INT3 at the instruction's own (pre-advance) address.
-        bool reports_breakpoint_rip_past_instruction() const override
-        {
-            return true;
-        }
-
-        bool reports_hook_observed_rip_past_instruction() const override
-        {
-            return true;
-        }
-
-        // FEXCore maintains separate context_/thread_ (64-bit) and context32_/thread32_ (32-bit)
-        // engines for a WoW64 process, only one of which is active at a time.
-        bool has_separate_bitness_engines() const override
-        {
-            return true;
-        }
-
+        // request_thread_stop() mprotects InterruptFaultPage to PROT_NONE, which is safe to call from
+        // any host thread - the software-quantum watchdog thread in windows_emulator::start() relies on
+        // exactly this (supports_instruction_counting() is false, so that path is the only time-slicing
+        // mechanism available). Matches KVM's reasoning for the same accessor.
         bool is_stop_thread_safe() const override
         {
             return true;
         }
 
-        void set_segment_base(x86_register base, pointer_type value) override;
-        pointer_type get_segment_base(x86_register base) override;
-        void load_gdt(pointer_type address, uint32_t limit) override;
+        void set_segment_base(x86_register base, pointer_type value) override
+        {
+            auto& state = this->cpu_state();
+            if (base == x86_register::fs || base == x86_register::fs_base)
+            {
+                state.fs_cached = value;
+            }
+            else if (base == x86_register::gs || base == x86_register::gs_base)
+            {
+                state.gs_cached = value;
+            }
+        }
+
+        pointer_type get_segment_base(x86_register base) override
+        {
+            const auto& state = this->cpu_state();
+            if (base == x86_register::fs || base == x86_register::fs_base)
+            {
+                return state.fs_cached;
+            }
+            if (base == x86_register::gs || base == x86_register::gs_base)
+            {
+                return state.gs_cached;
+            }
+            return 0;
+        }
 
         void notify_process_bitness(bool is_wow64_process) override;
-        void register_gate_crossing(pointer_type address, size_t size, gate_crossing_kind kind) override;
-        void set_wow64_turbo_dispatch_end(pointer_type address) override;
-
-        // --[ fex_vcpu-internal, called from fex_x86_64_emulator/fex_syscall_handler ]---------------
-
-        FEXCore::Core::CPUState& cpu_state();
-        const FEXCore::Core::CPUState& cpu_state() const;
-        uint64_t read_rflags() const;
-        void write_rflags(uint64_t rflags);
-        void request_thread_stop();
-        void create_thread();
-
-#ifdef __APPLE__
-        bool handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext);
-#endif
-
-        std::atomic<bool> stop_requested_{false};
+        void load_gdt(pointer_type address, uint32_t limit) override;
 
       private:
         friend class fex_x86_64_emulator;
         friend class fex_syscall_handler;
 
-        void create_thread32();
-        void ensure_callret_buffer(FEXCore::Core::CPUState& state);
-        void ensure_callret_stack(FEXCore::Core::CPUState& state);
-        void restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src);
-        void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
-                                      size_t size) const;
-        void invalidate_code_range(uint64_t address, size_t size) const;
-        uint16_t segment_selector(int index) const;
-        void set_segment_selector(int index, const void* value, size_t size);
-
-#ifdef __APPLE__
-        int& jit_write_protect_retry_count_for(uint64_t fault_addr);
-        bool perform_gate_crossing(const gate_crossing& gate);
-        bool enter_wow64_32bit_from_run_simulated_code(const gate_crossing& gate);
-        bool enter_wow64_64bit_from_wow64svc_thunk(const gate_crossing& gate);
-        bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate);
-        bool perform_bitness_switch(uint64_t target_rip, uint64_t target_rsp, uint16_t target_cs);
-        void complete_decoded_load(ucontext_t* uctx, const decoded_arm64_load& decoded, const void* data, uint64_t pc);
-        bool handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr);
-        bool handle_misaligned_atomic_fault(ucontext_t* uctx, uint64_t fault_addr);
-        bool handle_callret_stack_fault(ucontext_t* uctx, uint64_t fault_addr) const;
-        bool handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr);
-        bool host_pc_in_any_dispatcher(uint64_t pc) const;
-        FEXCore::SignalDelegator* active_signal_delegator() const;
-
-        // See pending_fault_kind's doc comment (declared here, used by dispatch_pending_hook_if_any/
-        // defer_hook_dispatch below): memory_violation_hooks_/interrupt_hooks_ callbacks are shared,
-        // backend-agnostic windows-emulator code that allocates, logs, and mutates STL containers
-        // freely - safe when invoked from normal call context, but NOT safe to call directly from
-        // inside handle_fault_signal, a real kernel-delivered SIGSEGV/SIGBUS/SIGILL handler that can
-        // interrupt an unrelated malloc()/free() or STL mutation already in progress on this thread.
-        // Instead of calling hooks in-handler, stash what's needed here (plain data, no allocation)
-        // and force ExecuteThread to unwind back to start() (via ThreadStopHandlerAddress), which
-        // dispatches the hook in normal context and resumes guest execution by simply re-entering
-        // ExecuteThread.
-        enum class pending_fault_kind
+        // CPUState is owned by the thread frame once a thread exists. Before the thread is created we
+        // stage register accesses in a local CPUState so the Windows loader can set up the initial
+        // context; create_thread() seeds the real thread from it.
+        FEXCore::Core::CPUState& cpu_state()
         {
-            none,
-            memory_violation,
-            interrupt,
-            // A WoW64 gate crossing already performed the state marshal + active_context_/
-            // active_thread_ flip inside handle_fault_signal; this only tells start()'s loop to
-            // resume (re-enter ExecuteThread on the now-active engine) rather than break. No hook
-            // runs.
-            gate_crossing,
-        };
+            if (this->thread_ != nullptr)
+            {
+                return this->thread_->CurrentFrame->State; // TODO(fex): confirm field path for the FEX version.
+            }
+            return this->staged_state_;
+        }
 
-        struct pending_fault_dispatch
+        const FEXCore::Core::CPUState& cpu_state() const
         {
-            pending_fault_kind kind = pending_fault_kind::none;
-            uint64_t address = 0;
-            size_t size = 0;
-            memory_operation operation{};
-            memory_violation_type type{};
-            int vector = 0;
-        };
+            if (this->thread_ != nullptr)
+            {
+                return this->thread_->CurrentFrame->State;
+            }
+            return this->staged_state_;
+        }
 
-        bool dispatch_pending_hook_if_any();
-        void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled);
+        uint64_t read_rflags() const;
+        void write_rflags(uint64_t rflags);
+
+        uint16_t segment_selector(int index) const
+        {
+            const auto& state = this->cpu_state();
+            switch (index)
+            {
+            case 0:
+                return state.es_idx;
+            case 1:
+                return state.cs_idx;
+            case 2:
+                return state.ss_idx;
+            case 3:
+                return state.ds_idx;
+            case 4:
+                return state.fs_idx;
+            case 5:
+                return state.gs_idx;
+            default:
+                return 0;
+            }
+        }
+
+        void set_segment_selector(int index, const void* value, size_t size)
+        {
+            uint16_t selector = 0;
+            std::memcpy(&selector, value, (std::min)(size, sizeof(selector)));
+            auto& state = this->cpu_state();
+            switch (index)
+            {
+            case 0:
+                state.es_idx = selector;
+                break;
+            case 1:
+                state.cs_idx = selector;
+                break;
+            case 2:
+                state.ss_idx = selector;
+                break;
+            case 3:
+                state.ds_idx = selector;
+                break;
+            case 4:
+                state.fs_idx = selector;
+                break;
+            case 5:
+                state.gs_idx = selector;
+                break;
+            default:
+                break;
+            }
+        }
+
+        void request_thread_stop()
+        {
+            // Forces the in-flight ExecuteThread to return, from this thread or another. With
+            // Config.NeedsPendingInterruptFaultCheck set (see initialize_context's CONFIG_GDBSERVER
+            // comment) the JIT emits a `str zr, [InterruptFaultPage]` at every block entry, so
+            // protecting that page makes the next entry fault into handle_fault_signal, which redirects
+            // it to ThreadStopHandlerAddress without consulting stop_requested_.
+            if (this->thread_ == nullptr)
+            {
+                return;
+            }
+
+            ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_NONE);
+        }
 
         void arm_execution_single_step(bool stop_after_step);
         pending_execution_step take_pending_execution_step();
         bool complete_execution_step();
         void abandon_execution_step();
+        void resume_deferred_patched_breakpoint(size_t count);
         bool handle_patched_execution_breakpoint(uint64_t address);
 
-        pending_fault_dispatch pending_fault_dispatch_{};
-        // Set by handle_fault_signal when it unwinds ExecuteThread through an InterruptFaultPage hit;
-        // consumed by start()'s loop to tell that unwind apart from any other clean return. No atomics:
-        // the signal handler runs on the same host thread whose start() consumes the flag.
-        bool interrupt_page_unwind_ = false;
+        fex_x86_64_emulator& emulator_;
+        size_t index_{};
+        FEXCore::Core::InternalThreadState* thread_ = nullptr;
+        FEXCore::Core::CPUState staged_state_{};
 
-        // Both only ever mutated in normal call context (dispatch_pending_hook_if_any/start(), never
-        // from inside a signal handler) while emulator_.tables_mutex_ is held - see
-        // handle_patched_execution_breakpoint's doc comment, mirroring the WHP backend's identical
-        // is_page_being_stepped()/pending_execution_step_ invariant.
+        // Only changed in normal call context, never from a fault handler, and only while the emulator's tables lock is
+        // held exclusively, so other vCPUs can check whether an address is being stepped over.
         std::optional<pending_execution_step> pending_execution_step_{};
         std::optional<uint64_t> deferred_patched_breakpoint_{};
 
-        // Per-vCPU alternate signal stack, registered on first entry into start() on this vCPU's own
-        // host thread (a single shared static buffer, as a single-host-thread cooperative model used,
-        // does not cover every vCPU worker's own host thread under real multi-vCPU concurrency).
-        std::array<std::byte, 64 * 1024> alt_stack_{};
+#ifdef __APPLE__
+        jit_write_protect_retries jit_write_protect_retries_{};
 
-        // Per-vCPU (not a file-scope global): under real multi-vCPU concurrency more than one host
-        // thread can be mid-retry at once, and a shared array would race across vCPUs.
-        std::array<jit_write_protect_retry_slot, jit_write_protect_retry_slot_count> jit_write_protect_retry_slots_{};
-        size_t jit_write_protect_retry_next_evict_ = 0;
+        // Debug registers are per host thread, so each vCPU tracks what it armed on its own.
+        mutable watchpoint_set armed_watchpoints_apple_{};
+        mutable uint64_t armed_generation_apple_ = no_generation_apple;
 #endif
 
-        fex_x86_64_emulator& emulator_;
-        size_t index_ = 0;
-
-        // The always-64-bit FEXCore::Context - see notify_process_bitness's doc comment. Per-vCPU
-        // pointer to the shared, machine-wide context this vCPU's thread_ belongs to.
-        FEXCore::Core::InternalThreadState* thread_ = nullptr;
-        FEXCore::Core::InternalThreadState* thread32_ = nullptr;
-
-        // Whichever context/thread is *currently executing* on this vCPU - starts out equal to
-        // context_/thread_ (execution always begins on the 64-bit engine) and is flipped by the gate
-        // crossings; it is what every JIT-operation call site below actually uses. Atomic: the
-        // quantum-timer watchdog reads/writes active_thread_ cross-thread via stop()/
-        // request_thread_stop() (a missed stop is benign - the watchdog refires next quantum, the same
-        // window that existed under single-vCPU).
-        FEXCore::Context::Context* active_context_ = nullptr;
-        std::atomic<FEXCore::Core::InternalThreadState*> active_thread_{nullptr};
-
-        FEXCore::Core::CPUState staged_state_{};
-
-        // Per-vCPU GDT (gdt_base_for_vcpu() in process_context.hpp gives each vCPU its own GDT page
-        // specifically so one WoW64 thread's FS descriptor (TEB32 base) can never be read from
-        // another vCPU) - must live here, not on the shared emulator, or whichever vCPU calls
-        // load_gdt() last determines every vCPU's segment table.
         uint64_t gdt_base_ = 0;
         uint32_t gdt_limit_ = 0;
+
+        std::atomic<bool> stop_requested_{false};
+
+        pending_fault_dispatch pending_fault_dispatch_{};
+        // Set by handle_fault_signal on an InterruptFaultPage unwind, consumed by run()'s loop to tell
+        // it apart from any other clean return. Atomic even though both ends are the same thread: the
+        // C++ abstract machine has no signal-delivery control-flow edge, so an optimizer may treat this
+        // as unmodified across the opaque ExecuteThread() call and cache a stale read.
+        std::atomic<bool> interrupt_page_unwind_{false};
     };
 
-    // -----------------------------------------------------------------------------------------------
-    // The emulator itself: machine-wide state (both FEXCore contexts, memory-region/MMIO/gate-
-    // crossing tables, hook maps) shared by every vCPU, plus the vcpus_ facade.
-    // -----------------------------------------------------------------------------------------------
     class fex_x86_64_emulator final : public x86_64_emulator
     {
+        struct callret_buffer_record
+        {
+            void* allocation_base = nullptr;
+            size_t allocation_size = 0;
+            uint64_t code_buffer_generation = 0;
+            const FEXCore::Core::InternalThreadState* thread = nullptr;
+        };
+
       public:
         explicit fex_x86_64_emulator(const size_t vcpu_count)
         {
@@ -1467,6 +2048,19 @@ namespace sogen::fex
                 throw std::runtime_error("FEX backend requires at least one vCPU");
             }
 
+#ifdef __linux__
+            if (static_cast<size_t>(::getpagesize()) != page_size)
+            {
+                // The FEX backend is currently configured for 4KB host pages on Linux.
+                // This is not an inherent requirement and may be relaxed with appropriate support.
+                throw std::runtime_error("FEX backend requires 4KB host pages on Linux");
+            }
+#endif
+#ifndef __APPLE__
+            this->reserve_guest_arena();
+#else
+            report_missing_watchpoints_once();
+#endif
             this->initialize_context();
 
             this->vcpus_.reserve(vcpu_count);
@@ -1486,89 +2080,162 @@ namespace sogen::fex
             utils::reset_object_with_delayed_destruction(this->basic_block_hooks_);
             utils::reset_object_with_delayed_destruction(this->instruction_hooks_);
 
-            // Destroy every vCPU's threads before the owning contexts are torn down.
-            for (auto& vcpu : this->vcpus_)
+            for (const auto& vcpu : this->vcpus_)
             {
                 if (vcpu->thread_ != nullptr && this->context_)
                 {
                     this->context_->DestroyThread(vcpu->thread_);
                     vcpu->thread_ = nullptr;
                 }
-                if (vcpu->thread32_ != nullptr && this->context32_)
-                {
-                    this->context32_->DestroyThread(vcpu->thread32_);
-                    vcpu->thread32_ = nullptr;
-                }
             }
-            this->vcpus_.clear();
 
-            // Release everything we mmap'd into the (host == guest, modulo wow64_guest_rebase in
-            // 32-bit mode) address space.
-#ifdef __APPLE__
-            // All host mappings this backend owns are tracked as 16KB host pages (see
-            // mapped_host_pages_apple_), including PROT_NONE reservation claims that no regions_
-            // entry covers; map_host_memory aliases (owned=false) are never in this set. Darwin's
-            // munmap also requires host-page alignment, which regions_ entries don't guarantee.
-            for (const auto& [run_start, run_end] : this->mapped_host_pages_apple_.runs())
+            // Release everything we claimed in the shared host == guest address space. Claims inside the low window or
+            // the arena are part of their single reservation, which is released below: unmapping them first would leave
+            // gaps, and on macOS deallocating a range with gaps raises a fatal EXC_GUARD (kGUARD_EXC_DEALLOC_GAP).
+            for (const auto& [address, size] : this->claimed_host_ranges_)
             {
-                // reserve_wow64_host_window() bulk-inserts every window-relative page (0-based, up
-                // to wow64_guest_address_space_size) unconditionally at construction time, before
-                // this process's bitness is known - so this skip cannot be gated on
-                // is_wow64_process_ (rebase_for() always returns 0 for a native 64-bit process,
-                // which would otherwise hand every one of those window-relative "pages" - starting
-                // at literal address 0 - straight to munmap() below as if it were a real host
-                // address, hitting the same fatal EXC_GUARD DEALLOC_GAP this loop exists to avoid).
-                for_each_rebase_span(run_start, run_end, [&](const uint64_t span_start, const uint64_t span_end) {
-                    if (this->wow64_host_window_reserved_ && span_start < wow64_guest_address_space_size)
+                this->for_each_host_span(address, size, [this](const uint64_t host_address, const size_t span_size, size_t) {
+                    if (!this->is_in_low_guest_window(host_address) && !this->is_in_guest_arena(host_address, span_size))
                     {
-                        return;
+                        ::munmap(reinterpret_cast<void*>(host_address), span_size);
                     }
-                    const auto rebase = rebase_for(this->is_wow64_process_, span_start);
-                    traced_munmap(reinterpret_cast<void*>(span_start + rebase), span_end - span_start, "dtor_run");
                 });
             }
 
-            // Deliberately not released: a single munmap/mach_vm_deallocate over the whole
-            // wow64_guest_address_space_size span raises a fatal EXC_GUARD (DEALLOC_GAP) once the
-            // window has been fragmented by real per-page sub-claims (module loads, VirtualAlloc/
-            // VirtualFree) over the process's lifetime, the same guard class fixed for the
-            // reservation/claim paths above. Matches fex_internal_arena's own precedent
-            // (process-lifetime leak, reclaimed by the OS at process exit) rather than the
-            // per-page loop above, which only unmaps pages outside this window.
+            if (this->low_guest_window_ != 0)
+            {
+                ::munmap(reinterpret_cast<void*>(this->low_guest_window_), low_guest_window_size);
+            }
+
+            if (this->guest_arena_ != 0)
+            {
+                ::munmap(reinterpret_cast<void*>(this->guest_arena_), guest_arena_size);
+            }
 
             if (g_active_emulator == this)
             {
-                g_active_emulator = this->previous_active_emulator_;
+                g_active_emulator = nullptr;
             }
-            else if (g_active_emulator != nullptr)
-            {
-                // Non-LIFO teardown: this instance wasn't the innermost active one when it was
-                // destroyed, meaning two instances actually overlapped concurrently rather than
-                // nesting strictly - the genuine misuse the old throw-on-second-instance guard caught.
-                fprintf(stderr, "[FEX backend] FATAL: fex_x86_64_emulator destroyed out of nesting "
-                                "order - two instances were active concurrently\n");
-            }
-#else
-            for (const auto& [address, region] : this->regions_)
-            {
-                if (region.owned)
-                {
-                    const auto rebase = rebase_for(this->is_wow64_process_, address);
-                    traced_munmap(reinterpret_cast<void*>(address + rebase), region.size, "dtor_linux_regions");
-                }
-            }
-#endif
 
             // Per-logical-thread call-ret buffers (see ensure_callret_buffer) live in host allocator
             // space, not regions_, and are never freed as individual guest threads exit - release them
             // all here so they don't outlive this emulator instance.
-            for (const auto& [alloc_base, alloc_size] : this->callret_buffers_)
+            for (const auto& [_, buffer] : this->callret_buffers_)
             {
-                FEXCore::Allocator::munmap(alloc_base, alloc_size);
+                FEXCore::Allocator::munmap(buffer.allocation_base, buffer.allocation_size);
             }
         }
 
-        // --[ vcpu facade ]--------------------------------------------------------------------------
+        // cpu_interface
+
+        bool read_descriptor_table(int reg, descriptor_table_register& table) override
+        {
+            return this->primary_vcpu().read_descriptor_table(reg, table);
+        }
+
+        void start(size_t count) override
+        {
+            this->primary_vcpu().start(count);
+        }
+
+        void stop() override
+        {
+            this->primary_vcpu().stop();
+        }
+
+        size_t read_raw_register(int reg, void* value, size_t size) override
+        {
+            return this->primary_vcpu().read_raw_register(reg, value, size);
+        }
+
+        size_t write_raw_register(int reg, const void* value, size_t size) override
+        {
+            return this->primary_vcpu().write_raw_register(reg, value, size);
+        }
+
+        std::vector<std::byte> save_registers() const override
+        {
+            return this->primary_vcpu().save_registers();
+        }
+
+        // Preserves the fields that are per-FEXCore-thread-global rather than per-logical-guest-thread:
+        // FEXCore rewrites L1Pointer/L1Mask itself whenever the JIT lookup cache reallocates, so the
+        // live values are always the correct ones and a stale snapshot must not clobber them. The
+        // segment_arrays point at the process-wide descriptor tables that load_gdt installs.
+        // callret_sp/_pad1 are handled by ensure_callret_buffer.
+        void restore_state_into(FEXCore::Core::InternalThreadState* thread, const FEXCore::Core::CPUState& restored)
+        {
+            auto& state = thread->CurrentFrame->State;
+            const auto l1_pointer = state.L1Pointer;
+            const auto l1_mask = state.L1Mask;
+            const auto segment_arrays = std::to_array(state.segment_arrays);
+            std::memcpy(&state, &restored, sizeof(state));
+            state.L1Pointer = l1_pointer;
+            state.L1Mask = l1_mask;
+            std::ranges::copy(segment_arrays, std::begin(state.segment_arrays));
+
+            // InlineJITBlockHeader points at the header of the block the state was saved in, which FEXCore's fault
+            // recovery (RestoreRIPFromHostPC) dereferences. save_registers kept that block's code buffer alive while the
+            // state was parked; the resumed thread re-establishes the header at its next block entry, and FEXCore falls
+            // back to State.rip while it is 0.
+            if (state.InlineJITBlockHeader != 0)
+            {
+                this->context_->ReleaseCodeBufferAt(state.InlineJITBlockHeader);
+                state.InlineJITBlockHeader = 0;
+            }
+
+            this->ensure_callret_stack(thread, state);
+            this->drop_stale_callret_entries(thread, state);
+        }
+
+        // The call-ret entries hold host JIT pointers of the engine thread and code buffer generation that pushed them, and
+        // a logical thread can resume on another vCPU's engine thread.
+        void drop_stale_callret_entries(const FEXCore::Core::InternalThreadState* thread, FEXCore::Core::CPUState& state)
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+            auto& buffer = this->callret_buffers_.at(state._pad1);
+            if (buffer.code_buffer_generation != thread->CodeBufferGeneration || buffer.thread != thread)
+            {
+                constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                FEXCore::Allocator::VirtualDontNeed(thread->CallRetStackBase, callret_stack_size);
+                state.callret_sp = state._pad1 + callret_stack_size / 4;
+                buffer.code_buffer_generation = thread->CodeBufferGeneration;
+                buffer.thread = thread;
+            }
+        }
+
+        void restore_registers(const std::vector<std::byte>& register_data) override
+        {
+            this->primary_vcpu().restore_registers(register_data);
+        }
+
+        bool has_violation() const override
+        {
+            return this->primary_vcpu().has_violation();
+        }
+
+        bool supports_instruction_counting() const override
+        {
+            return this->primary_vcpu().supports_instruction_counting();
+        }
+
+        bool is_stop_thread_safe() const override
+        {
+            return this->primary_vcpu().is_stop_thread_safe();
+        }
+
+        // emulator
+
+        std::string get_name() const override
+        {
+            return "FEX";
+        }
+
+        // Each vCPU drives its own FEXCore thread of the shared Context on its own host thread.
+        bool supports_multiple_vcpus() const override
+        {
+            return true;
+        }
 
         size_t vcpu_count() const override
         {
@@ -1581,196 +2248,165 @@ namespace sogen::fex
             {
                 throw std::out_of_range("Invalid vCPU index");
             }
+
             return *this->vcpus_[index];
         }
 
-        // --[ cpu_interface / x86_cpu, forwarded to vcpus_[0] for single-facade callers ]------------
-
-        size_t index() const override
+        bool reserve_worker_thread_stack(const size_t vcpu_index, void*& stack_base, size_t& stack_size) override
         {
-            return 0;
+            return fex_worker_stack_arena::instance().get(vcpu_index, stack_base, stack_size);
         }
 
-        memory_interface& memory() override
+        void set_memory_execution_hook_mode(const memory_execution_hook_mode /*mode*/) override
         {
-            return *this;
         }
 
-        const memory_interface& memory() const override
+        void ensure_restorable_in_new_process() const override
         {
-            return *this;
+            const tables_lock lock(this->tables_mutex_, false);
+            const auto ensure_restorable = [this](const uint64_t address, const uint64_t size) {
+                const bool in_low_window = this->low_guest_window_ != 0 && address + size <= low_guest_window_size;
+                const bool in_arena =
+                    this->guest_arena_ != 0 && address >= this->guest_arena_ && address + size <= this->guest_arena_ + guest_arena_size;
+                const bool fixed = std::ranges::any_of(this->fixed_guest_ranges_, [&](const auto& range) {
+                    return address >= range.first && address + size <= range.first + range.second;
+                });
+                if (!in_low_window && !in_arena && !fixed)
+                {
+                    std::array<char, 128> message{};
+                    snprintf(message.data(), message.size(), "Guest memory at 0x%llx lies where a new process may not get it back",
+                             static_cast<unsigned long long>(address));
+                    throw std::runtime_error(message.data());
+                }
+            };
+
+            for (const auto& [address, region] : this->regions_)
+            {
+                ensure_restorable(address, region.size);
+            }
+
+            // Reserved but uncommitted guest memory has no region, and a new process has to claim it as well.
+            for (const auto& [address, size] : this->claimed_host_ranges_)
+            {
+                ensure_restorable(address, size);
+            }
         }
-
-        void start(const size_t count) override
-        {
-            this->vcpus_[0]->start(count);
-        }
-
-        void stop() override
-        {
-            this->vcpus_[0]->stop();
-        }
-
-        size_t read_raw_register(const int reg, void* value, const size_t size) override
-        {
-            return this->vcpus_[0]->read_raw_register(reg, value, size);
-        }
-
-        size_t write_raw_register(const int reg, const void* value, const size_t size) override
-        {
-            return this->vcpus_[0]->write_raw_register(reg, value, size);
-        }
-
-        bool read_descriptor_table(const int reg, descriptor_table_register& table) override
-        {
-            return this->vcpus_[0]->read_descriptor_table(reg, table);
-        }
-
-        std::vector<std::byte> save_registers() const override
-        {
-            return this->vcpus_[0]->save_registers();
-        }
-
-        void restore_registers(const std::vector<std::byte>& register_data) override
-        {
-            this->vcpus_[0]->restore_registers(register_data);
-        }
-
-        bool has_violation() const override
-        {
-            return this->vcpus_[0]->has_violation();
-        }
-
-        bool supports_instruction_counting() const override
-        {
-            return false;
-        }
-
-        bool reports_breakpoint_rip_past_instruction() const override
-        {
-            return true;
-        }
-
-        bool reports_hook_observed_rip_past_instruction() const override
-        {
-            return true;
-        }
-
-        bool has_separate_bitness_engines() const override
-        {
-            return true;
-        }
-
-        bool is_stop_thread_safe() const override
-        {
-            return true;
-        }
-
-        void set_segment_base(const x86_register base, const pointer_type value) override
-        {
-            this->vcpus_[0]->set_segment_base(base, value);
-        }
-
-        pointer_type get_segment_base(const x86_register base) override
-        {
-            return this->vcpus_[0]->get_segment_base(base);
-        }
-
-        void load_gdt(const pointer_type address, const uint32_t limit) override
-        {
-            this->vcpus_[0]->load_gdt(address, limit);
-        }
-
-        void notify_process_bitness(bool is_wow64_process) override
-        {
-            this->vcpus_[0]->notify_process_bitness(is_wow64_process);
-        }
-
-        void register_gate_crossing(const pointer_type address, const size_t size, const gate_crossing_kind kind) override
-        {
-            this->vcpus_[0]->register_gate_crossing(address, size, kind);
-        }
-
-        void set_wow64_turbo_dispatch_end(const pointer_type address) override
-        {
-            this->vcpus_[0]->set_wow64_turbo_dispatch_end(address);
-        }
-
-        // --[ emulator ]-----------------------------------------------------------------------------
-
-        std::string get_name() const override
-        {
-            return "FEX";
-        }
-
-        bool supports_multiple_vcpus() const override
-        {
-            // Real multi-vCPU support: FEXCore drives N InternalThreadStates per bitness context,
-            // one per fex_vcpu, all genuinely concurrent host threads.
-            return true;
-        }
-
-        // A vCPU worker thread's own OS-chosen default stack is ordinary host memory, placed wherever
-        // the OS likes - under this backend's guest-VA==host-VA model, a new worker thread's stack can
-        // coincidentally land on an address the guest program is about to use (structurally impossible
-        // in single-vCPU mode, where the one thread either reuses the pre-existing main thread's stack
-        // or is a single dynamically-placed allocation that never races guest memory). Hand back a
-        // pre-reserved, host-only stack region from a dedicated arena instead.
-        bool reserve_worker_thread_stack(size_t vcpu_index, void*& stack_base, size_t& stack_size) override;
 
         void serialize_state(utils::buffer_serializer& buffer, bool /*is_snapshot*/) const override
         {
             buffer.write_vector(this->save_registers());
-            // TODO(fex): a full snapshot should also persist the mapped-memory layout and contents so a
-            // restore can re-mmap and refill the (host == guest) address space. Registers-only for now.
+            buffer.write(this->guest_arena_);
+            buffer.write(this->low_guest_window_ != 0);
+            buffer.write(this->primary_vcpu().gdt_base_);
+            buffer.write(this->primary_vcpu().gdt_limit_);
         }
 
         void deserialize_state(utils::buffer_deserializer& buffer, bool /*is_snapshot*/) override
         {
-            this->restore_registers(buffer.read_vector<std::byte>());
+            const auto registers = buffer.read_vector<std::byte>();
+            if (buffer.read<uint64_t>() != this->guest_arena_)
+            {
+                throw std::runtime_error("The guest memory window the process was saved with is not available");
+            }
+
+            const auto low_guest_window = buffer.read<bool>();
+            const auto gdt_base = buffer.read<uint64_t>();
+            const auto gdt_limit = buffer.read<uint32_t>();
+
+            if (low_guest_window && this->low_guest_window_ == 0)
+            {
+                this->enable_low_guest_window();
+            }
+
+            // The descriptor table's host address depends on the low window, so it is set again once that exists.
+            if (gdt_base != 0)
+            {
+                for (const auto& vcpu : this->vcpus_)
+                {
+                    vcpu->load_gdt(gdt_base, gdt_limit);
+                }
+            }
+            this->restore_registers(registers);
         }
 
-        // --[ memory_interface (public) ]------------------------------------------------------------
+        // x86_emulator
+
+        void set_segment_base(x86_register base, pointer_type value) override
+        {
+            this->primary_vcpu().set_segment_base(base, value);
+        }
+
+        pointer_type get_segment_base(x86_register base) override
+        {
+            return this->primary_vcpu().get_segment_base(base);
+        }
+
+        // FEXCore decodes each block in the mode its CS descriptor selects, so the single 64-bit
+        // Context also runs a WoW64 process's compatibility-mode code.
+        void notify_process_bitness(bool is_wow64_process) override
+        {
+            if (is_wow64_process && this->low_guest_window_ == 0)
+            {
+                this->enable_low_guest_window();
+            }
+        }
+
+        void load_gdt(pointer_type address, uint32_t limit) override
+        {
+            this->primary_vcpu().load_gdt(address, limit);
+        }
+
+        // memory_interface (public)
 
         void read_memory(uint64_t address, void* data, size_t size) const override
         {
             if (!this->try_read_memory(address, data, size))
             {
-                char buf[128];
-                snprintf(buf, sizeof(buf), "Failed to read FEX guest memory at 0x%llx size=0x%zx wow64=%d",
-                         static_cast<unsigned long long>(address), size, this->is_wow64_process_ ? 1 : 0);
-                throw std::runtime_error(buf);
+                throw std::runtime_error("Failed to read FEX guest memory");
             }
         }
 
-        // Every other reader of regions_ (QueryGuestExecutableRange, handle_general_memory_violation,
-        // etc.) takes tables_mutex_ - this one used to be the sole exception. FEXCore's own JIT compile
-        // path calls back into this function from outside the syscall-dispatch thread (e.g. resolving a
-        // TLS/segment read while translating a block), so an unlocked is_range_mapped here could observe
-        // a torn std::map mid-mutation from a concurrent map_memory/unmap_memory/apply_memory_protection
-        // (all under a unique_lock) and spuriously report already-mapped guest memory as unmapped.
         bool try_read_memory(uint64_t address, void* data, size_t size) const override
         {
-            const std::shared_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
 
             if (!this->is_range_mapped(address, size))
             {
                 return false;
             }
-            // Guest VA == host VA under FEX for 64-bit guests. For 32-bit (WoW64) guests, real host
-            // memory instead lives at address + wow64_guest_rebase (see that constant's doc comment) -
-            // regions_/is_range_mapped stay keyed by the plain guest address throughout.
-            const auto rebase = rebase_for(this->is_wow64_process_, address);
+
+#ifndef __APPLE__
+            // A stale chunk of tracked memory is inaccessible until it is brought up to date, which the fault handler only
+            // does for the guest's own accesses.
+            this->for_each_tracked_chunk(address, size, [&](tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) {
+                this->require_up_to_date(chunk, chunk_address, chunk_size);
+            });
+#endif
+
+            // Host-side reads, e.g. of a snapshot, also cover memory the guest made inaccessible to itself.
+            const bool needs_temporary_read = !this->range_has_permission(address, size, memory_permission::read);
+            if (needs_temporary_read)
+            {
+                this->set_temporary_access(address, size, memory_permission::read, true);
+            }
+
+#ifdef __APPLE__
+            this->disarm_watchpoints_over_apple(address, size);
+#endif
+
             // memmove, not memcpy: callers (e.g. the PE loader's section copy) can hand this a source
             // buffer that overlaps the guest destination range - overlapping memcpy is undefined
             // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
-            std::memmove(data, reinterpret_cast<const void*>(address + rebase), size);
-#ifdef __APPLE__
-            // A patched breakpoint's live guest byte is 0xCC - callers reading guest memory (a
-            // disassembler, a debugger's memory read, the loader re-reading a section) must see the
-            // original instruction byte instead.
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, const size_t offset) {
+                std::memmove(static_cast<std::byte*>(data) + offset, reinterpret_cast<const void*>(host_address), span_size);
+            });
+
+            if (needs_temporary_read)
+            {
+                this->set_temporary_access(address, size, memory_permission::read, false);
+            }
+
             this->overlay_patched_breakpoints_on_read(address, data, size);
-#endif
             return true;
         }
 
@@ -1779,127 +2415,83 @@ namespace sogen::fex
             if (!this->try_write_memory(address, data, size))
             {
                 char buf[128];
-                snprintf(buf, sizeof(buf), "Failed to write FEX guest memory at 0x%llx size=0x%zx wow64=%d",
-                         static_cast<unsigned long long>(address), size, this->is_wow64_process_ ? 1 : 0);
+                snprintf(buf, sizeof(buf), "Failed to write FEX guest memory at 0x%llx size=0x%zx",
+                         static_cast<unsigned long long>(address), size);
                 throw std::runtime_error(buf);
             }
         }
 
         bool try_write_memory(uint64_t address, const void* data, size_t size) override
         {
-            return this->try_write_memory_impl(address, data, size, /*invalidate_translations=*/true);
-        }
-
-        // Writes WoW64 gate-crossing CPU-state marshaling data (the CpuArea i386-CONTEXT block at
-        // TEB64+0x1488+0x80, and the 64-bit RunSimulatedCode stack frame) into guest memory. These
-        // targets are pure data structures that never hold JIT-compiled guest code, so the code-cache
-        // invalidation try_write_memory normally performs is a guaranteed no-op in every FEXCore
-        // context - skip it to avoid a GetCodeInvalidationMutex lock + Apple pthread_jit_write_protect
-        // toggle pair per marshaled register (~25 per WoW64 syscall round-trip). If such an address
-        // were ever repurposed as code, map_memory/apply_memory_protection would invalidate independently.
-        bool write_marshal_state(uint64_t address, const void* data, size_t size)
-        {
-            return this->try_write_memory_impl(address, data, size, /*invalidate_translations=*/false);
-        }
-
-        // Bug 3 fix: this used to take only a shared_lock, reasoning it was "just reading the
-        // bookkeeping tables" - actually wrong: it can call set_temporary_write_access, which does
-        // real ::mprotect() toggles on the actual host page, and Apple's memory management works at
-        // 16KB host-page granularity, so two unrelated guest addresses written by two different vCPUs
-        // can share the same underlying host page. A shared lock let two such calls interleave: one
-        // vCPU's "revert to declared permissions" could land mid-memmove of another vCPU's still-in-
-        // flight write. A unique lock excludes concurrent readers too, which is exactly what's needed.
-        bool try_write_memory_impl(uint64_t address, const void* data, size_t size, bool invalidate_translations)
-        {
-            // tables_mutex_ is deliberately released (see the closing brace below) BEFORE
-            // invalidate_code_range_locked runs, never held across it: FEXCore's own compile path
-            // holds GetCodeInvalidationMutex (shared) and calls back into QueryGuestExecutableRange,
-            // which needs tables_mutex_ (shared) - the reverse acquisition order from holding
-            // tables_mutex_ into GetCodeInvalidationMutex here, a real ABBA deadlock hit on the very
-            // first genuine --vcpus 2 run.
-#ifdef __APPLE__
-            std::vector<uint64_t> breakpoints_replanted;
-#endif
+            std::vector<uint64_t> replanted_breakpoints{};
+            bool has_code = false;
             {
-                const std::unique_lock lock(this->tables_mutex_);
-
-                if (!this->is_range_mapped(address, size))
+                const tables_lock lock(this->tables_mutex_, true);
+                if (!this->write_memory_locked(address, data, size, replanted_breakpoints))
                 {
                     return false;
                 }
-
-                // sogen's own loader writes guest memory it has already declared read-only (e.g. a PE
-                // section's raw file bytes, before/regardless of the section's final protection).
-                // Unlike Unicorn's uc_mem_write, which operates on emulated memory with no real host
-                // enforcement, FEX's guest-VA==host-VA model is backed by actual host mprotect state,
-                // so such a write needs a temporary permission bump around the memcpy. Every page of
-                // the range must be checked, not just the first: a write straddling into a read-only
-                // region would otherwise fault mid-memmove on the host instead of taking the bump.
-#ifdef __APPLE__
-                const bool needs_temporary_write =
-                    !this->range_is_writable(address, size) || this->range_has_code_write_trap_apple(address, size);
-#else
-                const bool needs_temporary_write = !this->range_is_writable(address, size);
-#endif
-
-                if (needs_temporary_write)
-                {
-                    this->set_temporary_write_access(address, size, true);
-                }
-
-                // See try_read_memory's doc comment on wow64_guest_rebase.
-                const auto rebase = rebase_for(this->is_wow64_process_, address);
-                // memmove, not memcpy: see try_read_memory - the source may overlap the guest destination.
-                std::memmove(reinterpret_cast<void*>(address + rebase), data, size);
-
-                if (needs_temporary_write)
-                {
-                    this->set_temporary_write_access(address, size, false);
-                }
-
-#ifdef __APPLE__
-                // A guest write onto a patched breakpoint's own address must not silently drop the
-                // 0xCC the caller just overwrote with the real instruction byte - re-record the
-                // original byte and (unless the breakpoint is suspended, mid-step-over) re-plant it.
-                this->overlay_patched_breakpoints_on_write(address, size, breakpoints_replanted);
-#endif
+                has_code = this->range_has_code(address, size);
             }
 
-            if (invalidate_translations)
+            if (has_code)
             {
-                // Writing to a mapped region may overwrite already-translated code; drop FEX's cache for it.
-                this->invalidate_code_range_locked(address, size);
+                this->invalidate_code_range(address, size);
             }
-#ifdef __APPLE__
-            for (const auto bp_address : breakpoints_replanted)
+            for (const auto breakpoint_address : replanted_breakpoints)
             {
-                this->invalidate_patched_breakpoint_code(bp_address);
+                this->invalidate_code_range(breakpoint_address, 1);
             }
-#endif
             return true;
         }
 
-        // --[ hook_interface ]-----------------------------------------------------------------------
-        //
-        // Like the KVM backend, FEX runs the guest natively, so fine-grained memory/basic-block hooks
-        // cannot fire. They are accepted (and tracked, so delete_hook works) for API compatibility.
-        // Only instruction hooks for `syscall` are actually wired (see the syscall bridge), plus
-        // single-address execution hooks (Apple only), which plant a real 0xCC. Hook
-        // tables are registered once globally (not per-vCPU): every fex_vcpu's hook_*() forwards
-        // here, since a hook must fire for whichever vCPU's guest thread triggers it, not just the
-        // vCPU it happened to be registered through.
+        bool write_memory_locked(const uint64_t address, const void* data, const size_t size, std::vector<uint64_t>& replanted_breakpoints)
+        {
+            if (!this->is_range_mapped(address, size))
+            {
+                return false;
+            }
+
+            // sogen's loader writes guest memory it has already declared read-only (a PE section's raw
+            // file bytes, regardless of the section's final protection). Unlike Unicorn's uc_mem_write,
+            // this backend's guest VA == host VA is backed by real host mprotect state, so the write
+            // needs a temporary permission bump. Every page must be checked, not just the first: a write
+            // straddling into a read-only region would otherwise fault mid-memmove.
+            const bool needs_temporary_write = this->needs_temporary_write(address, size);
+
+            if (needs_temporary_write)
+            {
+                this->set_temporary_access(address, size, memory_permission::write, true);
+            }
 
 #ifdef __APPLE__
-        // A planted 0xCC is the only way this backend can observe execution of a single address, so
-        // automatic mode resolves to int3 as well.
-        void set_memory_execution_hook_mode(const memory_execution_hook_mode /*mode*/) override
-        {
-        }
+            this->disarm_watchpoints_over_apple(address, size);
 #endif
+
+            // memmove, not memcpy: see try_read_memory - the source may overlap the guest destination.
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, const size_t offset) {
+                std::memmove(reinterpret_cast<void*>(host_address), static_cast<const std::byte*>(data) + offset, span_size);
+            });
+
+            if (needs_temporary_write)
+            {
+                this->set_temporary_access(address, size, memory_permission::write, false);
+            }
+
+            this->overlay_patched_breakpoints_on_write(address, size, replanted_breakpoints);
+            return true;
+        }
+
+        // hook_interface
+        //
+        // As with KVM, the guest runs natively, so fine-grained memory/basic-block hooks cannot fire;
+        // they are accepted and tracked (so delete_hook works) purely for API compatibility. `syscall`
+        // instruction hooks are wired through the syscall handler, and single-address execution hooks
+        // plant a 0xCC. Hooks are machine-wide: they fire for whichever vCPU runs into them.
 
         emulator_hook* hook_memory_execution(memory_execution_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->memory_execution_hooks_[hook] = execution_hook_entry{.callback = std::move(callback)};
             return hook;
@@ -1907,27 +2499,20 @@ namespace sogen::fex
 
         emulator_hook* hook_memory_execution(const uint64_t address, memory_execution_hook_callback callback) override
         {
-#ifdef __APPLE__
-            bool needs_invalidate = false;
-#endif
             emulator_hook* hook = nullptr;
+            bool planted = false;
             {
-                const std::unique_lock lock(this->tables_mutex_);
+                const tables_lock lock(this->tables_mutex_, true);
                 hook = this->make_hook();
-#ifdef __APPLE__
-                needs_invalidate = this->install_patched_execution_breakpoint(address);
+                planted = this->install_patched_execution_breakpoint(address);
                 this->memory_execution_hooks_[hook] =
                     execution_hook_entry{.address = address, .patched_breakpoint = true, .callback = std::move(callback)};
-#else
-                this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
-#endif
             }
-#ifdef __APPLE__
-            if (needs_invalidate)
+
+            if (planted)
             {
-                this->invalidate_patched_breakpoint_code(address);
+                this->invalidate_code_range(address, 1);
             }
-#endif
             return hook;
         }
 
@@ -1939,7 +2524,7 @@ namespace sogen::fex
                 return this->hook_memory_execution(address, std::move(callback));
             }
 
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
             return hook;
@@ -1947,7 +2532,7 @@ namespace sogen::fex
 
         emulator_hook* hook_memory_read(uint64_t /*address*/, uint64_t /*size*/, memory_access_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->memory_read_hooks_[hook] = std::move(callback);
             return hook;
@@ -1955,7 +2540,7 @@ namespace sogen::fex
 
         emulator_hook* hook_memory_write(uint64_t /*address*/, uint64_t /*size*/, memory_access_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->memory_write_hooks_[hook] = std::move(callback);
             return hook;
@@ -1963,7 +2548,7 @@ namespace sogen::fex
 
         emulator_hook* hook_instruction(int instruction_type, instruction_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             auto& entry = this->instruction_hooks_[hook];
             entry.type = static_cast<x86_hookable_instructions>(instruction_type);
@@ -1977,7 +2562,7 @@ namespace sogen::fex
 
         emulator_hook* hook_interrupt(interrupt_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->interrupt_hooks_[hook] = std::move(callback);
             return hook;
@@ -1985,7 +2570,7 @@ namespace sogen::fex
 
         emulator_hook* hook_memory_violation(memory_violation_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->memory_violation_hooks_[hook] = std::move(callback);
             return hook;
@@ -1993,25 +2578,17 @@ namespace sogen::fex
 
         emulator_hook* hook_basic_block(basic_block_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_lock lock(this->tables_mutex_, true);
             auto* hook = this->make_hook();
             this->basic_block_hooks_[hook] = std::move(callback);
             return hook;
         }
 
-        bool supports_global_memory_execution_hooks() const override
-        {
-            return false;
-        }
-
         void delete_hook(emulator_hook* hook) override
         {
-#ifdef __APPLE__
-            bool needs_invalidate = false;
-            uint64_t invalidate_address = 0;
-#endif
+            std::optional<uint64_t> restored_breakpoint{};
             {
-                const std::unique_lock lock(this->tables_mutex_);
+                const tables_lock lock(this->tables_mutex_, true);
                 if (this->syscall_hook_ != nullptr)
                 {
                     const auto it = this->instruction_hooks_.find(hook);
@@ -2026,47 +2603,50 @@ namespace sogen::fex
                 this->memory_read_hooks_.erase(hook);
                 this->memory_write_hooks_.erase(hook);
 
-                const auto execution_it = this->memory_execution_hooks_.find(hook);
-                if (execution_it != this->memory_execution_hooks_.end())
+                if (const auto execution_hook = this->memory_execution_hooks_.find(hook);
+                    execution_hook != this->memory_execution_hooks_.end())
                 {
-#ifdef __APPLE__
-                    if (execution_it->second.patched_breakpoint && execution_it->second.address)
+                    const auto& entry = execution_hook->second;
+                    if (entry.patched_breakpoint && entry.address && this->uninstall_patched_execution_breakpoint(*entry.address))
                     {
-                        invalidate_address = *execution_it->second.address;
-                        needs_invalidate = this->uninstall_patched_execution_breakpoint(invalidate_address);
+                        restored_breakpoint = entry.address;
                     }
-#endif
-                    this->memory_execution_hooks_.erase(execution_it);
+                    this->memory_execution_hooks_.erase(execution_hook);
                 }
 
                 this->memory_violation_hooks_.erase(hook);
                 this->basic_block_hooks_.erase(hook);
             }
-#ifdef __APPLE__
-            if (needs_invalidate)
+
+            if (restored_breakpoint)
             {
-                this->invalidate_patched_breakpoint_code(invalidate_address);
+                this->invalidate_code_range(*restored_breakpoint, 1);
             }
-#endif
         }
 
-        emulator_hook* make_hook()
+        bool supports_global_memory_execution_hooks() const override
         {
-            return reinterpret_cast<emulator_hook*>(this->next_hook_id_++);
+            // Native execution: global execution hooks would require single-stepping the JIT.
+            return false;
         }
 
 #ifdef __APPLE__
         std::vector<host_reserved_range> reserved_host_ranges() const override
         {
-            // Guest VA == host VA, so this process's own memory (its loaded image, dyld, shared
-            // libraries, thread stacks, heap) shares the same address space the guest uses - unlike
-            // Unicorn/Icicle/KVM, which sandbox or translate the guest address space independently.
-            // Enumerate everything currently mapped in this process via the Mach VM region API (the
-            // Darwin equivalent of walking /proc/self/maps) so the memory manager can steer guest
-            // allocations away from it. One-shot snapshot: see the interface doc comment for the
-            // residual risk of host allocations made after this call.
+            // Enumerates everything currently mapped in this process via the Mach VM region API, the
+            // Darwin equivalent of walking /proc/self/maps.
             std::vector<host_reserved_range> ranges;
 
+            // Every 64-bit Mach-O executable reserves a __PAGEZERO segment spanning at least [0, 4GB),
+            // an OS/linker convention enforced at the mmap syscall level rather than a listed VM region
+            // mach_vm_region reports: its first real hit starts well above 4GB (ASLR-dependent), yet
+            // mapping guest memory anywhere in the gap below still fails. So the whole gap up to the
+            // scan's first real region is reserved rather than guessing a fixed size.
+            //
+            // The FEXCore-internal arena would otherwise be reported as many separate sub-regions
+            // (PROT_NONE reservation, committed BlockLinks buffers, the MAP_JIT CodeBuffer, freed
+            // holes). Registering it as one range instead covers sub-regions allocated lazily after this
+            // one-shot snapshot and any transient holes, with no dependence on the scan's timing.
             const auto& arena = fex_internal_arena::instance();
             const uint64_t arena_base = arena.base();
             const uint64_t arena_end = arena.active() ? arena_base + arena.size() : 0;
@@ -2090,14 +2670,9 @@ namespace sogen::fex
                     break;
                 }
 
+                // Sub-regions of the FEXCore-internal arena are covered by the single explicit range
+                // pushed above; don't double-report them (harmless but avoids overlap churn).
                 if (arena.active() && address >= arena_base && address < arena_end)
-                {
-                    address += size;
-                    continue;
-                }
-
-                if (this->wow64_host_window_reserved_ && address >= this->wow64_guest_rebase_ &&
-                    address < this->wow64_guest_rebase_ + wow64_guest_address_space_size)
                 {
                     address += size;
                     continue;
@@ -2105,7 +2680,7 @@ namespace sogen::fex
 
                 if (first_region)
                 {
-                    const uint64_t gap_start = this->is_wow64_process_ ? wow64_guest_address_space_size : 0;
+                    const uint64_t gap_start = this->low_guest_window_ != 0 ? low_guest_window_size : 0;
                     if (address > gap_start)
                     {
                         ranges.push_back({.address = gap_start, .size = static_cast<size_t>(address - gap_start)});
@@ -2113,6 +2688,10 @@ namespace sogen::fex
                     first_region = false;
                 }
 
+                // AddressSanitizer's sparse shadow map spans tens of GB up to multiple TB per region,
+                // placed far above where the guest ever allocates. Feeding those to the memory manager
+                // bloats reserved_regions_ into the thousands and stalls process setup, so they are
+                // skipped - in instrumented builds only.
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
                 constexpr mach_vm_size_t asan_shadow_region_threshold = 0x100000000ULL; // 4 GiB
@@ -2128,36 +2707,36 @@ namespace sogen::fex
                 address += size;
             }
 
-            for (const auto unusable_page : this->unusable_host_pages_apple_)
+            const tables_lock lock(this->tables_mutex_, false);
+            for (const auto& [unusable_address, unusable_size] : this->unusable_host_ranges_apple_)
             {
-                ranges.push_back({.address = unusable_page, .size = host_page_size_apple});
+                ranges.push_back({.address = unusable_address, .size = unusable_size});
             }
-
             return ranges;
         }
 
         std::vector<host_reserved_range> reserved_host_ranges_in(uint64_t address, size_t size) const override
         {
+            // mach_vm_region's start-address parameter lets the kernel skip straight to the first region
+            // at or above the window, so this visits only regions actually inside it (usually none),
+            // instead of re-walking every region in the process - a count that grows unbounded over a
+            // long session. The arena and the __PAGEZERO gap are captured by the first full scan at
+            // startup and never released, so the only thing a rescan of an otherwise-free window adds is
+            // a foreign mapping in a gap an earlier guest unmap returned to the OS.
             std::vector<host_reserved_range> ranges;
 
-            const auto rebase = rebase_for(this->is_wow64_process_, address);
-
-            if (this->wow64_host_window_reserved_ && rebase != 0)
             {
-                return ranges;
-            }
-
-            const uint64_t window_probe_start = host_page_align_down_apple(address);
-            const uint64_t window_probe_end = host_page_align_up_apple(address + size);
-            for (auto unusable_page = window_probe_start; unusable_page < window_probe_end; unusable_page += host_page_size_apple)
-            {
-                if (this->unusable_host_pages_apple_.contains(unusable_page))
+                const tables_lock lock(this->tables_mutex_, false);
+                for (const auto& [unusable_address, unusable_size] : this->unusable_host_ranges_apple_)
                 {
-                    ranges.push_back({.address = unusable_page, .size = host_page_size_apple});
+                    if (unusable_address < address + size && address < unusable_address + unusable_size)
+                    {
+                        ranges.push_back({.address = unusable_address, .size = unusable_size});
+                    }
                 }
             }
 
-            const mach_vm_address_t window_start = address + rebase;
+            const mach_vm_address_t window_start = address;
             const mach_vm_address_t window_end = window_start + size;
 
             mach_vm_address_t probe = window_start;
@@ -2180,495 +2759,434 @@ namespace sogen::fex
 
                 const uint64_t hit_start = std::max<uint64_t>(region_addr, window_start);
                 const uint64_t hit_end = std::min<uint64_t>(region_addr + region_size, window_end);
-                ranges.push_back({.address = hit_start - rebase, .size = static_cast<size_t>(hit_end - hit_start)});
+                ranges.push_back({.address = hit_start, .size = static_cast<size_t>(hit_end - hit_start)});
 
                 probe = region_addr + region_size;
             }
 
             return ranges;
         }
-#endif
-
-        // --[ machine-wide bookkeeping, called by fex_vcpu ]------------------------------------------
-
-        uint64_t rebase_for(bool is_32bit_mode, uint64_t address) const
-        {
-            return (is_32bit_mode && address < wow64_guest_address_space_size) ? this->wow64_guest_rebase_ : 0ULL;
-        }
-
-        template <typename Callback>
-        static void for_each_rebase_span(const uint64_t start, const uint64_t end, Callback&& callback)
-        {
-            if (start < wow64_guest_address_space_size && end > wow64_guest_address_space_size)
-            {
-                callback(start, wow64_guest_address_space_size);
-                callback(wow64_guest_address_space_size, end);
-                return;
-            }
-
-            callback(start, end);
-        }
-
-        uint64_t unrebase_fault_addr(uint64_t fault_addr) const
-        {
-            if (this->is_wow64_process_ && fault_addr >= this->wow64_guest_rebase_ &&
-                fault_addr < this->wow64_guest_rebase_ + wow64_guest_address_space_size)
-            {
-                return fault_addr - this->wow64_guest_rebase_;
-            }
-            return fault_addr;
-        }
-
-        // Called only under tables_mutex_ (a real, asynchronously-delivered signal can interrupt a
-        // shared_lock holder on the same thread while it's re-acquiring for write elsewhere - the
-        // fault-handling call sites all take their own lock, never nesting here).
-        std::optional<gate_crossing> find_gate_crossing(uint64_t rip) const
-        {
-            std::shared_lock lock(this->tables_mutex_);
-            for (const auto& gate : this->gate_crossings_)
-            {
-                if (rip >= gate.address && rip < gate.address + gate.size)
-                {
-                    return gate;
-                }
-            }
-            return std::nullopt;
-        }
-
-        static uint32_t gdt_segment_base(FEXCore::Core::CPUState& state, uint16_t selector)
-        {
-            const auto* segment = FEXCore::Core::CPUState::GetSegmentFromIndex(state, selector);
-            return FEXCore::Core::CPUState::CalculateGDTBase(*segment);
-        }
-
-        void ensure_context32()
-        {
-            const std::unique_lock lock(this->tables_mutex_);
-            if (this->context32_)
-            {
-                return;
-            }
-
-            FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "0");
-
-#ifdef __APPLE__
-            const FEXCore::HostFeatures features = fetch_host_features_apple();
 #else
-            const FEXCore::HostFeatures features{};
-#endif
-            this->context32_ = FEXCore::Context::Context::CreateNewContext(features);
-            this->context32_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
-
-            this->syscall_handler32_ = std::make_unique<fex_syscall_handler>(*this);
-            this->context32_->SetSyscallHandler(this->syscall_handler32_.get());
-
-            this->signal_delegator32_ = std::make_unique<FEXCore::SignalDelegator>();
-            this->context32_->SetSignalDelegator(this->signal_delegator32_.get());
-
-            this->context32_->InitCore();
-
-            FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
+        std::vector<host_reserved_range> reserved_host_ranges() const override
+        {
+            return this->host_mappings_in(0, guest_address_space_end);
         }
+
+        std::vector<host_reserved_range> reserved_host_ranges_in(const uint64_t address, const size_t size) const override
+        {
+            return this->host_mappings_in(address, address + size);
+        }
+
+        // Guest addresses inside the low window are backed by the window, which only this backend maps into. Above 4GB, the
+        // guest only gets the arena.
+        std::vector<host_reserved_range> host_mappings_in(uint64_t start, const uint64_t end) const
+        {
+            if (this->low_guest_window_ != 0)
+            {
+                start = std::max(start, low_guest_window_size);
+            }
+
+            if (start >= end)
+            {
+                return {};
+            }
+
+            if (this->guest_arena_ == 0)
+            {
+                return read_host_mappings_linux(start, end);
+            }
+
+            std::vector<host_reserved_range> ranges{};
+            if (start < low_guest_window_size)
+            {
+                ranges = read_host_mappings_linux(start, std::min(end, low_guest_window_size));
+            }
+
+            const auto add_unavailable = [&](const uint64_t from, const uint64_t to) {
+                if (from < to)
+                {
+                    ranges.push_back({.address = from, .size = static_cast<size_t>(to - from)});
+                }
+            };
+            const uint64_t above_low = std::max(start, low_guest_window_size);
+            add_unavailable(above_low, std::min(end, this->guest_arena_));
+            add_unavailable(std::max(above_low, this->guest_arena_ + guest_arena_size), end);
+            return ranges;
+        }
+#endif
 
       private:
-        friend class fex_vcpu;
         friend class fex_syscall_handler;
+        friend class fex_vcpu;
+
+        // memory_interface (private)
 
         void map_mmio(uint64_t address, size_t size, mmio_read_callback read_cb, mmio_write_callback /*write_cb*/) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            std::vector<uint64_t> planted_breakpoints{};
+            {
+                const tables_lock lock(this->tables_mutex_, true);
+                this->map_mmio_locked(address, size, std::move(read_cb), planted_breakpoints);
+            }
 
+            for (const auto breakpoint_address : planted_breakpoints)
+            {
+                this->invalidate_code_range(breakpoint_address, 1);
+            }
+        }
+
+        void map_mmio_locked(const uint64_t address, const size_t size, mmio_read_callback read_cb,
+                             std::vector<uint64_t>& planted_breakpoints)
+        {
             if (!is_page_aligned(address) || !is_page_aligned(size))
             {
                 throw std::runtime_error("FEX MMIO mappings must be page aligned");
             }
 
-            void* host_backing = nullptr;
-            size_t host_backing_size = 0;
-
-#ifdef __APPLE__
-            const auto rebase = rebase_for(this->is_wow64_process_, address);
-            host_backing_size = host_page_align_up_apple(size);
-            void* const target = reinterpret_cast<void*>(address + rebase);
-            if (map_fixed_anonymous_apple_replace(target, host_backing_size, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_ALL) == KERN_SUCCESS)
+#ifndef __APPLE__
+            // Claimed PROT_NONE so the host cannot place an accessible mapping here and accesses keep faulting into the MMIO
+            // handler. Darwin's __PAGEZERO, or the low guest window, already keeps the host out.
+            if (!this->host_range_is_claimed(address, size))
             {
-                host_backing = target;
+                try
+                {
+                    this->reserve_guest_address_range_locked(address, size);
+                }
+                catch (const std::runtime_error&)
+                {
+                    std::array<char, 128> message{};
+                    snprintf(message.data(), message.size(), "Failed to reserve guest MMIO at 0x%llx on the host",
+                             static_cast<unsigned long long>(address));
+                    throw std::runtime_error(message.data());
+                }
             }
 #endif
-
-            if (host_backing != nullptr)
+            if (this->is_in_low_guest_window(this->to_host_address(address)))
             {
-                read_cb(0, host_backing, size);
-                ::mprotect(host_backing, host_backing_size, PROT_READ);
-
-                // KUSD-collision fix: register the covering host page(s) in mapped_host_pages_apple_
-                // (without a page_shadow_apple_ entry) right after establishing the real backing.
-                // memory_manager's own MMIO reservation is 4KB-page-granular with no notion of
-                // Apple's 16KB host-page granularity, so a different, unrelated guest allocation can
-                // legitimately land in the unused remainder of this region's 16KB host page while
-                // still looking "free" - and its own first-claim path (sync_host_page_apple) would
-                // otherwise see !currently_mapped and claim the whole page fresh, silently destroying
-                // this real backing content. Registering it here routes a later co-resident
-                // allocation through the ordinary shared-page mprotect reconciliation path instead.
-#ifdef __APPLE__
-                this->mapped_host_pages_apple_.insert(host_page_align_down_apple(address),
-                                                      host_page_align_up_apple(address + host_backing_size));
-#endif
+                this->map_backed_mmio(address, size, std::move(read_cb), planted_breakpoints);
+                return;
             }
 
-            this->mmio_regions_.emplace_back(mmio_region{.address = address,
-                                                         .size = size,
-                                                         .read_cb = std::move(read_cb),
-                                                         .host_backing = host_backing,
-                                                         .host_backing_size = host_backing_size});
+            this->mmio_regions_.emplace_back(mmio_region{.address = address, .size = size, .read_cb = std::move(read_cb)});
         }
 
-        // Rewrites every MMIO region's real backing (see mmio_region's doc comment) with fresh
-        // content. Called once per quantum from every vCPU's start() loop independently under real
-        // multi-vCPU concurrency - a shared_lock here would let one vCPU's mprotect(read-only) race
-        // another vCPU's in-flight read_cb memcpy into the same shared host_backing memory, which
-        // Darwin can report as BUS_ADRALN rather than the "expected" SEGV_ACCERR (the same
-        // misclassification documented elsewhere in this file). A unique lock excludes both.
-        void refresh_mmio_backings()
+        void map_backed_mmio(const uint64_t address, const size_t size, mmio_read_callback read_cb,
+                             std::vector<uint64_t>& planted_breakpoints)
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            mmio_region region{.address = address, .size = size, .read_cb = std::move(read_cb), .backing = utils::shared_host_buffer{size}};
+            region.read_cb(0, region.backing.data(), size);
+            if (!this->map_host_memory_locked(address, size, region.backing.data(), memory_permission::read, planted_breakpoints))
+            {
+                std::array<char, 128> message{};
+                snprintf(message.data(), message.size(), "Failed to back guest MMIO at 0x%" PRIx64 " with host memory", address);
+                throw std::runtime_error(message.data());
+            }
+            this->mmio_regions_.push_back(std::move(region));
+        }
+
+        void refresh_mmio_backings() const
+        {
+            const tables_lock lock(this->tables_mutex_, true);
             for (const auto& region : this->mmio_regions_)
             {
-                if (region.host_backing == nullptr)
+                if (region.is_backed())
                 {
-                    continue;
+                    region.read_cb(0, region.backing.data(), region.size);
                 }
-
-                ::mprotect(region.host_backing, region.host_backing_size, PROT_READ | PROT_WRITE);
-                region.read_cb(0, region.host_backing, region.size);
-                ::mprotect(region.host_backing, region.host_backing_size, PROT_READ);
             }
         }
 
         void map_memory(uint64_t address, size_t size, memory_permission permissions) override
         {
-#ifdef __APPLE__
-            std::vector<uint64_t> breakpoints_applied;
-#endif
+            if (!is_page_aligned(address) || !is_page_aligned(size))
             {
-                const std::unique_lock lock(this->tables_mutex_);
-
-                if (!is_page_aligned(address) || !is_page_aligned(size))
-                {
-                    throw std::runtime_error("FEX memory mappings must be page aligned");
-                }
-
-#ifdef __APPLE__
-                const auto reused_host_pages = this->host_pages_shared_with_mapped_slots_apple(address, size);
-                this->set_shadow_range_apple(address, size, permissions);
-                this->sync_host_pages_covering_apple(address, size);
-                this->zero_guest_range_in_host_pages_apple(address, size, reused_host_pages);
-#else
-                void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != address)
-                {
-                    throw std::runtime_error("FEX backend failed to map guest memory at requested address");
-                }
-#endif
-
-                this->erase_region_range(address, size);
-                this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = true};
-#ifdef __APPLE__
-                // A breakpoint address can be (re-)mapped after its hook was registered (e.g. a
-                // module reloaded over the same address range) - re-plant any of its 0xCC bytes that
-                // now fall inside newly-mapped memory.
-                this->apply_patched_execution_breakpoints_in_range(address, size, breakpoints_applied);
-#endif
+                throw std::runtime_error("FEX memory mappings must be page aligned");
             }
-#ifdef __APPLE__
-            for (const auto bp_address : breakpoints_applied)
+
+            std::vector<uint64_t> planted_breakpoints{};
             {
-                this->invalidate_patched_breakpoint_code(bp_address);
+                const tables_lock lock(this->tables_mutex_, true);
+                this->map_memory_locked(address, size, permissions);
+                this->apply_patched_execution_breakpoints_in_range(address, size, planted_breakpoints);
             }
-#endif
+
+            for (const auto breakpoint_address : planted_breakpoints)
+            {
+                this->invalidate_code_range(breakpoint_address, 1);
+            }
         }
 
-#ifdef __APPLE__
-        bool reserve_guest_address_range(uint64_t address, size_t size) override
+        void map_memory_locked(const uint64_t address, const size_t size, const memory_permission permissions)
         {
-            const std::unique_lock lock(this->tables_mutex_);
+#ifdef __APPLE__
+            // The host mmap/mprotect calls happen at 16KB granularity via the shadow table (see
+            // sync_host_page_apple). The range is claimed before the shadow table changes, so a
+            // host_memory_collision leaves the shadow table as it was.
+            this->reserve_guest_address_range_locked(address, size);
+            this->set_shadow_range_apple(address, size, permissions);
+            this->sync_host_pages_covering_apple(address, size);
+            this->zero_range_in_shared_host_pages_apple(address, size);
+#else
+            if (!this->host_range_is_claimed(address, size))
+            {
+                this->claim_host_range(address, size);
+            }
+            this->remap_host_claim(address, size, to_prot(permissions));
+#endif
 
+            this->erase_region_range(address, size);
+            this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = true};
+        }
+
+#ifdef __linux__
+        uint64_t guest_address_end() const override
+        {
+            return this->host_address_end_;
+        }
+#endif
+
+        void reserve_guest_address_range(uint64_t address, size_t size) override
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+            this->reserve_guest_address_range_locked(address, size);
+        }
+
+        // Each unclaimed run is claimed with one host call, so no other host allocation can land inside it while it is
+        // claimed. A run that collides releases the runs this call claimed before it.
+        void reserve_guest_address_range_locked(const uint64_t address, const size_t size)
+        {
+#ifdef __APPLE__
             const uint64_t start = host_page_align_down_apple(address);
             const uint64_t end = host_page_align_up_apple(address + size);
-            std::vector<std::pair<uint64_t, uint64_t>> claimed_this_call;
-            uint64_t host_page = start;
-            while (host_page < end)
+#else
+            const uint64_t start = address;
+            const uint64_t end = address + size;
+#endif
+
+            std::vector<host_reserved_range> claimed_runs{};
+            uint64_t cursor = start;
+            while (cursor < end)
             {
-                if (const auto mapped_run = this->mapped_host_pages_apple_.run_containing(host_page))
+                auto next = this->claimed_host_ranges_.upper_bound(cursor);
+                if (next != this->claimed_host_ranges_.begin())
                 {
-                    host_page = std::min(end, mapped_run->second);
-                    continue;
-                }
-
-                const auto next_mapped = this->mapped_host_pages_apple_.next_run_start(host_page);
-                uint64_t run_end = next_mapped ? std::min(end, *next_mapped) : end;
-                if (host_page < wow64_guest_address_space_size)
-                {
-                    run_end = std::min(run_end, wow64_guest_address_space_size);
-                }
-
-                if (!this->claim_host_page_run_apple(host_page, run_end))
-                {
-                    // Roll back every run claimed earlier in this same call so a partial claim never
-                    // leaks as a permanently-orphaned host range. Collision means return false, not
-                    // throw: the interface contract (memory_interface.hpp) has the caller re-pick a
-                    // different address on false - memory_manager's auto-placement retry loop tests
-                    // the return value and has no try/catch, so a throw here escapes as a fatal
-                    // syscall failure instead of triggering the retry.
-                    for (const auto& [run_start, claimed_end] : claimed_this_call)
+                    const auto& previous = *std::prev(next);
+                    const uint64_t previous_end = previous.first + previous.second;
+                    if (previous_end > cursor)
                     {
-                        this->release_host_page_run_apple(run_start, claimed_end);
+                        cursor = std::min(previous_end, end);
+                        continue;
                     }
-                    return false;
                 }
 
-                claimed_this_call.emplace_back(host_page, run_end);
-                host_page = run_end;
+                const uint64_t run_end = next == this->claimed_host_ranges_.end() ? end : std::min(next->first, end);
+                try
+                {
+                    this->claim_host_range(cursor, static_cast<size_t>(run_end - cursor));
+                }
+                catch (const host_memory_collision&)
+                {
+                    for (const auto& run : claimed_runs)
+                    {
+                        this->release_host_claim(run.address, run.size);
+                        this->remove_host_claim(run.address, run.size);
+                    }
+                    throw;
+                }
+
+                claimed_runs.push_back({.address = cursor, .size = static_cast<size_t>(run_end - cursor)});
+                cursor = run_end;
             }
+        }
+
+        void register_fixed_guest_range(const uint64_t address, const size_t size) override
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+            if (std::ranges::find(this->fixed_guest_ranges_, std::pair{address, size}) == this->fixed_guest_ranges_.end())
+            {
+                this->fixed_guest_ranges_.emplace_back(address, size);
+            }
+        }
+
+        void release_guest_address_range(uint64_t address, uint64_t size) override
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+
+            // The caller guarantees the range holds no reserved guest ranges (see memory_interface), so
+            // every host page wholly inside it is a stale claim and can go back to the OS. Boundary
+            // pages are kept: their outside part may belong to a neighboring, still-live reservation.
+#ifdef __APPLE__
+            const uint64_t start = host_page_align_up_apple(address);
+            const uint64_t end = host_page_align_down_apple(address + size);
+#else
+            const uint64_t start = address;
+            const uint64_t end = address + size;
+#endif
+            std::vector<host_reserved_range> released;
+
+            auto it = this->claimed_host_ranges_.upper_bound(start);
+            if (it != this->claimed_host_ranges_.begin())
+            {
+                --it;
+            }
+
+            for (; it != this->claimed_host_ranges_.end() && it->first < end; ++it)
+            {
+                const uint64_t hit_start = std::max(it->first, start);
+                const uint64_t hit_end = std::min<uint64_t>(it->first + it->second, end);
+                if (hit_start < hit_end)
+                {
+                    released.push_back({.address = hit_start, .size = static_cast<size_t>(hit_end - hit_start)});
+                }
+            }
+
+            for (const auto& range : released)
+            {
+                this->release_host_claim(range.address, range.size);
+                this->remove_host_claim(range.address, range.size);
+            }
+        }
+
+        bool supports_host_memory_mapping() const override
+        {
             return true;
         }
 
-        // Claims [run_start, run_end) with a single mach_vm_allocate(VM_FLAGS_FIXED) so the whole run
-        // is taken atomically: claiming a multi-GB reservation page by page takes long enough for
-        // another host thread's allocation (a JIT code buffer, a thread stack) to land inside the
-        // window after it was confirmed free. Only a failed multi-page claim falls back to single
-        // pages, to pinpoint which page the kernel refuses.
-        bool claim_host_page_run_apple(const uint64_t run_start, const uint64_t run_end)
+        bool map_host_memory(uint64_t address, size_t size, void* host_pointer, memory_permission permissions) override
         {
-            const auto rebase = rebase_for(this->is_wow64_process_, run_start);
-
-            // Bug 4 fix: claim via mach_vm_allocate(VM_FLAGS_FIXED) WITHOUT VM_FLAGS_OVERWRITE -
-            // the kernel refuses (KERN_NO_SPACE) instead of silently overwriting an intervening
-            // foreign mapping another vCPU's concurrent syscall placed here between an earlier
-            // free-space probe and this claim.
-            mach_vm_address_t target = run_start + rebase;
-            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, run_end - run_start, VM_FLAGS_FIXED);
-            if (result == KERN_SUCCESS)
+            if (!is_page_aligned(address) || !is_page_aligned(size))
             {
-                this->mapped_host_pages_apple_.insert(run_start, run_end);
-                return true;
+                throw std::runtime_error("FEX host memory mappings must be page aligned");
             }
 
-            if (run_end - run_start > host_page_size_apple)
+            std::vector<uint64_t> planted_breakpoints{};
+            bool mapped = false;
             {
-                for (uint64_t host_page = run_start; host_page < run_end; host_page += host_page_size_apple)
-                {
-                    if (!this->claim_host_page_run_apple(host_page, host_page + host_page_size_apple))
-                    {
-                        this->release_host_page_run_apple(run_start, host_page);
-                        return false;
-                    }
-                }
-                return true;
+                const tables_lock lock(this->tables_mutex_, true);
+                mapped = this->map_host_memory_locked(address, size, host_pointer, permissions, planted_breakpoints);
             }
 
-            const uint64_t host_page = run_start;
-            if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+            for (const auto breakpoint_address : planted_breakpoints)
             {
-                mach_vm_address_t region_addr = host_page + rebase;
-                mach_vm_size_t region_size = 0;
-                vm_region_basic_info_data_64_t info{};
-                mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
-                mach_port_t object_name = MACH_PORT_NULL;
-                const kern_return_t probe_result = ::mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
-                                                                    reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
-                fprintf(stderr,
-                        "[alloc-fail-trace] reserve_guest_address_range: mach_vm_allocate(VM_FLAGS_FIXED) failed "
-                        "host_page=0x%llx rebase=0x%llx target=0x%llx kern_return=%d is_wow64_process=%d "
-                        "wow64_host_window_reserved=%d | probe(next-region-at-or-after-target): result=%d "
-                        "region_addr=0x%llx region_size=0x%llx protection=%d\n",
-                        static_cast<unsigned long long>(host_page), static_cast<unsigned long long>(rebase),
-                        static_cast<unsigned long long>(host_page + rebase), static_cast<int>(result), this->is_wow64_process_,
-                        this->wow64_host_window_reserved_, static_cast<int>(probe_result), static_cast<unsigned long long>(region_addr),
-                        static_cast<unsigned long long>(region_size), probe_result == KERN_SUCCESS ? info.protection : 0);
-                fflush(stderr);
+                this->invalidate_code_range(breakpoint_address, 1);
             }
-
-            if (result == KERN_INVALID_ADDRESS)
-            {
-                // Unlike KERN_NO_SPACE (a real, mach_vm_region-visible occupant that
-                // reserved_host_ranges()'s next rescan will discover and record on its own),
-                // KERN_INVALID_ADDRESS means the kernel refuses this exact address regardless
-                // of occupancy - there is no host range for mach_vm_region to ever report here,
-                // so memory_manager's retry loop would otherwise keep re-picking this same
-                // address forever. Record it so reserved_host_ranges()/reserved_host_ranges_in()
-                // below can report it as occupied too.
-                this->unusable_host_pages_apple_.insert(host_page);
-            }
-
-            return false;
+            return mapped;
         }
 
-        void release_host_page_run_apple(const uint64_t run_start, const uint64_t run_end)
-        {
-            if (run_start == run_end)
-            {
-                return;
-            }
-
-            const auto rebase = rebase_for(this->is_wow64_process_, run_start);
-            traced_munmap(reinterpret_cast<void*>(run_start + rebase), run_end - run_start, "rollback_page");
-            this->mapped_host_pages_apple_.erase(run_start, run_end);
-        }
-
-        void release_guest_address_range(uint64_t address, size_t size) override
-        {
-            const std::unique_lock lock(this->tables_mutex_);
-
-            const uint64_t start = host_page_align_up_apple(address);
-            const uint64_t end = host_page_align_down_apple(address + size);
-
-            std::vector<std::pair<uint64_t, uint64_t>> spans;
-            this->mapped_host_pages_apple_.for_each_overlap(start, end, [&](const uint64_t span_start, const uint64_t span_end) {
-                for_each_rebase_span(span_start, span_end, [&](const uint64_t part_start, const uint64_t part_end) {
-                    spans.emplace_back(part_start, part_end); //
-                });
-            });
-
-            for (const auto& [span_start, span_end] : spans)
-            {
-                // As in ~fex_x86_64_emulator(), a page inside the up-front-reserved wow64 window is
-                // recognized by falling within its 0-based relative span, not by rebase_for()'s
-                // is_wow64_process_-gated result - the window's bulk-inserted pages exist regardless
-                // of the guest's eventual bitness, so gating on is_wow64_process_ would hand a native
-                // 64-bit process's own address-0-based "pages" straight to munmap() below as if they
-                // were real host addresses, hitting the same fatal EXC_GUARD DEALLOC_GAP this branch
-                // exists to avoid.
-                const bool in_wow64_window = this->wow64_host_window_reserved_ && span_start < wow64_guest_address_space_size;
-                if (in_wow64_window)
-                {
-                    // A page inside the up-front-reserved wow64 window is never actually released at
-                    // the host level - it's re-armed as our own PROT_NONE placeholder, exactly as
-                    // reserve_wow64_host_window left it initially. It must stay registered in
-                    // mapped_host_pages_apple_ (advance past it, don't erase): erasing it here would
-                    // desync the bookkeeping from reality - the page genuinely IS still mapped (as
-                    // this placeholder), so a later claim attempt for it would incorrectly believe it
-                    // needs a fresh mach_vm_allocate, which then correctly (but uselessly) fails since
-                    // the page really is still ours, throwing a false-positive host_memory_collision.
-                    //
-                    // This page can legitimately already carry real backing - e.g. map_mmio's KUSD
-                    // real-memory optimization replaces the placeholder at KUSER_SHARED_DATA's rebased
-                    // address with genuine read/write memory (see mmio_region's doc comment) - so
-                    // re-arming it is exactly the "target may already be covered by a reservation"
-                    // case map_fixed_anonymous_apple_replace exists for, not a fresh, guaranteed-empty
-                    // placement. A raw POSIX mmap(MAP_FIXED) here is implicitly paired with
-                    // VM_FLAGS_OVERWRITE by the kernel (see map_fixed_anonymous_apple's doc comment)
-                    // and hits the exact same fatal EXC_GUARD DEALLOC_GAP that helper was built to
-                    // avoid - confirmed live: this call site alone reproduced it 100% of the time
-                    // against a real wow64 guest exercising KUSER_SHARED_DATA.
-                    for (uint64_t page = span_start; page < span_end; page += host_page_size_apple)
-                    {
-                        void* const window_ptr = reinterpret_cast<void*>(page + this->wow64_guest_rebase_);
-                        const kern_return_t rearm_result = traced_map_fixed_anonymous_apple_replace(
-                            window_ptr, host_page_size_apple, VM_PROT_NONE, VM_PROT_ALL, "release_range_rearm");
-                        if (rearm_result != KERN_SUCCESS)
-                        {
-                            throw std::runtime_error("FEX backend failed to re-arm wow64 window placeholder");
-                        }
-                    }
-                }
-                else
-                {
-                    const auto rebase = rebase_for(this->is_wow64_process_, span_start);
-                    traced_munmap(reinterpret_cast<void*>(span_start + rebase), span_end - span_start, "host_ptr_cleanup");
-                    this->mapped_host_pages_apple_.erase(span_start, span_end);
-                }
-            }
-        }
-#endif
-
-        void map_host_memory(uint64_t address, size_t size, void* host_pointer, memory_permission permissions) override
+        bool map_host_memory_locked(const uint64_t address, const size_t size, void* host_pointer, const memory_permission permissions,
+                                    std::vector<uint64_t>& planted_breakpoints)
         {
 #ifdef __APPLE__
-            std::vector<uint64_t> breakpoints_applied;
-#endif
+            const uint64_t host_address = this->to_host_address(address);
+
+            // VM_FLAGS_OVERWRITE replaces the reservation the memory manager put at the target;
+            // copy=FALSE creates a second mapping of the caller-owned pages rather than copying them.
+            const uint64_t claim_start = host_page_align_down_apple(address);
+            const size_t claim_size = static_cast<size_t>(host_page_align_up_apple(address + size) - claim_start);
+            if (!this->host_range_is_claimed(claim_start, claim_size))
             {
-                const std::unique_lock lock(this->tables_mutex_);
+                this->claim_host_range(claim_start, claim_size);
+            }
 
-                if (!is_page_aligned(address) || !is_page_aligned(size))
-                {
-                    throw std::runtime_error("FEX host memory mappings must be page aligned");
-                }
+            mach_vm_address_t target_address = host_address;
+            vm_prot_t cur_protection = VM_PROT_NONE;
+            vm_prot_t max_protection = VM_PROT_NONE;
+            const kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                                                         mach_task_self(), reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE,
+                                                         &cur_protection, &max_protection, VM_INHERIT_NONE);
+            if (result != KERN_SUCCESS || target_address != host_address)
+            {
+                throw std::runtime_error("FEX backend failed to alias host memory into the guest");
+            }
 
-                const auto rebase = rebase_for(this->is_wow64_process_, address);
-                const uint64_t host_address = address + rebase;
-
-#ifdef __APPLE__
-                // Same EXC_GUARD hazard as map_fixed_anonymous_apple (see its doc comment): try the plain,
-                // gap-checked remap first, and only fall back to VM_FLAGS_OVERWRITE if that proves the
-                // range is already fully covered (KERN_NO_SPACE/KERN_MEMORY_PRESENT), which rules out the
-                // unmapped gap that trips vm_map_delete()'s guard.
-                mach_vm_address_t target_address = host_address;
-                vm_prot_t cur_protection = VM_PROT_NONE;
-                vm_prot_t max_protection = VM_PROT_NONE;
-                kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED, mach_task_self(),
-                                                       reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection,
-                                                       &max_protection, VM_INHERIT_NONE);
-                if (result == KERN_NO_SPACE || result == KERN_MEMORY_PRESENT)
-                {
-                    target_address = host_address;
-                    cur_protection = VM_PROT_NONE;
-                    max_protection = VM_PROT_NONE;
-                    result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-                                             mach_task_self(), reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection,
-                                             &max_protection, VM_INHERIT_NONE);
-                }
-                if (result != KERN_SUCCESS || target_address != host_address)
-                {
-                    throw std::runtime_error("FEX backend failed to alias host memory into the guest");
-                }
-
-                // Without shadow entries, handle_general_memory_violation classifies any hardware fault in
-                // this range as an unmapped-memory violation - including the misaligned STLR-family faults
-                // (SIGBUS/BUS_ADRALN) FEX's TSO modeling routinely produces for x86-legal unaligned guest
-                // accesses, which must instead reach handle_misaligned_atomic_fault's emulation like they
-                // do for ordinary mappings. Registering the covering host pages additionally keeps the
-                // first-claim path from treating this live aliased range as free (same reasoning as
-                // map_mmio's KUSD-collision fix above).
-                this->set_shadow_range_apple(address, size, permissions);
-                this->mapped_host_pages_apple_.insert(host_page_align_down_apple(address), host_page_align_up_apple(address + size));
+            this->set_shadow_range_apple(address, size, permissions);
+            for (uint64_t host_page = claim_start; host_page < claim_start + claim_size; host_page += host_page_size_apple)
+            {
+                this->track_no_access_pages_apple(host_page);
+            }
 #else
-                void* result = ::mremap(host_pointer, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(host_address));
-                if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
+            const uint64_t source_address = get_untagged_pointer_address(host_pointer);
+            std::vector<std::pair<uint64_t, size_t>> aliased_spans{};
+            bool mapped = true;
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, const size_t offset) {
+                const uint64_t span_source = source_address + offset;
+                if (mapped && host_address != span_source)
                 {
-                    throw std::runtime_error("FEX backend failed to alias host memory into the guest");
+                    aliased_spans.emplace_back(host_address, span_size);
+                    mapped = alias_shared_mapping(span_source, span_size, host_address);
                 }
+            });
+            if (!mapped)
+            {
+                // A failed MAP_FIXED or MREMAP_FIXED can already have unmapped the reservation at its target.
+                for (const auto& [host_address, span_size] : aliased_spans)
+                {
+                    replace_host_span(host_address, span_size, PROT_NONE);
+                }
+                return false;
+            }
 #endif
 
-                ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
-                this->erase_region_range(address, size);
-                this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
-#ifdef __APPLE__
-                this->apply_patched_execution_breakpoints_in_range(address, size, breakpoints_applied);
-#endif
-            }
-#ifdef __APPLE__
-            for (const auto bp_address : breakpoints_applied)
-            {
-                this->invalidate_patched_breakpoint_code(bp_address);
-            }
-#endif
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                ::mprotect(reinterpret_cast<void*>(host_address), span_size, to_prot(permissions));
+            });
+            // owned=false: the memory belongs to the caller; we must not munmap it on teardown.
+            this->erase_region_range(address, size);
+            this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
+            this->apply_patched_execution_breakpoints_in_range(address, size, planted_breakpoints);
+            return true;
+        }
+
+        uint64_t host_placement_address(const uint64_t address) const override
+        {
+            return this->to_host_address(address);
         }
 
         bool host_memory_aliasing_is_coherent() const override
         {
+#ifdef __ANDROID__
+            return true;
+#else
+            // Apple Silicon's unified memory makes CPU/GPU coherency for the Metal buffers behind
+            // MoltenVK's Vulkan buffers likely, but it is not guaranteed across every Metal storage
+            // mode this bridge might use. An unnecessary flush is a harmless no-op, whereas wrongly
+            // claiming coherence surfaces as rendering corruption.
             return false;
+#endif
         }
 
+#ifndef __APPLE__
+        // Inside the low window or the arena, the reserved pages are replaced with a second mapping of the host memory.
+        // Without either, host memory can only appear in the guest at its own address.
+        bool host_memory_mapping_requires_identity() const override
+        {
+            return this->low_guest_window_ == 0 && this->guest_arena_ == 0;
+        }
+
+        bool host_memory_can_stay_in_place() const override
+        {
+            return this->low_guest_window_ == 0;
+        }
+#endif
+
         void flush_host_memory_cache(const void* host_pointer, size_t size) override
+        {
+            flush_cache_lines(host_pointer, size);
+        }
+
+        static void flush_cache_lines(const void* host_pointer, size_t size)
         {
             if (host_pointer == nullptr || size == 0)
             {
                 return;
             }
 
+            // The ARM64 equivalent of the KVM backend's clflushopt+sfence pair: evict the CPU data cache
+            // out to memory so a GPU reading the same physical pages non-coherently sees guest writes.
 #ifdef __APPLE__
+            // Darwin's public API for exactly this ("useful when dealing with cache incoherent devices
+            // or DMA" - OSCacheControl.h), preferred over hand-rolled `dc civac`, since EL0 access to
+            // cache-maintenance instructions is not something an embedder should assume is permitted.
             ::sys_dcache_flush(const_cast<void*>(host_pointer), size);
 #else
             constexpr size_t cache_line_size = 64; // Conservative for all known ARM64 implementations.
@@ -2682,121 +3200,741 @@ namespace sogen::fex
 #endif
         }
 
+#ifndef __APPLE__
+        bool track_access(const uint64_t address, const size_t size) override
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+            if (size == 0 || address % page_size != 0 || size % page_size != 0 || !this->is_range_mapped(address, size) ||
+                !this->range_has_permission(address, size, memory_permission::read_write))
+            {
+                return false;
+            }
+
+            bool overlaps = false;
+            this->for_each_tracked_chunk(address, size, [&](tracked_chunk&, uint64_t, size_t) { overlaps = true; });
+            if (overlaps)
+            {
+                return false;
+            }
+
+            const size_t chunk_count = (size + tracking_chunk_size - 1) / tracking_chunk_size;
+            this->tracked_ranges_.emplace(address, tracked_range{.size = size, .chunks = std::vector<tracked_chunk>(chunk_count)});
+            this->require_protection(address, size, tracked_access::read_only);
+            return true;
+        }
+
+        void take_written_ranges(const uint64_t address, const size_t size,
+                                 const std::function<void(uint64_t written_address, size_t written_size)>& f) override
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+            chunk_run written_run{};
+            chunk_run protect_run{};
+            const auto protect = [&](const uint64_t run_address, const size_t run_size) {
+                this->require_protection(run_address, run_size, tracked_access::read_only);
+            };
+
+            this->for_each_tracked_chunk(address, size, [&](tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) {
+                if (!chunk.written.exchange(false))
+                {
+                    written_run.finish(f);
+                    protect_run.finish(protect);
+                    return;
+                }
+
+                written_run.add(chunk_address, chunk_size, f);
+                if (chunk.stale)
+                {
+                    protect_run.finish(protect);
+                }
+                else
+                {
+                    protect_run.add(chunk_address, chunk_size, protect);
+                }
+            });
+            written_run.finish(f);
+            protect_run.finish(protect);
+        }
+
+        void invalidate_cache_on_access(const uint64_t address, const size_t size) override
+        {
+            const tables_lock lock(this->tables_mutex_, true);
+            chunk_run run{};
+            const auto protect = [&](const uint64_t run_address, const size_t run_size) {
+                this->require_protection(run_address, run_size, tracked_access::none);
+            };
+
+            this->for_each_tracked_chunk(address, size, [&](tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) {
+                if (chunk.stale.exchange(true))
+                {
+                    run.finish(protect);
+                }
+                else
+                {
+                    run.add(chunk_address, chunk_size, protect);
+                }
+            });
+            run.finish(protect);
+        }
+#endif
+
         void unmap_memory(uint64_t address, size_t size) override
         {
-            // tables_mutex_ is released before invalidate_code_range_locked runs - see
-            // try_write_memory_impl's doc comment for why holding it across that call is a real ABBA
-            // deadlock against FEXCore's own compile path.
             {
-                const std::unique_lock lock(this->tables_mutex_);
+                const tables_lock lock(this->tables_mutex_, true);
+                if (!this->unmap_memory_locked(address, size))
+                {
+                    return;
+                }
+            }
 
-                if (std::erase_if(this->mmio_regions_, [address](const mmio_region& region) {
-                        if (region.address != address)
-                        {
-                            return false;
-                        }
-                        if (region.host_backing != nullptr)
-                        {
-                            traced_munmap(region.host_backing, region.host_backing_size, "region_host_backing");
-                        }
-                        return true;
-                    }))
+            this->invalidate_code_range(address, size);
+        }
+
+        // Returns false for an unbacked MMIO region (see mmio_region's doc comment), which was never really mapped at the
+        // host level.
+        bool unmap_memory_locked(const uint64_t address, const size_t size)
+        {
+            if (const auto mmio = std::ranges::find(this->mmio_regions_, address, &mmio_region::address); mmio != this->mmio_regions_.end())
+            {
+                const bool backed = mmio->is_backed();
+                this->mmio_regions_.erase(mmio);
+                if (!backed)
+                {
+                    return false;
+                }
+            }
+
+            this->stop_access_tracking(address, size);
+
+#ifdef __APPLE__
+            this->set_shadow_range_apple(address, size, std::nullopt);
+            this->sync_host_pages_covering_apple(address, size);
+#else
+            const auto region = this->find_region_containing(address);
+            const bool unmap =
+                region == this->regions_.end() || region->second.owned || this->is_in_low_guest_window(this->to_host_address(address));
+            if (unmap)
+            {
+                this->remap_host_claim(address, size, PROT_NONE);
+            }
+#endif
+            this->mark_patched_execution_breakpoints_unmapped_in_range(address, size);
+            this->erase_region_range(address, size);
+            return true;
+        }
+
+        void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) override
+        {
+            {
+                const tables_lock lock(this->tables_mutex_, true);
+                this->apply_memory_protection_locked(address, size, permissions);
+            }
+
+            // Permission changes can expose/retract executable code; keep FEX's translation cache honest.
+            this->invalidate_code_range(address, size);
+        }
+
+        void apply_memory_protection_locked(const uint64_t address, const size_t size, const memory_permission permissions)
+        {
+            // Tracked chunks take the new protection as it is, so writes to them go unnoticed until they are tracked again.
+            this->for_each_tracked_chunk(address, size, [&](tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) {
+                this->require_up_to_date(chunk, chunk_address, chunk_size);
+                chunk.written = true;
+            });
+
+#ifdef __APPLE__
+            this->set_shadow_range_apple(address, size, permissions);
+            this->sync_host_pages_covering_apple(address, size);
+#else
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                if (::mprotect(reinterpret_cast<void*>(host_address), span_size, to_prot(permissions)) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to change memory protection");
+                }
+            });
+#endif
+
+            this->set_region_range_permissions(address, size, permissions);
+        }
+
+        // access tracking
+
+        template <typename F>
+        void for_each_tracked_chunk(const uint64_t address, const size_t size, F&& f) const
+        {
+            const uint64_t end = address + size;
+            auto it = this->tracked_ranges_.upper_bound(address);
+            if (it != this->tracked_ranges_.begin())
+            {
+                --it;
+            }
+
+            for (; it != this->tracked_ranges_.end() && it->first < end; ++it)
+            {
+                const uint64_t range_end = it->first + it->second.size;
+                if (range_end <= address)
+                {
+                    continue;
+                }
+
+                const uint64_t last = std::min(end, range_end);
+                for (size_t index = (std::max(address, it->first) - it->first) / tracking_chunk_size;
+                     it->first + (index * tracking_chunk_size) < last; ++index)
+                {
+                    const uint64_t chunk_address = it->first + (index * tracking_chunk_size);
+                    f(it->second.chunks[index], chunk_address,
+                      static_cast<size_t>(std::min<uint64_t>(tracking_chunk_size, range_end - chunk_address)));
+                }
+            }
+        }
+
+        // Calls f(address, size, permissions) for each part of a range that one mapped region covers.
+        template <typename F>
+        void for_each_mapped_piece(const uint64_t address, const size_t size, F&& f) const
+        {
+            const uint64_t end = address + size;
+            uint64_t cursor = address;
+            while (cursor < end)
+            {
+                const auto region = this->find_region_containing(cursor);
+                if (region == this->regions_.end())
+                {
+                    const auto next = this->regions_.upper_bound(cursor);
+                    cursor = next == this->regions_.end() ? end : next->first;
+                    continue;
+                }
+
+                const uint64_t piece_end = std::min(end, region->first + region->second.size);
+                f(cursor, static_cast<size_t>(piece_end - cursor), region->second.permissions);
+                cursor = piece_end;
+            }
+        }
+
+        // Applies the guest's protection to the mapped parts of a range, limited to access.
+        bool restrict_protection(const uint64_t address, const size_t size, const tracked_access access) const
+        {
+            bool restricted = true;
+            this->for_each_mapped_piece(
+                address, size, [&](const uint64_t piece_address, const size_t piece_size, const memory_permission permissions) {
+                    int prot = to_prot(permissions);
+                    if (access == tracked_access::none)
+                    {
+                        prot = PROT_NONE;
+                    }
+                    else if (access == tracked_access::read_only)
+                    {
+                        prot &= ~PROT_WRITE;
+                    }
+
+                    this->for_each_host_span(piece_address, piece_size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                        restricted = ::mprotect(reinterpret_cast<void*>(host_address), span_size, prot) == 0 && restricted;
+                    });
+                });
+            return restricted;
+        }
+
+        void require_protection(const uint64_t address, const size_t size, const tracked_access access)
+        {
+            if (!this->restrict_protection(address, size, access))
+            {
+                throw std::runtime_error("FEX backend failed to change the protection of tracked memory");
+            }
+        }
+
+        // Cleans and invalidates a stale chunk's cache lines, and leaves it write-protected unless the chunk is written
+        // already, so that a write still marks it written. Cleaning makes the guest's unflushed writes visible as well,
+        // but the chunk keeps counting as written so that they are still flushed through the device.
+        bool bring_up_to_date(tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) const
+        {
+            chunk.stale = false;
+            const auto access = chunk.written ? tracked_access::full : tracked_access::read_only;
+            if (!this->restrict_protection(chunk_address, chunk_size, access))
+            {
+                return false;
+            }
+
+            // dc civac needs read access, which the guest may have taken away from parts of the chunk.
+            this->for_each_mapped_piece(
+                chunk_address, chunk_size, [&](const uint64_t piece_address, const size_t piece_size, const memory_permission permissions) {
+                    if ((permissions & memory_permission::read) != memory_permission::none)
+                    {
+                        this->for_each_host_span(piece_address, piece_size,
+                                                 [&](const uint64_t host_address, const size_t span_size, size_t) {
+                                                     flush_cache_lines(reinterpret_cast<const void*>(host_address), span_size);
+                                                 });
+                    }
+                });
+            return true;
+        }
+
+        void require_up_to_date(tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) const
+        {
+            if (chunk.stale && !this->bring_up_to_date(chunk, chunk_address, chunk_size))
+            {
+                throw std::runtime_error("FEX backend failed to change the protection of tracked memory");
+            }
+        }
+
+        // The first access to a stale chunk of tracked memory, or the first write to a clean one: brings the chunk up to
+        // date or records the write, and lets the access through. Only the faulting page's protection decides whether a
+        // write is allowed, since the guest can change the protection of parts of a chunk.
+        bool handle_tracked_memory_fault(const uint64_t host_fault_address, const bool is_write)
+        {
+            const signal_tables_lock lock(this->tables_mutex_);
+            const uint64_t address = this->to_guest_address(host_fault_address);
+            bool handled = false;
+            this->for_each_tracked_chunk(address, 1, [&](tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) {
+                const auto writable = [&] {
+                    return this->range_has_permission(address & ~(page_size - 1), page_size, memory_permission::write);
+                };
+                if (chunk.stale)
+                {
+                    if (is_write && writable())
+                    {
+                        chunk.written = true;
+                    }
+                    handled = this->bring_up_to_date(chunk, chunk_address, chunk_size);
+                }
+                else if (writable())
+                {
+                    chunk.written = true;
+                    handled = this->restrict_protection(chunk_address, chunk_size, tracked_access::full);
+                }
+            });
+            return handled;
+        }
+
+        void stop_access_tracking(const uint64_t address, const size_t size)
+        {
+            const uint64_t end = address + size;
+            auto it = this->tracked_ranges_.upper_bound(address);
+            if (it != this->tracked_ranges_.begin())
+            {
+                --it;
+            }
+
+            while (it != this->tracked_ranges_.end() && it->first < end)
+            {
+                if (it->first + it->second.size <= address)
+                {
+                    ++it;
+                    continue;
+                }
+
+                const uint64_t range_address = it->first;
+                const size_t range_size = it->second.size;
+                this->for_each_tracked_chunk(range_address, range_size,
+                                             [&](tracked_chunk& chunk, const uint64_t chunk_address, const size_t chunk_size) {
+                                                 this->require_up_to_date(chunk, chunk_address, chunk_size);
+                                             });
+                it = this->tracked_ranges_.erase(it);
+                this->require_protection(range_address, range_size, tracked_access::full);
+            }
+        }
+
+        // region bookkeeping
+
+        bool host_range_is_claimed(const uint64_t address, const size_t size) const
+        {
+            auto it = this->claimed_host_ranges_.upper_bound(address);
+            if (it == this->claimed_host_ranges_.begin())
+            {
+                return false;
+            }
+
+            --it;
+            return address >= it->first && address + size <= it->first + it->second;
+        }
+
+        void add_host_claim(const uint64_t address, const size_t size)
+        {
+            uint64_t start = address;
+            uint64_t end = address + size;
+            auto it = this->claimed_host_ranges_.lower_bound(start);
+
+            if (it != this->claimed_host_ranges_.begin())
+            {
+                const auto previous = std::prev(it);
+                if (previous->first + previous->second >= start)
+                {
+                    start = previous->first;
+                    end = std::max(end, previous->first + previous->second);
+                    it = this->claimed_host_ranges_.erase(previous);
+                }
+            }
+
+            while (it != this->claimed_host_ranges_.end() && it->first <= end)
+            {
+                end = std::max(end, it->first + it->second);
+                it = this->claimed_host_ranges_.erase(it);
+            }
+
+            this->claimed_host_ranges_.emplace(start, static_cast<size_t>(end - start));
+        }
+
+        void remove_host_claim(const uint64_t address, const size_t size)
+        {
+            auto it = this->claimed_host_ranges_.upper_bound(address);
+            if (it == this->claimed_host_ranges_.begin())
+            {
+                return;
+            }
+
+            --it;
+            const uint64_t claim_start = it->first;
+            const uint64_t claim_end = claim_start + it->second;
+            const uint64_t end = address + size;
+            if (address < claim_start || end > claim_end)
+            {
+                return;
+            }
+
+            this->claimed_host_ranges_.erase(it);
+            if (claim_start < address)
+            {
+                this->claimed_host_ranges_.emplace(claim_start, static_cast<size_t>(address - claim_start));
+            }
+            if (end < claim_end)
+            {
+                this->claimed_host_ranges_.emplace(end, static_cast<size_t>(claim_end - end));
+            }
+        }
+
+        void claim_host_range(const uint64_t address, const size_t size)
+        {
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                if (this->is_in_low_guest_window(host_address) || this->is_in_guest_arena(host_address, span_size))
                 {
                     return;
                 }
 
 #ifdef __APPLE__
-                this->set_shadow_range_apple(address, size, std::nullopt);
-                this->sync_host_pages_covering_apple(address, size);
-                // The backing memory is gone - any breakpoint here no longer has a real 0xCC or
-                // original byte to track. map_memory/map_host_memory re-apply it if this range is
-                // ever remapped (see apply_patched_execution_breakpoints_in_range).
-                this->mark_patched_execution_breakpoints_unmapped_in_range(address, size);
-#else
-                traced_munmap(reinterpret_cast<void*>(address), size, "release_memory");
-#endif
-                this->erase_region_range(address, size);
-            }
-            this->invalidate_code_range_locked(address, size);
-        }
-
-        void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) override
-        {
-            // See unmap_memory's doc comment: tables_mutex_ must be released before
-            // invalidate_code_range_locked runs.
-            {
-                const std::unique_lock lock(this->tables_mutex_);
-
-#ifdef __APPLE__
-                this->set_shadow_range_apple(address, size, permissions);
-                this->sync_host_pages_covering_apple(address, size);
-#else
-                if (::mprotect(reinterpret_cast<void*>(address), size, to_prot(permissions)) != 0)
+                mach_vm_address_t target = host_address;
+                const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, span_size, VM_FLAGS_FIXED);
+                if (result == KERN_INVALID_ADDRESS)
                 {
-                    throw std::runtime_error("FEX backend failed to change memory protection");
+                    this->record_unusable_host_range_apple(host_address, span_size);
+                    throw host_memory_collision{};
+                }
+                if (result == KERN_NO_SPACE)
+                {
+                    throw host_memory_collision{};
+                }
+                if (result != KERN_SUCCESS || target != host_address)
+                {
+                    throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
+                }
+                if (::mprotect(reinterpret_cast<void*>(host_address), span_size, PROT_NONE) != 0)
+                {
+                    ::mach_vm_deallocate(mach_task_self(), target, span_size);
+                    throw std::runtime_error("FEX backend failed to protect a guest address reservation");
+                }
+#else
+                void* result = ::mmap(reinterpret_cast<void*>(host_address), span_size, PROT_NONE,
+                                      MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                if (result == MAP_FAILED && errno != EEXIST)
+                {
+                    throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
+                }
+                if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
+                {
+                    if (result != MAP_FAILED)
+                    {
+                        ::munmap(result, span_size);
+                    }
+                    throw host_memory_collision{};
                 }
 #endif
-
-                this->set_region_range_permissions(address, size, permissions);
-            }
-            this->invalidate_code_range_locked(address, size);
+            });
+            this->add_host_claim(address, size);
         }
 
-        // --[ region bookkeeping - callers already hold tables_mutex_ ]------------------------------
+#ifdef __APPLE__
+        // KERN_INVALID_ADDRESS means the kernel refuses the address whether or not anything is mapped there (e.g. a
+        // low-address floor just past a PIE process's __PAGEZERO). mach_vm_region never reports such a range, so the
+        // refused host pages are recorded for reserved_host_ranges, or the memory manager would pick them again and again.
+        void record_unusable_host_range_apple(const uint64_t host_address, const size_t size)
+        {
+            mach_vm_address_t target = host_address;
+            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, size, VM_FLAGS_FIXED);
+            if (result == KERN_SUCCESS)
+            {
+                ::mach_vm_deallocate(mach_task_self(), target, size);
+                return;
+            }
 
+            if (result != KERN_INVALID_ADDRESS)
+            {
+                return;
+            }
+
+            if (size <= host_page_size_apple)
+            {
+                this->add_unusable_host_range_apple(host_address, size);
+                return;
+            }
+
+            const size_t half = static_cast<size_t>(host_page_align_up_apple(size / 2));
+            this->record_unusable_host_range_apple(host_address, half);
+            this->record_unusable_host_range_apple(host_address + half, size - half);
+        }
+
+        void add_unusable_host_range_apple(uint64_t start, const size_t size)
+        {
+            uint64_t end = start + size;
+            auto it = this->unusable_host_ranges_apple_.lower_bound(start);
+            if (it != this->unusable_host_ranges_apple_.begin() && std::prev(it)->first + std::prev(it)->second >= start)
+            {
+                it = std::prev(it);
+                start = it->first;
+                end = std::max(end, it->first + it->second);
+                it = this->unusable_host_ranges_apple_.erase(it);
+            }
+
+            while (it != this->unusable_host_ranges_apple_.end() && it->first <= end)
+            {
+                end = std::max(end, it->first + it->second);
+                it = this->unusable_host_ranges_apple_.erase(it);
+            }
+
+            this->unusable_host_ranges_apple_.emplace(start, static_cast<size_t>(end - start));
+        }
+#endif
+
+        void remap_host_claim(const uint64_t address, const size_t size, const int protection)
+        {
+            if (!this->host_range_is_claimed(address, size))
+            {
+                throw std::logic_error("FEX backend cannot replace an unclaimed host range");
+            }
+
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                replace_host_span(host_address, span_size, protection);
+            });
+        }
+
+        static void replace_host_span(const uint64_t host_address, const size_t size, const int protection)
+        {
+#ifdef __APPLE__
+            if (!replace_with_anonymous_apple(host_address, size, protection))
+            {
+                throw std::runtime_error("FEX backend failed to replace a claimed host range");
+            }
+#else
+            void* result = ::mmap(reinterpret_cast<void*>(host_address), size, protection,
+                                  MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
+            {
+                throw std::runtime_error("FEX backend failed to replace a claimed host range");
+            }
+#endif
+        }
+
+        // Inside the low window a released range goes back to being reserved, so no other host allocation can
+        // take it while the window still backs the guest's low 4GB.
+        void release_host_claim(const uint64_t address, const size_t size)
+        {
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                if (this->is_in_low_guest_window(host_address) || this->is_in_guest_arena(host_address, span_size))
+                {
+                    replace_host_span(host_address, span_size, PROT_NONE);
+                }
+                else
+                {
+                    ::munmap(reinterpret_cast<void*>(host_address), span_size);
+                }
+            });
+        }
+
+        // A WoW64 process's 32-bit code needs the guest's low 4GB, which the host process may already use for
+        // itself (Android's ART keeps its Java heap there) or cannot map at all (Darwin's __PAGEZERO). The guest's
+        // low 4GB is then backed by a host window elsewhere, and FEX adds the window's base to every guest access
+        // below 4GB.
+        void enable_low_guest_window()
+        {
+            if (!this->claimed_host_ranges_.empty() && this->claimed_host_ranges_.begin()->first < low_guest_window_size)
+            {
+                throw std::logic_error("FEX backend must enable the low guest window before mapping guest memory below 4GB");
+            }
+
+            void* window = ::mmap(nullptr, low_guest_window_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (window == MAP_FAILED)
+            {
+                throw std::runtime_error("FEX backend failed to reserve the host window for the guest's low 4GB");
+            }
+
+            this->low_guest_window_ = reinterpret_cast<uint64_t>(window);
+            this->context_->SetWow64GuestRebaseValue(this->low_guest_window_);
+            this->context_->SetNeedsWow64GuestRebase(true);
+        }
+
+        bool is_in_guest_arena(const uint64_t host_address, const size_t size) const
+        {
+            return this->guest_arena_ != 0 && host_address >= this->guest_arena_ &&
+                   host_address + size <= this->guest_arena_ + guest_arena_size;
+        }
+
+#ifndef __APPLE__
+        // Without the arena, guest memory still works but cannot be saved.
+        void reserve_guest_arena()
+        {
+            if (guest_arena_base + guest_arena_size > this->host_address_end_)
+            {
+                return;
+            }
+
+            void* arena = ::mmap(reinterpret_cast<void*>(guest_arena_base), guest_arena_size, PROT_NONE,
+                                 MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (arena == MAP_FAILED)
+            {
+                return;
+            }
+
+            // Kernels before 4.17 take MAP_FIXED_NOREPLACE as a hint.
+            if (reinterpret_cast<uint64_t>(arena) != guest_arena_base)
+            {
+                ::munmap(arena, guest_arena_size);
+                return;
+            }
+
+            this->guest_arena_ = guest_arena_base;
+        }
+#endif
+
+        bool is_in_low_guest_window(const uint64_t host_address) const
+        {
+            return this->low_guest_window_ != 0 && host_address >= this->low_guest_window_ &&
+                   host_address < this->low_guest_window_ + low_guest_window_size;
+        }
+
+        uint64_t to_host_address(const uint64_t address) const
+        {
+            return this->low_guest_window_ != 0 && address < low_guest_window_size ? this->low_guest_window_ + address : address;
+        }
+
+        uint64_t to_guest_address(const uint64_t host_address) const
+        {
+            return this->is_in_low_guest_window(host_address) ? host_address - this->low_guest_window_ : host_address;
+        }
+
+        // Calls f(host_address, size, offset) for each host-contiguous part of a guest range: one, or two when the
+        // range crosses the end of the low window.
+        template <typename F>
+        void for_each_host_span(const uint64_t address, const size_t size, F&& f) const
+        {
+            const uint64_t end = address + size;
+            uint64_t cursor = address;
+            if (this->low_guest_window_ != 0 && cursor < low_guest_window_size && end > low_guest_window_size)
+            {
+                f(this->to_host_address(cursor), static_cast<size_t>(low_guest_window_size - cursor), size_t{0});
+                cursor = low_guest_window_size;
+            }
+
+            if (cursor < end)
+            {
+                f(this->to_host_address(cursor), static_cast<size_t>(end - cursor), static_cast<size_t>(cursor - address));
+            }
+        }
+
+        // Returns the region that contains address, not merely its predecessor in the ordered map.
+        std::map<uint64_t, mapped_region>::const_iterator find_region_containing(uint64_t address) const
+        {
+            auto it = this->regions_.upper_bound(address);
+            if (it == this->regions_.begin())
+            {
+                return this->regions_.end();
+            }
+
+            --it;
+            return address < it->first + it->second.size ? it : this->regions_.end();
+        }
+
+        // Callers are expected to have checked is_range_mapped already.
         bool range_is_writable(uint64_t address, size_t size) const
+        {
+            return this->range_has_permission(address, size, memory_permission::write);
+        }
+
+        bool range_has_permission(uint64_t address, size_t size, const memory_permission permissions) const
         {
             uint64_t cursor = address;
             const uint64_t end = address + size;
 
             while (cursor < end)
             {
-                auto it = this->regions_.upper_bound(cursor);
-                if (it == this->regions_.begin())
+                const auto it = this->find_region_containing(cursor);
+                if (it == this->regions_.end() || (it->second.permissions & permissions) != permissions)
                 {
                     return false;
                 }
-                --it;
 
-                const uint64_t region_end = it->first + it->second.size;
-                if (cursor < it->first || cursor >= region_end ||
-                    (it->second.permissions & memory_permission::write) == memory_permission::none)
-                {
-                    return false;
-                }
-                cursor = region_end;
+                cursor = it->first + it->second.size;
             }
 
             return true;
         }
 
-        void set_temporary_write_access(uint64_t address, size_t size, bool enable)
+        std::optional<memory_violation_type> first_range_violation(uint64_t address, size_t size, memory_permission permission) const
+        {
+            if (size == 0)
+            {
+                return std::nullopt;
+            }
+
+#ifdef __APPLE__
+            const uint64_t end = address + size;
+            for (uint64_t page = address & ~(page_size - 1); page < end; page += page_size)
+            {
+                const auto it = this->page_shadow_apple_.find(page);
+                if (it == this->page_shadow_apple_.end())
+                {
+                    return memory_violation_type::unmapped;
+                }
+                if ((it->second & permission) != permission)
+                {
+                    return memory_violation_type::protection;
+                }
+            }
+#else
+            uint64_t cursor = address;
+            const uint64_t end = address + size;
+            while (cursor < end)
+            {
+                const auto it = this->find_region_containing(cursor);
+                if (it == this->regions_.end())
+                {
+                    return memory_violation_type::unmapped;
+                }
+                if ((it->second.permissions & permission) != permission)
+                {
+                    return memory_violation_type::protection;
+                }
+                cursor = it->first + it->second.size;
+            }
+#endif
+
+            return std::nullopt;
+        }
+
+        // For loader-privileged writes: sogen itself writing guest memory it declared read-only, such as
+        // a PE section's initial file content before its final permission is locked in. Needed because
+        // this backend enforces the declared permission through real host protection, unlike Unicorn's
+        // uc_mem_write, which operates on emulated memory independent of any host mprotect state.
+        void set_temporary_access(uint64_t address, size_t size, const memory_permission added, bool enable) const
         {
 #ifdef __APPLE__
             const uint64_t start = host_page_align_down_apple(address);
             const uint64_t end = host_page_align_up_apple(address + size);
             for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
             {
-                if (!enable)
-                {
-                    this->sync_host_page_apple(host_page);
-                    continue;
-                }
-
-                memory_permission effective = memory_permission::none;
-                for (uint64_t page = host_page; page < host_page + host_page_size_apple; page += page_size)
-                {
-                    const auto it = this->page_shadow_apple_.find(page);
-                    if (it != this->page_shadow_apple_.end())
-                    {
-                        effective = effective | it->second;
-                    }
-                }
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-                ::mprotect(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple,
-                           to_prot_apple(effective | memory_permission::write));
+                // The page stays claimed while it is accessible, so only its protection changes.
+                const auto declared = enable ? this->shadow_permission_apple(host_page).value_or(memory_permission::none) | added
+                                             : this->host_page_permission_apple(host_page).value_or(memory_permission::none);
+                ::mprotect(reinterpret_cast<void*>(this->to_host_address(host_page)), host_page_size_apple, to_prot_apple(declared));
             }
 #else
+            // The range can span several regions_ entries with different declared permissions, so
+            // both the bump and the restore work per intersecting entry.
             const uint64_t end = address + size;
 
             auto it = this->regions_.upper_bound(address);
@@ -2815,12 +3953,22 @@ namespace sogen::fex
 
                 const uint64_t sub_start = std::max(it->first, address & ~(page_size - 1));
                 const uint64_t sub_end = std::min(region_end, (end + page_size - 1) & ~(page_size - 1));
-                const memory_permission perm = enable ? (it->second.permissions | memory_permission::write) : it->second.permissions;
-                ::mprotect(reinterpret_cast<void*>(sub_start), sub_end - sub_start, to_prot(perm));
+                const memory_permission perm = enable ? (it->second.permissions | added) : it->second.permissions;
+                this->for_each_host_span(sub_start, static_cast<size_t>(sub_end - sub_start),
+                                         [&](const uint64_t host_address, const size_t span_size, size_t) {
+                                             ::mprotect(reinterpret_cast<void*>(host_address), span_size, to_prot(perm));
+                                         });
             }
 #endif
         }
 
+        // Keeps regions_ non-overlapping, the invariant is_range_mapped/range_is_writable rely on. The
+        // guest memory manager commits a reserved region in gap-filling sub-ranges (several map_memory
+        // calls, so several entries tile one committed region) but decommits it in one call, so an
+        // unmap range spans several entries and does not start at each entry's key. A plain
+        // regions_.erase(address) would orphan the rest, and is_range_mapped's --upper_bound walk would
+        // later land on a stale inner entry and wrongly report "not mapped". Entries straddling an edge
+        // are trimmed or split, since the host-level unmap only touches [address, address+size).
         void erase_region_range(uint64_t address, size_t size)
         {
             const uint64_t end = address + size;
@@ -2831,7 +3979,7 @@ namespace sogen::fex
                 auto prev = std::prev(it);
                 if (prev->first + prev->second.size > address)
                 {
-                    it = prev;
+                    it = prev; // a region starting before `address` extends into the range
                 }
             }
 
@@ -2865,6 +4013,12 @@ namespace sogen::fex
             }
         }
 
+        // Splits entries straddling an edge so only the in-range part changes. A guest protection change
+        // can target a sub-range of a larger committed region, start mid-entry, or span several entries,
+        // all of which a plain regions_.find(address) either misses or over-applies. Since
+        // QueryGuestExecutableRange decides executability straight from these recorded permissions, a
+        // stale entry makes the JIT reject a legitimately-executable page or execute one it should not.
+        // Gaps in the tiling are preserved: unmapped holes are never fabricated as mapped.
         void set_region_range_permissions(uint64_t address, size_t size, memory_permission permissions)
         {
             const uint64_t end = address + size;
@@ -2876,7 +4030,7 @@ namespace sogen::fex
                 auto prev = std::prev(it);
                 if (prev->first + prev->second.size > address)
                 {
-                    it = prev;
+                    it = prev; // a region starting before `address` extends into the range
                 }
             }
             for (; it != this->regions_.end() && it->first < end; ++it)
@@ -2919,73 +4073,95 @@ namespace sogen::fex
             uint64_t cursor = address;
             const uint64_t end = address + size;
 
+            // Walk the (sorted) region map covering [address, end). Regions are page-granular and
+            // non-overlapping, so a simple forward walk suffices.
             while (cursor < end)
             {
-                auto it = this->regions_.upper_bound(cursor);
-                if (it == this->regions_.begin())
+                const auto it = this->find_region_containing(cursor);
+                if (it == this->regions_.end())
                 {
                     return false;
                 }
-                --it;
-
-                const uint64_t region_end = it->first + it->second.size;
-                if (cursor < it->first || cursor >= region_end)
-                {
-                    return false;
-                }
-                cursor = region_end;
+                cursor = it->first + it->second.size;
             }
 
             return true;
         }
 
 #ifdef __APPLE__
-        // --[ patched execution breakpoints (0xCC planting, int3 hook mode) - callers already hold
-        //     tables_mutex_ (unique) ]-------------------------------------------------------------
-        //
-        // Poking a guest byte here is safe under tables_mutex_ (it's the same direct write
-        // try_write_memory_impl already does under this lock); invalidate_code_range_locked must
-        // never run while tables_mutex_ is held (see try_write_memory_impl's doc comment on the
-        // FEXCore GetCodeInvalidationMutex ABBA hazard), so every helper that may poke a byte returns
-        // (or collects) which address(es) the caller must invalidate after releasing the lock.
-
-        std::optional<std::byte> peek_breakpoint_byte(uint64_t address) const
+        // 16KB-host vs 4KB-guest permission reconciliation. nullopt permissions means unmap: the pages
+        // become "never requested" again, which must still fault like reserved-but-uncommitted guest
+        // memory rather than being silently allowed.
+        void set_shadow_range_apple(uint64_t address, size_t size, std::optional<memory_permission> permissions)
         {
-            if (!this->is_range_mapped(address, 1))
+            for (uint64_t page = address; page < address + size; page += page_size)
             {
-                return std::nullopt;
-            }
-            const auto rebase = rebase_for(this->is_wow64_process_, address);
-            return *reinterpret_cast<const std::byte*>(address + rebase);
-        }
-
-        void poke_breakpoint_byte(uint64_t address, std::byte value)
-        {
-            const bool needs_temporary_write = !this->range_is_writable(address, 1);
-            if (needs_temporary_write)
-            {
-                this->set_temporary_write_access(address, 1, true);
-            }
-            const auto rebase = rebase_for(this->is_wow64_process_, address);
-            *reinterpret_cast<volatile std::byte*>(address + rebase) = value;
-            if (needs_temporary_write)
-            {
-                this->set_temporary_write_access(address, 1, false);
-            }
-        }
-
-        // All pending-step/deferred-breakpoint mutation happens under tables_mutex_ (see
-        // fex_vcpu::handle_patched_execution_breakpoint), so scanning every vCPU's state here is
-        // safe - mirrors the WHP backend's identical is_page_being_stepped().
-        bool is_stepping_over_patched_breakpoint(uint64_t address) const
-        {
-            for (const auto& vcpu : this->vcpus_)
-            {
-                if (vcpu->deferred_patched_breakpoint_ == address)
+                if (permissions.has_value())
                 {
-                    return true;
+                    this->page_shadow_apple_[page] = *permissions;
                 }
-                if (vcpu->pending_execution_step_ && vcpu->pending_execution_step_->patched_breakpoint == address)
+                else
+                {
+                    this->page_shadow_apple_.erase(page);
+                }
+            }
+        }
+
+        // Derives one 16KB host page's permission from its up to four 4KB shadow slots, taking their
+        // union when they disagree, so a legitimate access to a slot never faults on its stricter
+        // neighbor's account. A guard or no-access slot sharing a host page with mapped memory is caught by
+        // a hardware watchpoint instead (see arm_watchpoints_apple); a reserved slot stays accessible, and a
+        // read-only slot beside a writable one stays writable.
+        void sync_host_page_apple(uint64_t host_page_addr)
+        {
+            const auto effective = this->host_page_permission_apple(host_page_addr);
+            const bool currently_mapped = this->host_range_is_claimed(host_page_addr, host_page_size_apple);
+            this->track_no_access_pages_apple(host_page_addr);
+
+            if (!effective)
+            {
+                this->code_write_trapped_host_pages_apple_.erase(host_page_addr);
+
+                if (currently_mapped)
+                {
+                    // The guest range may merely be decommitted while still MEM_RESERVE'd, so the page
+                    // must stay claimed: munmapping it would let a foreign host allocation land here
+                    // and be clobbered by a later recommit's MAP_FIXED. Replacing the mapping rather
+                    // than mprotect'ing it discards the old contents, so a recommit sees the zeroed
+                    // pages MEM_COMMIT requires. release_guest_address_range drops the claim for good.
+                    this->remap_host_claim(host_page_addr, host_page_size_apple, PROT_NONE);
+                }
+                return;
+            }
+
+            if (!currently_mapped)
+            {
+                this->claim_host_range(host_page_addr, host_page_size_apple);
+            }
+
+            if (::mprotect(reinterpret_cast<void*>(this->to_host_address(host_page_addr)), host_page_size_apple,
+                           to_prot_apple(*effective)) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to change memory protection");
+            }
+        }
+
+        std::optional<memory_permission> host_page_permission_apple(const uint64_t host_page_addr) const
+        {
+            auto permission = this->shadow_permission_apple(host_page_addr);
+            if (permission && this->code_write_trapped_host_pages_apple_.contains(host_page_addr))
+            {
+                *permission &= ~memory_permission::write;
+            }
+            return permission;
+        }
+
+        bool range_has_code_write_trap_apple(const uint64_t address, const size_t size) const
+        {
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                if (this->code_write_trapped_host_pages_apple_.contains(host_page))
                 {
                     return true;
                 }
@@ -2993,8 +4169,1459 @@ namespace sogen::fex
             return false;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
-        bool try_apply_patched_execution_breakpoint(uint64_t address, patched_execution_breakpoint& breakpoint)
+        // FEXCore's default SMC mode (MTrack) leaves noticing guest stores into translated code to the frontend: it reports
+        // every page it translates code from, and the frontend write-protects it and invalidates the code on the write
+        // fault. Only pages the guest can write are trapped; a read-only code page changes only through a protection
+        // change, which invalidates already.
+        void trap_code_writes_apple(const uint64_t address, const size_t size)
+        {
+            for (uint64_t page = address & ~(page_size - 1); page < address + size; page += page_size)
+            {
+                const auto it = this->page_shadow_apple_.find(page);
+                if (it == this->page_shadow_apple_.end() || (it->second & memory_permission::write) == memory_permission::none)
+                {
+                    continue;
+                }
+
+                const uint64_t host_page = host_page_align_down_apple(page);
+                if (this->code_write_trapped_host_pages_apple_.insert(host_page).second)
+                {
+                    this->sync_host_page_apple(host_page);
+                }
+            }
+        }
+
+        // The page is invalidated and unprotected under the code invalidation mutex, so no vCPU can translate its old
+        // bytes in between and keep a block for a page that is no longer trapped.
+        bool untrap_code_writes_apple(const uint64_t guest_address)
+        {
+            const uint64_t host_page = host_page_align_down_apple(guest_address);
+
+            {
+                const signal_tables_lock lock(this->tables_mutex_);
+                if (!this->code_write_trapped_host_pages_apple_.contains(host_page))
+                {
+                    return false;
+                }
+            }
+
+            std::unique_lock code_lock(this->context_->GetCodeInvalidationMutex());
+
+            {
+                const tables_lock lock(this->tables_mutex_, true);
+                if (this->code_write_trapped_host_pages_apple_.erase(host_page) == 0)
+                {
+                    return false;
+                }
+                this->sync_host_page_apple(host_page);
+                this->code_pages_.erase(this->code_pages_.lower_bound(host_page),
+                                        this->code_pages_.lower_bound(host_page + host_page_size_apple));
+            }
+
+            this->invalidate_translations_locked(host_page, host_page_size_apple);
+            return true;
+        }
+
+        std::optional<memory_permission> shadow_permission_apple(const uint64_t host_page_addr) const
+        {
+            std::optional<memory_permission> effective{};
+            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
+            {
+                const auto it = this->page_shadow_apple_.find(page);
+                if (it != this->page_shadow_apple_.end())
+                {
+                    effective = effective.value_or(memory_permission::none) | it->second;
+                }
+            }
+
+            return effective;
+        }
+
+        void sync_host_pages_covering_apple(uint64_t address, size_t size)
+        {
+            const uint64_t start = host_page_align_down_apple(address);
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
+            {
+                this->sync_host_page_apple(host_page);
+            }
+        }
+
+        bool host_page_maps_pages_outside_apple(const uint64_t host_page_addr, const uint64_t address, const uint64_t end) const
+        {
+            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
+            {
+                if ((page < address || page >= end) && this->page_shadow_apple_.contains(page))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // A host page stays mapped while any of its guest pages is, so a guest page unmapped from it keeps
+        // its old contents. Mapping that guest page again must still hand out the zero-filled page that
+        // MEM_COMMIT guarantees.
+        void zero_range_in_shared_host_pages_apple(const uint64_t address, const size_t size)
+        {
+            const uint64_t end = address + size;
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                if (!this->host_page_maps_pages_outside_apple(host_page, address, end))
+                {
+                    continue;
+                }
+
+                const uint64_t zero_start = std::max(address, host_page);
+                const size_t zero_size = static_cast<size_t>(std::min(end, host_page + host_page_size_apple) - zero_start);
+                const auto host_permission = this->host_page_permission_apple(host_page).value_or(memory_permission::none);
+                const bool needs_temporary_write = (host_permission & memory_permission::write) == memory_permission::none;
+
+                if (needs_temporary_write)
+                {
+                    this->set_temporary_access(zero_start, zero_size, memory_permission::write, true);
+                }
+
+                this->disarm_watchpoints_over_apple(zero_start, zero_size);
+                std::memset(reinterpret_cast<void*>(this->to_host_address(zero_start)), 0, zero_size);
+
+                if (needs_temporary_write)
+                {
+                    this->set_temporary_access(zero_start, zero_size, memory_permission::write, false);
+                }
+            }
+        }
+
+        // Reserved pages are left out on purpose: every allocation smaller than a host page leaves some
+        // beside committed memory, and watching them would keep the debug registers armed all the time.
+        bool is_no_access_page_apple(const uint64_t page) const
+        {
+            const auto it = this->page_shadow_apple_.find(page);
+            return it != this->page_shadow_apple_.end() && it->second == memory_permission::none;
+        }
+
+        void track_no_access_pages_apple(const uint64_t host_page_addr)
+        {
+            uint8_t no_access_pages = 0;
+            if (this->shadow_permission_apple(host_page_addr).value_or(memory_permission::none) != memory_permission::none)
+            {
+                for (size_t index = 0; index < pages_per_host_page_apple; ++index)
+                {
+                    if (this->is_no_access_page_apple(host_page_addr + index * page_size))
+                    {
+                        no_access_pages |= static_cast<uint8_t>(1U << index);
+                    }
+                }
+            }
+
+            const auto previous = this->no_access_pages_apple_.find(host_page_addr);
+            const uint8_t previous_pages = previous == this->no_access_pages_apple_.end() ? 0 : previous->second;
+            if (previous_pages == no_access_pages)
+            {
+                return;
+            }
+
+            this->no_access_watchpoint_count_apple_ -= watchpoint_count_for(previous_pages);
+            this->no_access_watchpoint_count_apple_ += watchpoint_count_for(no_access_pages);
+            ++this->no_access_generation_apple_;
+
+            if (no_access_pages == 0)
+            {
+                this->no_access_pages_apple_.erase(previous);
+            }
+            else
+            {
+                this->no_access_pages_apple_[host_page_addr] = no_access_pages;
+            }
+        }
+
+        // A watched range is a naturally aligned power of two, so one run of no-access pages inside a host
+        // page becomes at most two watchpoints.
+        template <typename F>
+        static void for_each_watchpoint_of(const uint64_t host_page_addr, const uint8_t no_access_pages, F&& f)
+        {
+            size_t index = 0;
+            while (index < pages_per_host_page_apple)
+            {
+                if ((no_access_pages & (1U << index)) == 0)
+                {
+                    ++index;
+                    continue;
+                }
+
+                const bool covers_pair = index % 2 == 0 && (no_access_pages & (1U << (index + 1))) != 0;
+                const size_t pages = covers_pair ? 2 : 1;
+                f(host_page_addr + index * page_size, pages * page_size);
+                index += pages;
+            }
+        }
+
+        static size_t watchpoint_count_for(const uint8_t no_access_pages)
+        {
+            size_t count = 0;
+            for_each_watchpoint_of(0, no_access_pages, [&](uint64_t, size_t) { ++count; });
+            return count;
+        }
+
+        // There are only a few watchpoints, so the host pages nearest below the stack pointer come first:
+        // that is where the guard region of the running thread's stack is.
+        watchpoint_set select_watchpoints_apple(const fex_vcpu& vcpu) const
+        {
+            const size_t capacity = std::min(utils::host_watchpoints::capacity(), watchpoint_set{}.ranges.size());
+            watchpoint_set selected{};
+
+            const auto add = [&](const std::pair<const uint64_t, uint8_t>& entry) {
+                if (selected.count + watchpoint_count_for(entry.second) > capacity)
+                {
+                    return false;
+                }
+
+                for_each_watchpoint_of(entry.first, entry.second, [&](const uint64_t address, const size_t size) {
+                    selected.ranges.at(selected.count++) = {.address = this->to_host_address(address), .size = size};
+                });
+                return true;
+            };
+
+            const uint64_t stack_pointer = vcpu.cpu_state().gregs[detail::greg_rsp];
+            const auto above_stack = this->no_access_pages_apple_.upper_bound(host_page_align_down_apple(stack_pointer));
+
+            for (auto it = std::make_reverse_iterator(above_stack); it != this->no_access_pages_apple_.rend(); ++it)
+            {
+                if (!add(*it))
+                {
+                    return selected;
+                }
+            }
+
+            for (auto it = above_stack; it != this->no_access_pages_apple_.end(); ++it)
+            {
+                if (!add(*it))
+                {
+                    return selected;
+                }
+            }
+
+            return selected;
+        }
+
+        void arm_watchpoints_apple(const fex_vcpu& vcpu) const
+        {
+            if (utils::host_watchpoints::capacity() == 0)
+            {
+                return;
+            }
+
+            const tables_lock lock(this->tables_mutex_, false);
+
+            const bool selection_is_fixed = this->no_access_watchpoint_count_apple_ <= utils::host_watchpoints::capacity();
+            if (selection_is_fixed && vcpu.armed_generation_apple_ == this->no_access_generation_apple_)
+            {
+                return;
+            }
+
+            const auto selected = this->select_watchpoints_apple(vcpu);
+            if (selected != vcpu.armed_watchpoints_apple_)
+            {
+                vcpu.armed_watchpoints_apple_ = utils::host_watchpoints::program(selected.span()) ? selected : watchpoint_set{};
+            }
+
+            vcpu.armed_generation_apple_ = this->no_access_generation_apple_;
+        }
+
+        // Also runs inside the fault signal handler, so it must not allocate.
+        static void clear_watchpoints_apple(const fex_vcpu& vcpu)
+        {
+            utils::host_watchpoints::program({});
+            vcpu.armed_watchpoints_apple_ = {};
+            vcpu.armed_generation_apple_ = no_generation_apple;
+        }
+
+        static void disarm_watchpoints_apple(const fex_vcpu& vcpu)
+        {
+            if (vcpu.armed_watchpoints_apple_.count != 0)
+            {
+                clear_watchpoints_apple(vcpu);
+            }
+        }
+
+        // Only the vCPU running on the calling host thread can have watchpoints armed in its debug registers.
+        void disarm_watchpoints_over_apple(const uint64_t address, const size_t size) const
+        {
+            const auto* vcpu = this->running_vcpu();
+            if (vcpu == nullptr)
+            {
+                return;
+            }
+
+            bool overlaps = false;
+            this->for_each_host_span(address, size, [&](const uint64_t host_address, const size_t span_size, size_t) {
+                overlaps = overlaps || std::ranges::any_of(vcpu->armed_watchpoints_apple_.span(), [&](const auto& watched) {
+                               return host_address < watched.address + watched.size && watched.address < host_address + span_size;
+                           });
+            });
+
+            if (overlaps)
+            {
+                disarm_watchpoints_apple(*vcpu);
+            }
+        }
+
+        // Arm ARM: for a watchpoint, FAR can be any address from the lowest byte the instruction accesses
+        // up to the highest watched byte it accesses, so an access that runs into a watched range can
+        // report an address below it (Linux: arch/arm64/kernel/hw_breakpoint.c,
+        // get_distance_from_watchpoint).
+        static uint64_t watched_fault_address_apple(const fex_vcpu& vcpu, const uint64_t fault_addr)
+        {
+            constexpr uint64_t largest_access_size = 64;
+            const auto armed = vcpu.armed_watchpoints_apple_.span();
+
+            if (std::ranges::any_of(armed, [&](const auto& watched) {
+                    return fault_addr >= watched.address && fault_addr - watched.address < watched.size;
+                }))
+            {
+                return fault_addr;
+            }
+
+            const auto above = std::ranges::find_if(armed, [&](const auto& watched) {
+                return watched.address > fault_addr && watched.address - fault_addr < largest_access_size;
+            });
+            return above == armed.end() ? fault_addr : above->address;
+        }
+
+        // Host code reading or writing guest memory hits the watchpoints as well: FEXCore's frontend
+        // decoding guest code, or a host access this backend does not route through
+        // disarm_watchpoints_over_apple. Such an access proceeds unwatched, and the stop request makes
+        // the run loop re-arm at the next block entry. A hit while SIGTRAP is blocked never returns, so
+        // nothing may touch guest memory with SIGTRAP blocked.
+        bool handle_watchpoint_hit(fex_vcpu& vcpu, ucontext_t* uctx)
+        {
+            const uint64_t fault_addr = watched_fault_address_apple(vcpu, uctx->uc_mcontext->__es.__far);
+            const uint64_t pc = get_host_pc(uctx);
+            const bool from_guest_code = this->context_ && this->context_->IsAddressInCodeBuffer(vcpu.thread_, pc);
+            const uint64_t page = this->to_guest_address(fault_addr) & ~(page_size - 1);
+
+            if (!from_guest_code)
+            {
+                clear_watchpoints_apple(vcpu);
+                vcpu.request_thread_stop();
+                return true;
+            }
+
+            bool no_access_page = false;
+            {
+                const signal_tables_lock lock(this->tables_mutex_);
+                no_access_page = this->is_no_access_page_apple(page);
+            }
+
+            if (!no_access_page)
+            {
+                clear_watchpoints_apple(vcpu);
+                vcpu.request_thread_stop();
+                return true;
+            }
+
+            return this->handle_general_memory_violation(vcpu, uctx, fault_addr);
+        }
+#endif
+
+        // FEX context plumbing
+
+        void initialize_context()
+        {
+            // Without an installed handler, LogMan silently discards the formatted message (LogManager.
+            // cpp's `if (Handler)`) while still executing FEX_TRAP_EXECUTION for ASSERT-level messages,
+            // so every internal FEXCore assertion failure crashes with no indication of what failed.
+            LogMan::Msg::InstallHandler([](LogMan::DebugLevels level, const char* message) {
+                fprintf(stderr, "[FEXCore LogMan] level=%s: %s\n", LogMan::DebugLevelStr(level), message);
+            });
+            LogMan::Throw::InstallHandler([](const char* message) { fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message); });
+
+#ifdef __APPLE__
+            // Must happen before the first FEXCore-internal allocation (CreateNewContext allocates the
+            // CodeBuffer and dispatcher) and before reserved_host_ranges() is first queried, so the
+            // whole arena is off-limits to guest allocations.
+            fex_internal_arena::instance().install();
+#endif
+
+            // libc++abi's default terminate handler prints nothing useful for an uncaught exception.
+            std::set_terminate([]() {
+                fprintf(stderr, "[FEX backend] std::terminate invoked\n");
+                if (auto exc = std::current_exception())
+                {
+                    try
+                    {
+                        std::rethrow_exception(exc);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        fprintf(stderr, "[FEX backend] uncaught exception: %s\n", e.what());
+                    }
+                    catch (...)
+                    {
+                        fprintf(stderr, "[FEX backend] uncaught exception of unknown type\n");
+                    }
+                }
+
+#if !defined(__ANDROID__) || __ANDROID_API__ >= 33
+                void* frames[64]{};
+                const int frame_count = ::backtrace(frames, 64);
+                char** symbols = ::backtrace_symbols(frames, frame_count);
+                fprintf(stderr, "[FEX backend] backtrace (%d frames):\n", frame_count);
+                for (int i = 0; i < frame_count; ++i)
+                {
+                    fprintf(stderr, "  %s\n", symbols ? symbols[i] : "?");
+                }
+                free(symbols);
+#endif
+
+                std::abort();
+            });
+
+            FEXCore::Config::Initialize();
+            FEXCore::Config::Load();
+
+            // With EMULATOR_FEX_DUMPIR naming an existing directory, FEXCore writes one file per
+            // translated guest basic block, keyed by guest RIP: "<rip:x>-pre.ir" straight out of the
+            // decoder and "<rip:x>-post.ir" after optimization and register allocation. Unlike inline
+            // hot-path diagnostics, this is confirmed not to perturb timing-sensitive JIT bugs.
+            // PassManagerDumpIR value 3 == BEFOREOPT(1)|AFTEROPT(2).
+            if (const char* dumpir_dir = std::getenv("EMULATOR_FEX_DUMPIR"))
+            {
+                FEXCore::Config::Set(FEXCore::Config::CONFIG_DUMPIR, dumpir_dir);
+                FEXCore::Config::Set(FEXCore::Config::CONFIG_PASSMANAGERDUMPIR, "3");
+            }
+
+            FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
+            // FEX defaults to exact 80-bit x87 math, which it emulates in software. 32-bit games that do their
+            // floating point on x87 then spend a large part of their time in softfloat, so host doubles are used instead.
+            FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION, "1");
+
+            // Piggybacks on FEXCore's GdbServer flag, whose only effect inside FEXCore (ContextImpl::
+            // InitCore) is setting Config.NeedsPendingInterruptFaultCheck, making the JIT emit a
+            // `str zr, [InterruptFaultPage]` at every block entry - the mechanism request_thread_stop()
+            // needs to force a stuck-in-JIT thread to fault. FEXCore's own gdbserver is unused (sogen
+            // has its own stub), so there is no other observable effect.
+            FEXCore::Config::Set(FEXCore::Config::CONFIG_GDBSERVER, "1");
+
+            // Opt-in levers for FEXCore's TSO/SMC emulation costs (see docs/fex-backend.md), left at FEXCore's
+            // conservative defaults unless set. EMULATOR_FEX_BLOCK_JIT_NAMING writes /tmp/perf-<pid>.map.
+            const std::pair<const char*, std::pair<FEXCore::Config::ConfigOption, const char*>> optional_settings[] = {
+                {"EMULATOR_FEX_VECTOR_TSO", {FEXCore::Config::CONFIG_VECTORTSOENABLED, "1"}},
+                {"EMULATOR_FEX_MEMCPY_TSO", {FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1"}},
+                {"EMULATOR_FEX_NO_TSO", {FEXCore::Config::CONFIG_TSOENABLED, "0"}},
+                {"EMULATOR_FEX_SMC_NONE", {FEXCore::Config::CONFIG_SMCCHECKS, "0"}},
+                {"EMULATOR_FEX_STRICT_SPLIT_LOCKS", {FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1"}},
+                {"EMULATOR_FEX_LRCPC2", {FEXCore::Config::CONFIG_HOSTFEATURES, "enablelrcpc2"}},
+                {"EMULATOR_FEX_BLOCK_JIT_NAMING", {FEXCore::Config::CONFIG_BLOCKJITNAMING, "1"}},
+            };
+            for (const auto& [variable, setting] : optional_settings)
+            {
+                if (std::getenv(variable) != nullptr)
+                {
+                    FEXCore::Config::Set(setting.first, setting.second);
+                }
+            }
+
+#ifdef __APPLE__
+            const FEXCore::HostFeatures features = fetch_host_features_apple();
+#else
+            const FEXCore::HostFeatures features = fetch_host_features_linux();
+#endif
+            this->context_ = FEXCore::Context::Context::CreateNewContext(features);
+
+            this->syscall_handler_ = std::make_unique<fex_syscall_handler>(*this);
+            this->context_->SetSyscallHandler(this->syscall_handler_.get());
+
+            // InitCore() requires a non-null SignalDelegator, and the dispatcher entry-point addresses
+            // handle_fault_signal needs come from non-virtual base-class methods, so the plain base
+            // suffices - fault delivery is handled by the host signal handler installed below.
+            this->signal_delegator_ = std::make_unique<FEXCore::SignalDelegator>();
+            this->context_->SetSignalDelegator(this->signal_delegator_.get());
+
+            this->context_->InitCore();
+
+            install_fault_signal_handlers(*this);
+        }
+
+        // Called only from run(), in normal call context, right after ExecuteThread returns. The
+        // return value tells run()'s loop whether ExecuteThread came back because a hook was deferred
+        // or because of a genuine stop.
+        bool dispatch_pending_hook_if_any(fex_vcpu& vcpu)
+        {
+            const pending_fault_dispatch dispatch = vcpu.pending_fault_dispatch_;
+            vcpu.pending_fault_dispatch_.kind = pending_fault_kind::none;
+
+            switch (dispatch.kind)
+            {
+            case pending_fault_kind::memory_violation:
+                for (auto& [_, hook] : this->memory_violation_hooks_)
+                {
+                    hook(vcpu, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
+                }
+                return true;
+            case pending_fault_kind::interrupt:
+                if (dispatch.vector == FEXCore::X86State::X86_TRAPNO_BP && vcpu.handle_patched_execution_breakpoint(vcpu.cpu_state().rip))
+                {
+                    return true;
+                }
+                if (dispatch.vector == FEXCore::X86State::X86_TRAPNO_DB && vcpu.complete_execution_step())
+                {
+                    return true;
+                }
+                for (auto& [_, hook] : this->interrupt_hooks_)
+                {
+                    hook(vcpu, dispatch.vector);
+                }
+                return true;
+            case pending_fault_kind::none:
+            default:
+                return false;
+            }
+        }
+
+        // Called only from signal-handler context; see pending_fault_kind for why hooks cannot run
+        // directly there. state_already_spilled selects the dispatcher unwind entry that skips the SRA
+        // spill only for FEXCore's synthetic-exception path, where CpuStateFrame is already current.
+        void defer_hook_dispatch(fex_vcpu& vcpu, ucontext_t* context, const pending_fault_dispatch& dispatch, bool state_already_spilled)
+        {
+            vcpu.pending_fault_dispatch_ = dispatch;
+            const auto& config = this->signal_delegator_->GetConfig();
+            const auto target = state_already_spilled ? config.ThreadStopHandlerAddress : config.ThreadStopHandlerAddressSpillSRA;
+            unwind_to_dispatcher_frame(vcpu, context);
+            set_host_pc(context, target);
+        }
+
+        // The stop handlers pop the dispatcher's entry frame, but JIT code can be interrupted with SP elsewhere (e.g.
+        // mid-call into a helper), so SP is reset to that frame first, as FEX's own signal delegator does.
+        static void unwind_to_dispatcher_frame(const fex_vcpu& vcpu, ucontext_t* context)
+        {
+            auto* frame = vcpu.thread_->CurrentFrame;
+            frame->SignalHandlerRefCounter = 0;
+#ifdef __APPLE__
+            context->uc_mcontext->__ss.__sp = frame->ReturningStackLocation;
+#else
+            context->uc_mcontext.sp = frame->ReturningStackLocation;
+#endif
+        }
+
+        // The dispatcher is separate from FEXCore's CodeBuffer range, so IsAddressInCodeBuffer does
+        // not recognize faults taken there even though the same signal paths need to identify it.
+        bool host_pc_in_dispatcher(uint64_t pc) const
+        {
+            if (this->signal_delegator_ == nullptr)
+            {
+                return false;
+            }
+            const auto& config = this->signal_delegator_->GetConfig();
+            return pc >= config.DispatcherBegin && pc < config.DispatcherEnd;
+        }
+
+        static uint64_t get_host_pc(ucontext_t* context)
+        {
+#ifdef __APPLE__
+            return arm_thread_state64_get_pc(context->uc_mcontext->__ss);
+#else
+            return context->uc_mcontext.pc;
+#endif
+        }
+
+        static void set_host_pc(ucontext_t* context, uint64_t pc)
+        {
+#ifdef __APPLE__
+            arm_thread_state64_set_pc_fptr(context->uc_mcontext->__ss, reinterpret_cast<void*>(pc));
+#else
+            context->uc_mcontext.pc = pc;
+#endif
+        }
+
+        static uint64_t get_host_gpr(ucontext_t* context, uint32_t index)
+        {
+            if (index == 31)
+            {
+                return 0;
+            }
+
+#ifdef __APPLE__
+            if (index <= 28)
+            {
+                return context->uc_mcontext->__ss.__x[index];
+            }
+            return index == 29 ? context->uc_mcontext->__ss.__fp : context->uc_mcontext->__ss.__lr;
+#else
+            return context->uc_mcontext.regs[index];
+#endif
+        }
+
+        static void set_host_gpr(ucontext_t* context, uint32_t index, uint64_t value)
+        {
+            if (index == 31)
+            {
+                return;
+            }
+
+#ifdef __APPLE__
+            if (index <= 28)
+            {
+                context->uc_mcontext->__ss.__x[index] = value;
+            }
+            else if (index == 29)
+            {
+                context->uc_mcontext->__ss.__fp = value;
+            }
+            else
+            {
+                context->uc_mcontext->__ss.__lr = value;
+            }
+#else
+            context->uc_mcontext.regs[index] = value;
+#endif
+        }
+
+        static __uint128_t* get_host_vector_registers(ucontext_t* context)
+        {
+#ifdef __APPLE__
+            return reinterpret_cast<__uint128_t*>(&context->uc_mcontext->__ns.__v[0]);
+#else
+            auto* fpsimd = find_aarch64_context<fpsimd_context>(context, FPSIMD_MAGIC);
+            return fpsimd != nullptr ? fpsimd->vregs : nullptr;
+#endif
+        }
+
+        // FEXCore's call-ret shadow stack (x25, see ensure_callret_buffer) is bracketed by a guard page
+        // on each side. Upstream FEX treats hitting either guard as recoverable and resets x25 to the
+        // default location (Base + CALLRET_STACK_SIZE/4), which this mirrors.
+        static bool handle_callret_stack_fault(const fex_vcpu& vcpu, ucontext_t* context, uint64_t fault_address)
+        {
+            if (vcpu.thread_ == nullptr || vcpu.thread_->CallRetStackBase == nullptr)
+            {
+                return false;
+            }
+
+            const auto base = reinterpret_cast<uint64_t>(vcpu.thread_->CallRetStackBase);
+            const auto host_page = static_cast<uint64_t>(::getpagesize());
+            constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+            if (fault_address < base - host_page || fault_address >= base + callret_stack_size + host_page)
+            {
+                return false;
+            }
+
+            set_host_gpr(context, 25, base + callret_stack_size / 4);
+            return true;
+        }
+
+      public:
+        // Applies a decode_arm64_load result once its data has been fetched, writing the possibly
+        // extended value into the destination register and advancing PC past the decoded instruction.
+        bool complete_decoded_load(ucontext_t* uctx, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
+        {
+            if (decoded.is_vector)
+            {
+                auto* fprs = get_host_vector_registers(uctx);
+                if (fprs == nullptr)
+                {
+                    return false;
+                }
+
+                __uint128_t value{};
+                std::memcpy(&value, data, sizeof(value));
+                fprs[decoded.rt] = value;
+                set_host_pc(uctx, pc + 4);
+                return true;
+            }
+
+            uint64_t raw_value = 0;
+            std::memcpy(&raw_value, data, decoded.size);
+
+            uint64_t result = 0;
+            switch (decoded.size)
+            {
+            case 1:
+                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw_value)))
+                                             : (raw_value & 0xFFULL);
+                break;
+            case 2:
+                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw_value)))
+                                             : (raw_value & 0xFFFFULL);
+                break;
+            case 4:
+                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(raw_value)))
+                                             : (raw_value & 0xFFFFFFFFULL);
+                break;
+            default:
+                result = raw_value;
+                break;
+            }
+
+            if (!decoded.dest_is_64bit)
+            {
+                // Writing Wt always zeroes bits 63:32 of the aliased Xt (AArch64 register semantics).
+                result &= 0xFFFFFFFFULL;
+            }
+
+            set_host_gpr(uctx, decoded.rt, result);
+            set_host_pc(uctx, pc + 4);
+            return true;
+        }
+
+        bool handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
+        {
+            const uint64_t pc = get_host_pc(uctx);
+            const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+            const auto decoded = decode_arm64_load(insn);
+            if (!decoded)
+            {
+#ifdef __APPLE__
+                // stdio is not async-signal-safe and this runs inside a real signal handler, hence
+                // snprintf into a fixed stack buffer followed by a single write(2).
+                char buf[128];
+                const int len = snprintf(buf, sizeof(buf), "[MMIO] unrecognized instruction 0x%08x at pc=%p for fault_addr=0x%llx\n", insn,
+                                         reinterpret_cast<void*>(pc), static_cast<unsigned long long>(fault_addr));
+                if (len > 0)
+                {
+                    const auto write_len = static_cast<size_t>(len) < sizeof(buf) ? static_cast<size_t>(len) : sizeof(buf);
+                    ::write(STDERR_FILENO, buf, write_len);
+                }
+#endif
+                return false;
+            }
+
+            alignas(16) std::array<std::byte, 16> buffer{};
+            region.read_cb(fault_addr - region.address, buffer.data(), decoded->size);
+            return this->complete_decoded_load(uctx, *decoded, buffer.data(), pc);
+        }
+
+        // LDAR/LDAPR/STLR require natural alignment on real hardware, unlike plain LDR/STR, but x86
+        // permits unaligned accesses freely and FEX uses this family to model x86's stronger memory
+        // ordering, so an ordinary unaligned guest access to legitimately mapped memory faults here
+        // (Darwin reports SIGBUS/BUS_ADRALN). Other vCPUs can access the same memory concurrently, so
+        // the emulated access keeps x86's single-copy atomicity (see read_memory_single_copy_atomic).
+        bool handle_misaligned_atomic_fault(const fex_vcpu& vcpu, ucontext_t* uctx, uint64_t fault_addr)
+        {
+            const uint64_t pc = get_host_pc(uctx);
+
+            // FEXCore rewrites a faulting access in its own code into a half-barrier sequence, so it does not trap
+            // again. Emulating each access instead traps on every execution.
+            if (this->context_ && this->context_->IsAddressInCodeBuffer(vcpu.thread_, pc))
+            {
+#ifdef __APPLE__
+                ::pthread_jit_write_protect_np(0);
+                auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
+#else
+                auto* gprs = reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs);
+#endif
+                const auto skip = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
+                    vcpu.thread_, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc, gprs);
+#ifdef __APPLE__
+                ::pthread_jit_write_protect_np(1);
+#endif
+                if (skip)
+                {
+                    set_host_pc(uctx, pc + *skip);
+                    return true;
+                }
+            }
+
+            const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+
+            if (const auto load = decode_arm64_load(insn))
+            {
+                alignas(16) std::array<std::byte, 16> buffer{};
+                read_memory_single_copy_atomic(fault_addr, buffer.data(), load->size);
+                return this->complete_decoded_load(uctx, *load, buffer.data(), pc);
+            }
+
+            if (const auto store = decode_arm64_store(insn))
+            {
+                const uint64_t value = get_host_gpr(uctx, store->rt);
+                write_memory_single_copy_atomic(fault_addr, &value, store->size);
+                set_host_pc(uctx, pc + 4);
+                return true;
+            }
+
+            return false;
+        }
+
+        bool handle_general_memory_violation(fex_vcpu& vcpu, ucontext_t* uctx, uint64_t fault_addr)
+        {
+            const uint64_t pc = get_host_pc(uctx);
+            const auto guest_fault_addr = this->to_guest_address(fault_addr);
+
+            memory_operation operation = memory_operation::exec;
+            size_t access_size = 1;
+            if (fault_addr != pc)
+            {
+                const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+#ifdef __linux__
+                // The emulation decoder below is intentionally limited to the ordered STLR-family
+                // instructions that can fault for alignment. Ordinary translated STR/STUR stores must
+                // still be reported as writes on real protection faults, so use the kernel-provided
+                // AArch64 ESR WnR bit for access classification instead of broadening that decoder.
+                constexpr uint64_t esr_write_not_read = 1ULL << 6;
+                if (const auto* esr = find_aarch64_context<esr_context>(uctx, ESR_MAGIC))
+                {
+                    operation = (esr->esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
+                }
+                else
+#elif defined(__APPLE__)
+                if (const auto access = memory_access_operation(uctx->uc_mcontext->__es.__esr))
+                {
+                    operation = *access;
+                }
+                else
+#endif
+                {
+                    operation = decode_arm64_store(insn) ? memory_operation::write : memory_operation::read;
+                }
+
+                if (operation == memory_operation::write)
+                {
+                    if (const auto store = decode_arm64_store(insn))
+                    {
+                        access_size = store->size;
+                    }
+                }
+                else if (const auto load = decode_arm64_load(insn))
+                {
+                    access_size = load->size;
+                }
+            }
+
+            std::optional<memory_violation_type> violation{};
+            {
+                const signal_tables_lock lock(this->tables_mutex_);
+                violation = this->first_range_violation(guest_fault_addr, access_size, operation);
+            }
+
+            if (!violation)
+            {
+#ifdef __APPLE__
+                // decode_arm64_store does not recognize every store form, but a trapped page only faults on writes.
+                if (this->untrap_code_writes_apple(guest_fault_addr))
+                {
+                    return true;
+                }
+#endif
+                return this->handle_misaligned_atomic_fault(vcpu, uctx, fault_addr);
+            }
+
+            // FEX's block chaining (directly-linked blocks and callret RET fast-paths) advances execution
+            // without rewriting CurrentFrame->State.rip, so it holds whatever was last written to it and
+            // is frequently stale here. The memory-violation hook reads State.rip as the faulting
+            // instruction pointer, so it must be reconstructed from the live host PC - the same mechanism
+            // FEX's own ReconstructThreadState uses. Guarded on a non-zero result so a failed
+            // reconstruction never zeroes a usable stale rip.
+            if (const uint64_t recon_rip = this->context_->RestoreRIPFromHostPC(vcpu.thread_, pc))
+            {
+                vcpu.thread_->CurrentFrame->State.rip = recon_rip;
+            }
+
+            pending_fault_dispatch dispatch{};
+            dispatch.kind = pending_fault_kind::memory_violation;
+            dispatch.address = guest_fault_addr;
+            dispatch.size = access_size;
+            dispatch.operation = operation;
+            dispatch.type = *violation;
+
+            // SRA is still live only in host registers here - this fault interrupted guest-translated
+            // JIT code at an arbitrary point, not FEXCore's own controlled synthetic-exception path.
+            this->defer_hook_dispatch(vcpu, uctx, dispatch, /*state_already_spilled=*/false);
+            return true;
+        }
+
+        // Returns false for anything it does not recognize, which the wrapper below reports as an
+        // unhandled host fault and re-raises with default disposition.
+        bool handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext)
+        {
+            auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
+
+#ifndef __APPLE__
+            // Host-side writes fault on tracked memory as well, from whichever thread makes them.
+            if (sig == SIGSEGV && info->si_code == SEGV_ACCERR &&
+                this->handle_tracked_memory_fault(reinterpret_cast<uint64_t>(info->si_addr), is_write_fault(uctx)))
+            {
+                return true;
+            }
+#endif
+
+            return t_running_vcpu != nullptr && this->handle_vcpu_fault_signal(*t_running_vcpu, sig, info, uctx);
+        }
+
+      private:
+        bool handle_vcpu_fault_signal(fex_vcpu& vcpu, int sig, siginfo_t* info, ucontext_t* uctx)
+        {
+            if (vcpu.thread_ == nullptr)
+            {
+                return false;
+            }
+
+#ifdef __APPLE__
+            if (sig == SIGTRAP && is_watchpoint_exception(uctx->uc_mcontext->__es.__esr))
+            {
+                return this->handle_watchpoint_hit(vcpu, uctx);
+            }
+#endif
+
+            if (sig == SIGSEGV || sig == SIGBUS)
+            {
+                const auto fault_addr = reinterpret_cast<uint64_t>(info->si_addr);
+
+#ifdef __APPLE__
+                // Must run before any si_code-specific branch below, because Darwin can report this
+                // PROT_NONE violation as BUS_ADRALN instead of SEGV_ACCERR/SEGV_MAPERR. Since
+                // InterruptFaultPage is never inside the CodeBuffer, a misclassified fault would
+                // otherwise fall through to handle_general_memory_violation, which treats fault_addr as
+                // a guest address and would dispatch a synthetic guest exception built from this
+                // backend's own internal pointer.
+#endif
+                const auto interrupt_page_addr = get_untagged_pointer_address(vcpu.thread_->InterruptFaultPage);
+                if (fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(vcpu.thread_->InterruptFaultPage))
+                {
+                    const auto fault_pc = get_host_pc(uctx);
+                    const bool is_dispatch_code = this->context_ && this->context_->IsAddressInCodeBuffer(vcpu.thread_, fault_pc);
+
+                    // ExitFunctionLinkerAddress's own epilogue (EmitSignalGuardedRegion's closing
+                    // sequence) also writes InterruptFaultPage from inside the CodeBuffer, via a
+                    // JIT-emitted `strb`, so IsAddressInCodeBuffer cannot tell it apart from a genuine
+                    // per-block-entry interrupt check. Redirecting to ThreadStopHandlerAddress while
+                    // mid-epilogue pops the dispatcher's frame at the wrong stack depth. The raw
+                    // instruction word distinguishes them: STRB (unsigned-offset immediate) encodes
+                    // size=00,V=0,opc=00, distinct from both of EmitSuspendInterruptCheck's forms
+                    // (64-bit `str` has size=11, the 128-bit vector `str` has V=1).
+                    const bool is_strb_epilogue_write = (*reinterpret_cast<const uint32_t*>(fault_pc) & 0xFFC00000u) == 0x39000000u;
+
+                    if (is_dispatch_code && !is_strb_epilogue_write)
+                    {
+                        // A genuine cooperative stop at a JIT block-entry interrupt check, triggered by
+                        // the quantum timer's async mprotect. Live guest state is in host registers
+                        // (SRA) and CPUState.rip is frequently stale, since a completed syscall leaves
+                        // it at its fallthrough and execution then runs through directly-linked blocks
+                        // and callret RET fast-paths that never rewrite it. Resuming from that stale rip
+                        // with stale registers re-executes an already-retired instruction - a `retn`
+                        // whose return slot was reused pops garbage and branches wild. Both halves are
+                        // therefore required: reconstruct the rip from the faulting host PC, and unwind
+                        // through the SpillSRA handler so the live SRA registers reach CPUState before
+                        // ExecuteThread returns. This mirrors FEX's own ReconstructThreadState.
+                        vcpu.thread_->CurrentFrame->State.rip = this->context_->RestoreRIPFromHostPC(vcpu.thread_, fault_pc);
+                        vcpu.interrupt_page_unwind_ = true;
+                        const auto& stop_cfg = this->signal_delegator_->GetConfig();
+                        unwind_to_dispatcher_frame(vcpu, uctx);
+                        set_host_pc(uctx, stop_cfg.ThreadStopHandlerAddressSpillSRA);
+                        return true;
+                    }
+
+                    // Not a block-entry check but ordinary bookkeeping racing a stop request from another
+                    // thread: either FEXCore's DeferredSignalRefCountGuard destructor or
+                    // ExitFunctionLinkerAddress's JIT-emitted epilogue strb. ThreadStopHandlerAddress
+                    // expects to unwind a live JIT dispatcher frame, so taking it from the host-C++ side
+                    // corrupts the stack into a pc==lr==0 crash. Only the page's protection state drives
+                    // the stop mechanism, not the stored value, so skip the faulting store; the next real
+                    // block entry still sees the page protected and stops correctly.
+                    set_host_pc(uctx, fault_pc + 4);
+                    return true;
+                }
+
+#ifdef __APPLE__
+                // A W^X instruction-fetch fault on FEXCore's dispatcher trampoline: it is host MAP_JIT
+                // code like a CodeBuffer, but IsAddressInCodeBuffer does not recognize it, so the
+                // CodeBuffer-gated retries below never fire for it, and this handler's other retry paths
+                // can leave the thread's JIT write-protect in write mode. Classified by shape - an
+                // instruction fetch inside the dispatcher range - rather than si_code, since Darwin
+                // reports this as any of SEGV_ACCERR/SEGV_MAPERR/BUS_ADRALN.
+                //
+                // Deliberately unbounded, unlike the CodeBuffer cases: a host pc inside the dispatcher
+                // is unambiguously FEXCore's own code on genuine RWX-capable MAP_JIT, so toggling
+                // execute mode always lets the fetch succeed and can never spin. A spuriously exhausted
+                // budget would instead drop the fault into handle_general_memory_violation, which would
+                // mis-read the host dispatcher address as a guest access violation.
+                {
+                    const auto host_pc = get_host_pc(uctx);
+                    if (fault_addr == host_pc && this->host_pc_in_dispatcher(host_pc))
+                    {
+                        ::pthread_jit_write_protect_np(1);
+                        return true;
+                    }
+                }
+#endif
+
+                // Checked early, before the general-violation routing that would otherwise mis-dispatch
+                // this host arena address as a guest access violation.
+                if (handle_callret_stack_fault(vcpu, uctx, fault_addr))
+                {
+                    return true;
+                }
+
+                // An instruction-fetch fault reports si_addr == pc, which a genuine MMIO data access
+                // never does, so excluding it costs no real MMIO hits. It matters because a bad branch
+                // to a garbage pc can land inside a registered mmio_region by chance; handle_mmio_fault
+                // would then try to decode the instruction at that same garbage address and crash there
+                // instead, masking the real bug behind a confusing secondary symptom.
+                const auto pc_for_mmio_check = get_host_pc(uctx);
+                if (fault_addr != pc_for_mmio_check)
+                {
+                    const auto guest_fault_addr = this->to_guest_address(fault_addr);
+                    const signal_tables_lock lock(this->tables_mutex_);
+                    for (const auto& region : this->mmio_regions_)
+                    {
+                        if (!region.is_backed() && guest_fault_addr >= region.address && guest_fault_addr < region.address + region.size)
+                        {
+                            return this->handle_mmio_fault(uctx, region, guest_fault_addr);
+                        }
+                    }
+                }
+
+#ifdef __APPLE__
+                // A BUS_ADRALN whose address is inside the live CodeBuffer but whose PC is FEXCore's own
+                // host C++ code (ExitFunctionLink's self-modifying write) is not a real alignment fault
+                // at all - it decodes to an ordinary aligned 32-bit `str`. It is the JIT W^X race, which
+                // Darwin sometimes reports as BUS_ADRALN instead of SEGV_ACCERR/SEGV_MAPERR (the same
+                // si_code ambiguity as the JITGuardPage branch below). Falling through to the BUS_ADRALN
+                // branch would unwind via ThreadStopHandlerAddress as if interrupting the JIT
+                // dispatcher's own frame - wrong here, since execution is several real C++ frames deep
+                // inside FEXCore, corrupting STATE (x28) and other SRA registers with stack garbage and
+                // crashing later on an unrelated-looking null-Frame dereference. Treated instead like
+                // the write-protect race below, with the same per-address bound.
+                if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->context_ &&
+                    this->context_->IsAddressInCodeBuffer(vcpu.thread_, fault_addr))
+                {
+                    auto& retry_count = jit_write_protect_retry_count_for(vcpu.jit_write_protect_retries_, fault_addr);
+                    constexpr int max_write_protect_retries = 4;
+                    if (retry_count < max_write_protect_retries)
+                    {
+                        ++retry_count;
+                        ::pthread_jit_write_protect_np(0);
+                        return true;
+                    }
+                }
+
+                // A genuine guest-memory alignment fault (the CodeBuffer case above returns early).
+                // Routed through handle_general_memory_violation rather than calling
+                // handle_misaligned_atomic_fault directly, because that helper's "legitimately mapped
+                // memory" premise is not guaranteed: a guest instruction can compute a garbage address
+                // that merely happens to also be unaligned, and memcpy-ing to it would fault a second
+                // time inside the signal handler. The shadow-table-validated path classifies such an
+                // address correctly and raises it via memory_violation_hooks_ instead.
+                if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->handle_general_memory_violation(vcpu, uctx, fault_addr))
+                {
+                    return true;
+                }
+#endif
+            }
+
+#ifdef __APPLE__
+            if ((sig == SIGSEGV || sig == SIGBUS) && (info->si_code == SEGV_ACCERR || info->si_code == SEGV_MAPERR))
+#else
+            if (sig == SIGSEGV || sig == SIGBUS)
+#endif
+            {
+                const auto guard_page = vcpu.thread_->JITGuardPage;
+                const auto fault_addr = reinterpret_cast<uintptr_t>(info->si_addr);
+                if (guard_page != 0 && fault_addr >= guard_page && fault_addr < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
+                {
+#ifdef __APPLE__
+                    auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
+                    auto* pc_ptr = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss.__pc);
+#else
+                    auto* gprs = reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs);
+                    auto* pc_ptr = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext.pc);
+#endif
+                    auto* fprs = get_host_vector_registers(uctx);
+                    if (fprs == nullptr)
+                    {
+                        return false;
+                    }
+                    FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(vcpu.thread_->RestartJump, vcpu.thread_->JITGuardOverflowArgument, gprs,
+                                                                    fprs, pc_ptr);
+                    return true;
+                }
+
+#ifdef __APPLE__
+                // FEXCore's code-patching paths (ExitFunctionLink, block delinkers) do not reliably
+                // leave this thread's JIT write-protect state correct across their self-modifying
+                // writes, so set whatever the faulting access needs and retry the same instruction.
+                // An instruction fetch (PC == fault address) needs execute mode, a data write needs
+                // write mode; guessing wrong just re-faults and consumes a retry harmlessly.
+                //
+                // The IsAddressInCodeBuffer gate matters: without it the branch fires for any
+                // SEGV_ACCERR/SEGV_MAPERR, burning retries toggling W^X on faults that were never a
+                // CodeBuffer race - a branch-to-null would be retried this way before falling through.
+                if (this->context_ && this->context_->IsAddressInCodeBuffer(vcpu.thread_, fault_addr))
+                {
+                    const auto fault_addr_u64 = reinterpret_cast<uint64_t>(info->si_addr);
+                    auto& retry_count = jit_write_protect_retry_count_for(vcpu.jit_write_protect_retries_, fault_addr_u64);
+                    constexpr int max_write_protect_retries = 4;
+                    if (retry_count < max_write_protect_retries)
+                    {
+                        ++retry_count;
+                        const uint64_t faulting_pc = get_host_pc(uctx);
+                        const bool is_instruction_fetch = (faulting_pc == fault_addr_u64);
+                        ::pthread_jit_write_protect_np(is_instruction_fetch ? 1 : 0);
+                        return true;
+                    }
+                }
+#endif
+            }
+
+            const uint64_t pc = get_host_pc(uctx);
+
+            // FEXCore's guest-exception trampoline always re-enters within the dispatcher range.
+            if (!this->host_pc_in_dispatcher(pc))
+            {
+                // The common case: translated guest code faulted directly. Only attempted once pc is
+                // confirmed inside a live JIT code buffer - anything else is a host bug elsewhere that
+                // must not be interpreted as guest state, and the wrapper below logs and re-raises it.
+                if ((sig == SIGSEGV || sig == SIGBUS) && this->context_ && this->context_->IsAddressInCodeBuffer(vcpu.thread_, pc) &&
+                    this->handle_general_memory_violation(vcpu, uctx, reinterpret_cast<uint64_t>(info->si_addr)))
+                {
+                    return true;
+                }
+
+                return false;
+            }
+
+            auto* frame = vcpu.thread_->CurrentFrame;
+            if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
+            {
+                return false;
+            }
+
+            // FEXCore's IR "Break" op raises this both for x86 conditions with a compile-time-known trap
+            // vector (HLT/UD2/INT3/INT1/INTO/unhandled INT N) and for its own synthetic #PF (NoExecOp,
+            // when QueryGuestExecutableRange reports an address is not executable), so vector 14 needs
+            // the fault address while everything else is a plain exception vector. Mirrors the KVM
+            // backend's #PF vs. other-vector split in handle_exception().
+            auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
+
+            // sogen has no guest IDT, so a guest `INT N` FEXCore cannot dispatch synthesizes a #GP(13)
+            // whose error code names the referenced IDT selector (bit 1 set, index in bits[15:3]), just
+            // as real hardware does for an absent IDT gate. Unicorn/KVM model no IDT lookup and report
+            // `INT N` as vector N, so FEX's more faithful #GP is remapped back to the plain vector the
+            // shared interrupt dispatch expects - otherwise a __fastfail `int 0x29` re-faults forever.
+            constexpr int gp_fault_vector = 13;
+            constexpr uint32_t idt_reference_bit = 0x2;
+            if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
+            {
+                vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
+            }
+
+            // Must be reset before deferring, not after: it gates re-entry into this branch, and the
+            // hook does not run until run() reaches it, so the next real fault of this shape would
+            // otherwise be swallowed in the meantime.
+            frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
+
+            pending_fault_dispatch dispatch{};
+            if (vector == 14)
+            {
+                const auto err_code = frame->SynchronousFaultData.err_code;
+                // NoExecOp (the only current producer of a synthetic #PF) always faults on the
+                // instruction fetch at the current guest RIP - there is no separate stored fault
+                // address (real x86 would use CR2), so RIP is the only correct source for now.
+                const bool is_write = (err_code & 0x2) != 0;
+                const bool is_instr_fetch = (err_code & 0x10) != 0;
+                dispatch.kind = pending_fault_kind::memory_violation;
+                dispatch.address = frame->State.rip;
+                dispatch.size = 1;
+                dispatch.operation = is_instr_fetch ? memory_operation::exec : is_write ? memory_operation::write : memory_operation::read;
+                dispatch.type = (err_code & 0x1) ? memory_violation_type::protection : memory_violation_type::unmapped;
+            }
+            else
+            {
+                // FEXCore's INT3 translation stores the post-instruction RIP (INTOp's SetRIPToNext),
+                // while NT and the KVM/WHP backends report #BP at the 0xCC itself. Only the direct #BP
+                // needs normalizing: a GP-remapped `INT N` (e.g. the `CD 2D` debug service trap, whose
+                // bytes exception_dispatch.cpp expects to find at RIP) already stores its own address.
+                if (frame->SynchronousFaultData.TrapNo == FEXCore::X86State::X86_TRAPNO_BP)
+                {
+                    frame->State.rip -= 1;
+                }
+
+                dispatch.kind = pending_fault_kind::interrupt;
+                dispatch.vector = vector;
+            }
+
+            // SRA is already spilled: this is FEXCore's own controlled synthetic-exception/Break-op
+            // path, not an arbitrary interruption of live JIT code.
+            this->defer_hook_dispatch(vcpu, uctx, dispatch, /*state_already_spilled=*/true);
+            return true;
+        }
+
+        void run(fex_vcpu& vcpu, const size_t count)
+        {
+            if (count > 1)
+            {
+                // FEX has CompileRIPCount() for bounded execution, but wiring exact instruction counts
+                // through the JIT exit path is non-trivial; match the KVM backend and refuse for now.
+                throw std::runtime_error("FEX backend does not support exact instruction counts yet");
+            }
+
+            ensure_alternate_signal_stack();
+
+            if (vcpu.thread_ == nullptr)
+            {
+                this->create_thread(vcpu);
+            }
+
+            t_running_vcpu = &vcpu;
+            const auto leave_vcpu = utils::finally([] { t_running_vcpu = nullptr; });
+
+            vcpu.stop_requested_ = false;
+            // Re-arm InterruptFaultPage for this quantum - see request_thread_stop's doc comment; a
+            // prior stop() may have left it protected to force the last quantum's ExecuteThread to
+            // return, and it must be writable again before the JIT's per-block-entry store runs.
+            ::mprotect(vcpu.thread_->InterruptFaultPage, sizeof(vcpu.thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+
+            vcpu.resume_deferred_patched_breakpoint(count);
+            if (!vcpu.pending_execution_step_ && count == 1)
+            {
+                vcpu.arm_execution_single_step(true);
+            }
+
+            // ExecuteThread runs the translated guest until the thread is asked to stop (which the
+            // syscall bridge does when a hook calls stop()), or the guest faults/exits.
+            // It can also return early because handle_fault_signal deferred a hook dispatch (see
+            // pending_fault_dispatch_) rather than genuinely stopping - dispatch it in normal call
+            // context, where that is safe, then resume by calling ExecuteThread again; it always
+            // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
+#ifdef __APPLE__
+            const auto disarm_watchpoints = utils::finally([&vcpu] { disarm_watchpoints_apple(vcpu); });
+#endif
+            for (;;)
+            {
+#ifdef __APPLE__
+                this->arm_watchpoints_apple(vcpu);
+#endif
+                this->refresh_mmio_backings();
+                this->context_->ExecuteThread(vcpu.thread_);
+
+                const bool hook_dispatched = this->dispatch_pending_hook_if_any(vcpu);
+                const bool interrupt_page_unwind = vcpu.interrupt_page_unwind_.exchange(false);
+
+                // An InterruptFaultPage unwind with no stop pending is the quantum timer racing this
+                // quantum's own entry: stop() sets stop_requested_ then protects the page, but a
+                // concurrently-entered run() has already cleared the flag and the timer's mprotect
+                // only lands after the re-arm above, so the first block-entry check faults with nothing
+                // requested. Treating that as a real stop makes windows_emulator::vcpu_worker read it as
+                // a fatal wind-down, so re-arm and resume instead; the timer's pending switch_thread
+                // request is honored at the next genuine stop.
+                if (vcpu.stop_requested_ || (!hook_dispatched && !interrupt_page_unwind))
+                {
+                    break;
+                }
+
+                if (interrupt_page_unwind)
+                {
+                    ::mprotect(vcpu.thread_->InterruptFaultPage, sizeof(vcpu.thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+                }
+            }
+
+            // A step still pending here was cut short (a hook stopped on an unrelated fault first). Its trap flag must not
+            // leak into the next run, and the breakpoint it was stepping over is stepped over at the next start().
+            vcpu.abandon_execution_step();
+        }
+
+        void create_thread(fex_vcpu& vcpu)
+        {
+            // Seed the FEX thread from the staged CPUState the loader populated before the first start().
+            vcpu.thread_ =
+                this->context_->CreateThread(vcpu.staged_state_.rip, vcpu.staged_state_.gregs[detail::greg_rsp], &vcpu.staged_state_);
+
+            // FEXCore's core does not set up the call-ret shadow stack; on Linux that is embedder glue
+            // in ThreadManager::CreateThread, replicated here. Without it the first x86 CALL in compiled
+            // code dereferences a null callret_sp and crashes.
+            this->ensure_callret_stack(vcpu.thread_, vcpu.thread_->CurrentFrame->State);
+            this->drop_stale_callret_entries(vcpu.thread_, vcpu.thread_->CurrentFrame->State);
+
+#ifdef __APPLE__
+            // See exit_function_link_jit_write_wrapper: the call-site patch must happen with this
+            // thread's JIT write-protection disabled.
+            uint64_t no_original = 0;
+            g_original_exit_function_link.compare_exchange_strong(no_original, vcpu.thread_->CurrentFrame->Pointers.ExitFunctionLink);
+            vcpu.thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
+#endif
+        }
+
+        // FEXCore's call-ret shadow stack has no notion of "logical guest thread" - callret_sp is just a
+        // raw pointer into whatever host buffer this sets up. sogen models logical guest threads as
+        // CPUState snapshots swapped in and out of one FEXCore thread, so a shared buffer would let one
+        // logical thread's pushes corrupt the pending frames of another suspended mid-call-chain. Each
+        // gets its own, identified by state._pad1, the unused CPUState padding right after callret_sp,
+        // doubling as a marker: 0 means this snapshot has never been assigned one, non-zero is the
+        // buffer's base, safe to reuse since it round-trips with the rest of the snapshot. Callers point
+        // InternalThreadState::CallRetStackBase at it themselves.
+        void ensure_callret_buffer(FEXCore::Core::InternalThreadState* thread, FEXCore::Core::CPUState& state)
+        {
+            if (state._pad1 == 0)
+            {
+                // Guard pages on both sides, sized to the real host page (getpagesize(), not the
+                // guest's fixed 4KB) so mprotect can't spill onto the guard.
+                const size_t host_page = static_cast<size_t>(::getpagesize());
+                constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                const size_t callret_alloc_size = callret_stack_size + 2 * host_page;
+
+                // Routed through FEXCore::Allocator::mmap rather than raw ::mmap so that on Apple it
+                // hits the fex_internal_arena hook and lands inside the guest-excluded arena. The JIT
+                // consumes callret_sp as a plain host pointer, so a buffer aliasing the live guest stack
+                // would let a host-side push/pop scribble guest memory with no guest instruction
+                // involved. On Linux the hook defaults to raw ::mmap, so behavior there is unchanged.
+                void* alloc_base = FEXCore::Allocator::mmap(nullptr, callret_alloc_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (alloc_base == MAP_FAILED)
+                {
+                    throw std::runtime_error("FEX backend failed to allocate the call-ret stack");
+                }
+
+                auto* callret_stack_base = static_cast<uint8_t*>(alloc_base) + host_page;
+                if (::mprotect(callret_stack_base, callret_stack_size, PROT_READ | PROT_WRITE) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to make the call-ret stack writable");
+                }
+
+                state._pad1 = reinterpret_cast<uint64_t>(callret_stack_base);
+                // Leave headroom for underflows without hitting the guard page immediately, matching
+                // ThreadManager::GetCallRetStackInfo's DefaultLocation (Base + size/4).
+                state.callret_sp = reinterpret_cast<uint64_t>(callret_stack_base) + callret_stack_size / 4;
+
+                const tables_lock lock(this->tables_mutex_, true);
+                this->callret_buffers_.emplace(state._pad1, callret_buffer_record{
+                                                                .allocation_base = alloc_base,
+                                                                .allocation_size = callret_alloc_size,
+                                                                .code_buffer_generation = thread->CodeBufferGeneration,
+                                                                .thread = thread,
+                                                            });
+            }
+        }
+
+        // Ensures the thread's call-ret buffer exists and points CallRetStackBase at it.
+        void ensure_callret_stack(FEXCore::Core::InternalThreadState* thread, FEXCore::Core::CPUState& state)
+        {
+            this->ensure_callret_buffer(thread, state);
+            thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
+        }
+
+        // Requires the code invalidation mutex held exclusively (see FEXCore's own ThreadManager::InvalidateGuestCodeRange,
+        // the canonical caller on Linux) - without it, CompileBlock's shared lock deadlocks permanently. The shared code
+        // buffers are invalidated once, and every vCPU's thread drops its own cached lookups.
+        void invalidate_translations_locked(const uint64_t address, const size_t size) const
+        {
+#ifdef __APPLE__
+            // Invalidating a range can synchronously delink already-linked call sites (AddBlockLink's
+            // delinker callbacks), writing into a MAP_JIT buffer - the same per-thread write-protect
+            // requirement as exit_function_link_jit_write_wrapper.
+            ::pthread_jit_write_protect_np(0);
+#endif
+            this->context_->InvalidateCodeBuffersCodeRange(address, size);
+            for (const auto& vcpu : this->vcpus_)
+            {
+                if (vcpu->thread_ != nullptr)
+                {
+                    this->context_->InvalidateThreadCachedCodeRange(vcpu->thread_, address, size);
+                }
+            }
+#ifdef __APPLE__
+            ::pthread_jit_write_protect_np(1);
+#endif
+        }
+
+        // Must not be called with the tables lock held: FEXCore's compile path holds the code invalidation mutex while it
+        // calls back into the tables (QueryGuestExecutableRange, MarkGuestExecutableRange).
+        void invalidate_code_range(const uint64_t address, const size_t size)
+        {
+            {
+                const tables_lock lock(this->tables_mutex_, true);
+                this->code_pages_.erase(this->code_pages_.lower_bound(address & ~(page_size - 1)),
+                                        this->code_pages_.lower_bound(address + size));
+            }
+
+            std::unique_lock code_lock(this->context_->GetCodeInvalidationMutex());
+            this->invalidate_translations_locked(address, size);
+        }
+
+        bool range_has_code(uint64_t address, size_t size) const
+        {
+            const auto page = this->code_pages_.lower_bound(address & ~(page_size - 1));
+            return page != this->code_pages_.end() && *page < address + size;
+        }
+
+        emulator_hook* make_hook()
+        {
+            return reinterpret_cast<emulator_hook*>(this->next_hook_id_++);
+        }
+
+        fex_vcpu& primary_vcpu()
+        {
+            return *this->vcpus_.front();
+        }
+
+        const fex_vcpu& primary_vcpu() const
+        {
+            return *this->vcpus_.front();
+        }
+
+        // The vCPU running guest code on the calling host thread, if any.
+        fex_vcpu* running_vcpu() const
+        {
+            const bool ours = t_running_vcpu != nullptr &&
+                              std::ranges::any_of(this->vcpus_, [](const auto& vcpu) { return vcpu.get() == t_running_vcpu; });
+            return ours ? t_running_vcpu : nullptr;
+        }
+
+        bool needs_temporary_write(const uint64_t address, const size_t size) const
+        {
+#ifdef __APPLE__
+            return !this->range_is_writable(address, size) || this->range_has_code_write_trap_apple(address, size);
+#else
+            return !this->range_is_writable(address, size);
+#endif
+        }
+
+        // patched execution breakpoints
+        //
+        // Callers hold the tables lock exclusively. A helper that changes a guest byte reports it, and the caller
+        // invalidates the translation once it released the lock (see invalidate_code_range).
+
+        std::optional<std::byte> peek_breakpoint_byte(const uint64_t address) const
+        {
+            if (!this->is_range_mapped(address, 1))
+            {
+                return std::nullopt;
+            }
+
+            std::byte value{};
+            this->for_each_host_span(address, 1, [&](const uint64_t host_address, size_t, size_t) {
+                value = *reinterpret_cast<const volatile std::byte*>(host_address);
+            });
+            return value;
+        }
+
+        void poke_breakpoint_byte(const uint64_t address, const std::byte value)
+        {
+            const bool needs_temporary_write = this->needs_temporary_write(address, 1);
+            if (needs_temporary_write)
+            {
+                this->set_temporary_access(address, 1, memory_permission::write, true);
+            }
+
+#ifdef __APPLE__
+            this->disarm_watchpoints_over_apple(address, 1);
+#endif
+            this->for_each_host_span(address, 1, [&](const uint64_t host_address, size_t, size_t) {
+                *reinterpret_cast<volatile std::byte*>(host_address) = value;
+            });
+
+            if (needs_temporary_write)
+            {
+                this->set_temporary_access(address, 1, memory_permission::write, false);
+            }
+        }
+
+        bool is_stepping_over_patched_breakpoint(const uint64_t address) const
+        {
+            return std::ranges::any_of(this->vcpus_, [&](const auto& vcpu) {
+                return vcpu->deferred_patched_breakpoint_ == address ||
+                       (vcpu->pending_execution_step_ && vcpu->pending_execution_step_->patched_breakpoint == address);
+            });
+        }
+
+        bool try_apply_patched_execution_breakpoint(const uint64_t address, patched_execution_breakpoint& breakpoint)
         {
             const auto current = this->peek_breakpoint_byte(address);
             if (!current)
@@ -3006,74 +5633,46 @@ namespace sogen::fex
             {
                 return false;
             }
+
             breakpoint.original_byte = current;
             this->poke_breakpoint_byte(address, std::byte{0xCC});
             breakpoint.applied = true;
             return true;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
-        bool install_patched_execution_breakpoint(uint64_t address)
+        bool install_patched_execution_breakpoint(const uint64_t address)
         {
-            static const bool trace = std::getenv("SOGEN_TRACE_PATCHED_BREAKPOINT") != nullptr;
-
-            auto existing = this->patched_execution_breakpoints_.find(address);
-            if (existing != this->patched_execution_breakpoints_.end())
+            if (const auto existing = this->patched_execution_breakpoints_.find(address);
+                existing != this->patched_execution_breakpoints_.end())
             {
                 ++existing->second.hook_count;
                 if (!existing->second.applied && !existing->second.suspended())
                 {
-                    const auto wrote = this->try_apply_patched_execution_breakpoint(address, existing->second);
-                    if (trace)
-                    {
-                        fprintf(stderr, "[patched-breakpoint-trace] re-arm existing 0x%llx hook_count=%llu applied=%d wrote=%d\n",
-                                static_cast<unsigned long long>(address), static_cast<unsigned long long>(existing->second.hook_count),
-                                existing->second.applied, wrote);
-                    }
-                    return wrote;
-                }
-                if (trace)
-                {
-                    fprintf(stderr, "[patched-breakpoint-trace] existing 0x%llx hook_count=%llu applied=%d suspended=%d (no-op)\n",
-                            static_cast<unsigned long long>(address), static_cast<unsigned long long>(existing->second.hook_count),
-                            existing->second.applied, existing->second.suspended());
+                    return this->try_apply_patched_execution_breakpoint(address, existing->second);
                 }
                 return false;
             }
 
             patched_execution_breakpoint breakpoint{.hook_count = 1};
-            bool wrote = false;
+            bool planted = false;
             if (this->is_stepping_over_patched_breakpoint(address))
             {
-                // The live byte here is mid-step-over (the original instruction, not 0xCC yet
-                // re-planted) - record it without planting, so the pending step-over still executes
-                // the real instruction; see fex_vcpu::handle_patched_execution_breakpoint.
+                // The live byte is the original instruction a vCPU is stepping over; planting now would make that step
+                // execute the 0xCC instead.
                 breakpoint.original_byte = this->peek_breakpoint_byte(address);
-                if (trace)
-                {
-                    fprintf(stderr, "[patched-breakpoint-trace] new 0x%llx deferred (mid step-over)\n",
-                            static_cast<unsigned long long>(address));
-                }
             }
             else
             {
-                const auto pre_peek = this->peek_breakpoint_byte(address);
-                wrote = this->try_apply_patched_execution_breakpoint(address, breakpoint);
-                if (trace)
-                {
-                    fprintf(stderr, "[patched-breakpoint-trace] new 0x%llx mapped=%d pre_byte=0x%02x applied=%d wrote=%d\n",
-                            static_cast<unsigned long long>(address), pre_peek.has_value(),
-                            pre_peek.has_value() ? static_cast<unsigned>(*pre_peek) : 0u, breakpoint.applied, wrote);
-                }
+                planted = this->try_apply_patched_execution_breakpoint(address, breakpoint);
             }
+
             this->patched_execution_breakpoints_[address] = breakpoint;
-            return wrote;
+            return planted;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
-        bool uninstall_patched_execution_breakpoint(uint64_t address)
+        bool uninstall_patched_execution_breakpoint(const uint64_t address)
         {
-            auto existing = this->patched_execution_breakpoints_.find(address);
+            const auto existing = this->patched_execution_breakpoints_.find(address);
             if (existing == this->patched_execution_breakpoints_.end())
             {
                 return false;
@@ -3085,19 +5684,18 @@ namespace sogen::fex
                 return false;
             }
 
-            bool wrote = false;
+            bool restored = false;
             if (existing->second.applied && existing->second.original_byte && this->is_range_mapped(address, 1))
             {
                 this->poke_breakpoint_byte(address, *existing->second.original_byte);
-                wrote = true;
+                restored = true;
             }
 
             this->patched_execution_breakpoints_.erase(existing);
-            return wrote;
+            return restored;
         }
 
-        // Returns true if it wrote a byte (caller must invalidate_patched_breakpoint_code(address)).
-        bool set_patched_execution_breakpoint_state(uint64_t address, bool applied)
+        bool set_patched_execution_breakpoint_state(const uint64_t address, const bool applied)
         {
             const auto existing = this->patched_execution_breakpoints_.find(address);
             if (existing == this->patched_execution_breakpoints_.end())
@@ -3105,8 +5703,7 @@ namespace sogen::fex
                 return false;
             }
 
-            // Another vCPU may still be stepping over its own restored original instruction here -
-            // the last one to finish re-plants.
+            // Another vCPU may still be stepping over the restored original instruction; the last one to finish re-plants.
             if (applied && this->is_stepping_over_patched_breakpoint(address))
             {
                 return false;
@@ -3127,25 +5724,23 @@ namespace sogen::fex
             return true;
         }
 
-        // Appends every address it wrote to `written` (caller must invalidate_patched_breakpoint_code for
-        // each, after releasing tables_mutex_).
-        void apply_patched_execution_breakpoints_in_range(uint64_t address, size_t size, std::vector<uint64_t>& written)
+        void apply_patched_execution_breakpoints_in_range(const uint64_t address, const size_t size, std::vector<uint64_t>& planted)
         {
-            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            for (auto& [breakpoint_address, breakpoint] : this->patched_execution_breakpoints_)
             {
-                if (bp_address >= address && bp_address < address + size &&
-                    this->try_apply_patched_execution_breakpoint(bp_address, breakpoint))
+                if (breakpoint_address >= address && breakpoint_address < address + size &&
+                    this->try_apply_patched_execution_breakpoint(breakpoint_address, breakpoint))
                 {
-                    written.push_back(bp_address);
+                    planted.push_back(breakpoint_address);
                 }
             }
         }
 
-        void mark_patched_execution_breakpoints_unmapped_in_range(uint64_t address, size_t size)
+        void mark_patched_execution_breakpoints_unmapped_in_range(const uint64_t address, const size_t size)
         {
-            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            for (auto& [breakpoint_address, breakpoint] : this->patched_execution_breakpoints_)
             {
-                if (bp_address >= address && bp_address < address + size)
+                if (breakpoint_address >= address && breakpoint_address < address + size)
                 {
                     breakpoint.original_byte.reset();
                     breakpoint.applied = false;
@@ -3153,557 +5748,99 @@ namespace sogen::fex
             }
         }
 
-        void overlay_patched_breakpoints_on_read(uint64_t address, void* data, size_t size) const
+        // Readers of guest memory (a debugger, a disassembler, the loader) see the original instruction byte, not the 0xCC.
+        void overlay_patched_breakpoints_on_read(const uint64_t address, void* data, const size_t size) const
         {
-            auto* cursor = static_cast<std::byte*>(data);
-            for (const auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            auto* bytes = static_cast<std::byte*>(data);
+            for (const auto& [breakpoint_address, breakpoint] : this->patched_execution_breakpoints_)
             {
-                if (!breakpoint.original_byte || bp_address < address || bp_address >= address + size)
+                if (breakpoint.original_byte && breakpoint_address >= address && breakpoint_address < address + size)
                 {
-                    continue;
+                    bytes[breakpoint_address - address] = *breakpoint.original_byte;
                 }
-                cursor[bp_address - address] = *breakpoint.original_byte;
             }
         }
 
-        // A guest write to a byte under a patched breakpoint updates the saved original byte instead
-        // of the live 0xCC (unless the breakpoint is currently suspended, mid-step-over - see
-        // patched_execution_breakpoint::suspended()). Appends every address it wrote to `written`.
-        void overlay_patched_breakpoints_on_write(uint64_t address, size_t size, std::vector<uint64_t>& written)
+        // A write over a planted breakpoint updates its original byte and plants it again, unless a vCPU is stepping over
+        // it right now.
+        void overlay_patched_breakpoints_on_write(const uint64_t address, const size_t size, std::vector<uint64_t>& replanted)
         {
-            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            for (auto& [breakpoint_address, breakpoint] : this->patched_execution_breakpoints_)
             {
-                if (bp_address < address || bp_address >= address + size)
+                if (breakpoint_address < address || breakpoint_address >= address + size)
                 {
                     continue;
                 }
+
                 const bool suspended = breakpoint.suspended();
-                breakpoint.original_byte = this->peek_breakpoint_byte(bp_address);
+                breakpoint.original_byte = this->peek_breakpoint_byte(breakpoint_address);
                 if (!suspended)
                 {
-                    this->poke_breakpoint_byte(bp_address, std::byte{0xCC});
+                    this->poke_breakpoint_byte(breakpoint_address, std::byte{0xCC});
                     breakpoint.applied = true;
-                    written.push_back(bp_address);
-                }
-            }
-        }
-#endif
-
-#ifdef __APPLE__
-        void set_shadow_range_apple(uint64_t address, size_t size, std::optional<memory_permission> permissions)
-        {
-            for (uint64_t page = address; page < address + size; page += page_size)
-            {
-                if (permissions.has_value())
-                {
-                    this->page_shadow_apple_[page] = *permissions;
-                }
-                else
-                {
-                    this->page_shadow_apple_.erase(page);
+                    replanted.push_back(breakpoint_address);
                 }
             }
         }
 
-        void sync_host_page_apple(uint64_t host_page_addr)
-        {
-            memory_permission effective = memory_permission::none;
-            bool any_slot_present = false;
-
-            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
-            {
-                const auto it = this->page_shadow_apple_.find(page);
-                if (it == this->page_shadow_apple_.end())
-                {
-                    continue;
-                }
-                any_slot_present = true;
-                effective = effective | it->second;
-            }
-
-            const auto rebase = rebase_for(this->is_wow64_process_, host_page_addr);
-            void* host_ptr = reinterpret_cast<void*>(host_page_addr + rebase);
-            const bool currently_mapped = this->mapped_host_pages_apple_.contains(host_page_addr);
-
-            if (this->code_write_trapped_host_pages_apple_.contains(host_page_addr))
-            {
-                effective &= ~memory_permission::write;
-            }
-
-            if (!any_slot_present)
-            {
-                this->code_write_trapped_host_pages_apple_.erase(host_page_addr);
-
-                if (currently_mapped)
-                {
-                    // The page being decommitted here already carries real backing (this is a plain
-                    // re-arm-to-PROT_NONE over an existing mapping, not a fresh placement) - the same
-                    // "target may already be covered" case map_fixed_anonymous_apple_replace exists
-                    // for. A raw POSIX mmap(MAP_FIXED) here is implicitly paired with VM_FLAGS_OVERWRITE
-                    // by the kernel (see map_fixed_anonymous_apple's doc comment) and risks the same
-                    // fatal EXC_GUARD DEALLOC_GAP release_guest_address_range's own re-arm branch hit.
-                    const kern_return_t result = traced_map_fixed_anonymous_apple_replace(host_ptr, host_page_size_apple, VM_PROT_NONE,
-                                                                                          VM_PROT_ALL, "decommit_rearm");
-                    if (result != KERN_SUCCESS)
-                    {
-                        throw std::runtime_error("FEX backend failed to re-reserve decommitted guest memory");
-                    }
-                }
-                return;
-            }
-
-            if (!currently_mapped)
-            {
-                // Claim via mach_vm_allocate(VM_FLAGS_FIXED) without VM_FLAGS_OVERWRITE, so a foreign
-                // mapping placed here by another vCPU's concurrent syscall between an earlier probe
-                // and this claim is detected instead of silently destroyed. mach_vm_allocate already
-                // creates the mapping on success (unlike a bare probe), so the final permissions are
-                // applied with mprotect on that same mapping rather than unmapping and re-mapping it -
-                // the intervening unmapped gap a remap would create is exactly what trips macOS's
-                // fatal EXC_GUARD (GUARD_TYPE_VIRT_MEMORY / kGUARD_EXC_DEALLOC_GAP) on the very next
-                // MAP_FIXED call, see map_fixed_anonymous_apple's doc comment. Every page inside the
-                // up-front-reserved wow64 window is pre-registered in mapped_host_pages_apple_ (see
-                // reserve_wow64_host_window), so currently_mapped is already true there and this
-                // branch is only ever reached for a genuinely fresh page outside that window.
-                mach_vm_address_t target = host_page_addr + rebase;
-                const kern_return_t probe_result = ::mach_vm_allocate(mach_task_self(), &target, host_page_size_apple, VM_FLAGS_FIXED);
-                if (probe_result != KERN_SUCCESS)
-                {
-                    if (std::getenv("SOGEN_TRACE_VM_ACCOUNTING"))
-                    {
-                        fprintf(stderr, "[vm-accounting] pid=%d mach_vm_allocate failed addr=0x%llx kern_return=%d\n",
-                                static_cast<int>(::getpid()), static_cast<unsigned long long>(host_page_addr),
-                                static_cast<int>(probe_result));
-                        fflush(stderr);
-                    }
-                    if (probe_result == KERN_INVALID_ADDRESS)
-                    {
-                        // See reserve_guest_address_range's identical handling: KERN_INVALID_ADDRESS
-                        // means the kernel refuses this exact address regardless of occupancy, so
-                        // there is no host range for reserved_host_ranges()'s own mach_vm_region-based
-                        // enumeration to ever discover here on its own.
-                        this->unusable_host_pages_apple_.insert(host_page_addr);
-                    }
-                    throw host_memory_collision{};
-                }
-                if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
-                {
-                    throw std::runtime_error("FEX backend failed to map guest memory at requested address");
-                }
-                this->mapped_host_pages_apple_.insert(host_page_addr, host_page_addr + host_page_size_apple);
-                return;
-            }
-
-            if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
-            {
-                throw std::runtime_error("FEX backend failed to change memory protection");
-            }
-        }
-
-        // Host pages covering [address, address + size) that also hold a mapped guest page outside that range.
-        std::vector<uint64_t> host_pages_shared_with_mapped_slots_apple(const uint64_t address, const size_t size) const
-        {
-            std::vector<uint64_t> host_pages{};
-            const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
-            {
-                for (uint64_t page = host_page; page < host_page + host_page_size_apple; page += page_size)
-                {
-                    if ((page < address || page >= address + size) && this->page_shadow_apple_.contains(page))
-                    {
-                        host_pages.push_back(host_page);
-                        break;
-                    }
-                }
-            }
-            return host_pages;
-        }
-
-        // A host page outlives guest pages unmapped from it while its other guest pages stay mapped, so a guest
-        // page mapped into it again would still show its old contents. Windows hands out committed pages
-        // zero-filled (the CLR's loader heaps rely on it after decommitting and recommitting).
-        void zero_guest_range_in_host_pages_apple(const uint64_t address, const size_t size, const std::vector<uint64_t>& host_pages)
-        {
-            for (const auto host_page : host_pages)
-            {
-                const auto start = std::max(address, host_page);
-                const auto end = std::min(address + size, host_page + host_page_size_apple);
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-                if (::mprotect(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple, PROT_READ | PROT_WRITE) != 0)
-                {
-                    throw std::runtime_error("FEX backend failed to make reused guest memory writable");
-                }
-                std::memset(reinterpret_cast<void*>(start + rebase), 0, static_cast<size_t>(end - start));
-                this->sync_host_page_apple(host_page);
-            }
-        }
-
-        void sync_host_pages_covering_apple(uint64_t address, size_t size)
-        {
-            const uint64_t start = host_page_align_down_apple(address);
-            const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
-            {
-                this->sync_host_page_apple(host_page);
-            }
-        }
-
-        bool range_has_code_write_trap_apple(const uint64_t address, const size_t size) const
-        {
-            const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
-            {
-                if (this->code_write_trapped_host_pages_apple_.contains(host_page))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        // FEXCore's default SMC mode (MTrack) leaves detecting guest stores into translated code to the
-        // frontend: it reports every page it compiles code from, and the frontend has to write-protect
-        // writable ones and invalidate on the resulting write fault (see untrap_code_writes_apple).
-        void trap_code_writes_apple(const uint64_t address, const size_t size)
-        {
-            const std::unique_lock lock(this->tables_mutex_);
-            for (uint64_t page = address & ~(page_size - 1); page < address + size; page += page_size)
-            {
-                const auto it = this->page_shadow_apple_.find(page);
-                if (it == this->page_shadow_apple_.end() || (it->second & memory_permission::write) == memory_permission::none)
-                {
-                    continue;
-                }
-
-                const uint64_t host_page = host_page_align_down_apple(page);
-                if (this->code_write_trapped_host_pages_apple_.insert(host_page).second)
-                {
-                    this->sync_host_page_apple(host_page);
-                }
-            }
-        }
-
-        // Invalidation and unprotection happen under every context's code invalidation mutex, so no
-        // vCPU can translate the page's old bytes in between and keep a stale block for an untracked page.
-        bool untrap_code_writes_apple(const uint64_t guest_address)
-        {
-            const uint64_t host_page = host_page_align_down_apple(guest_address);
-
-            {
-                const std::shared_lock lock(this->tables_mutex_);
-                if (!this->code_write_trapped_host_pages_apple_.contains(host_page))
-                {
-                    return false;
-                }
-            }
-
-            std::unique_lock code_lock(this->context_->GetCodeInvalidationMutex());
-            std::unique_lock<std::remove_reference_t<decltype(this->context_->GetCodeInvalidationMutex())>> code_lock32{};
-            if (this->context32_)
-            {
-                code_lock32 = std::unique_lock(this->context32_->GetCodeInvalidationMutex());
-            }
-
-            {
-                const std::unique_lock lock(this->tables_mutex_);
-                if (this->code_write_trapped_host_pages_apple_.erase(host_page) == 0)
-                {
-                    return false;
-                }
-                this->sync_host_page_apple(host_page);
-            }
-
-            ::pthread_jit_write_protect_np(0);
-            this->context_->InvalidateCodeBuffersCodeRange(host_page, host_page_size_apple);
-            if (this->context32_)
-            {
-                this->context32_->InvalidateCodeBuffersCodeRange(host_page, host_page_size_apple);
-            }
-            for (const auto& vcpu : this->vcpus_)
-            {
-                if (vcpu->thread_ != nullptr)
-                {
-                    this->context_->InvalidateThreadCachedCodeRange(vcpu->thread_, host_page, host_page_size_apple);
-                }
-                if (this->context32_ && vcpu->thread32_ != nullptr)
-                {
-                    this->context32_->InvalidateThreadCachedCodeRange(vcpu->thread32_, host_page, host_page_size_apple);
-                }
-            }
-            ::pthread_jit_write_protect_np(1);
-            return true;
-        }
-#endif
-
-        void initialize_context()
-        {
-            LogMan::Msg::InstallHandler([](LogMan::DebugLevels level, const char* message) {
-                fprintf(stderr, "[FEXCore LogMan] level=%s: %s\n", LogMan::DebugLevelStr(level), message);
-            });
-            LogMan::Throw::InstallHandler([](const char* message) { fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message); });
-
-#ifdef __APPLE__
-            fex_internal_arena::instance().install();
-            this->reserve_wow64_host_window();
-#endif
-
-            std::set_terminate([]() {
-                fprintf(stderr, "[FEX backend] std::terminate invoked\n");
-                if (auto exc = std::current_exception())
-                {
-                    try
-                    {
-                        std::rethrow_exception(exc);
-                    }
-                    catch (const std::exception& e)
-                    {
-                        fprintf(stderr, "[FEX backend] uncaught exception: %s\n", e.what());
-                    }
-                    catch (...)
-                    {
-                        fprintf(stderr, "[FEX backend] uncaught exception of unknown type\n");
-                    }
-                }
-
-                void* frames[64]{};
-                const int frame_count = ::backtrace(frames, 64);
-                char** symbols = ::backtrace_symbols(frames, frame_count);
-                fprintf(stderr, "[FEX backend] backtrace (%d frames):\n", frame_count);
-                for (int i = 0; i < frame_count; ++i)
-                {
-                    fprintf(stderr, "  %s\n", symbols ? symbols[i] : "?");
-                }
-                free(symbols);
-
-                std::abort();
-            });
-
-            FEXCore::Config::Initialize();
-            FEXCore::Config::Load();
-
-            if (const char* dumpir_dir = std::getenv("EMULATOR_FEX_DUMPIR"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_DUMPIR, dumpir_dir);
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_PASSMANAGERDUMPIR, "3");
-            }
-
-            FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
-            FEXCore::Config::Set(FEXCore::Config::CONFIG_GDBSERVER, "1");
-
-            // Performance experiments (see docs/fex-backend.md perf section): each of FEXCore's
-            // software TSO-emulation-cost levers, gated behind its own env var so it can be A/B
-            // tested independently against the EMULATOR_FPS_COUNTER instrumentation. All default to
-            // FEXCore's own conservative defaults (unset = untouched) until validated.
-            if (std::getenv("EMULATOR_FEX_VECTOR_TSO"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
-            }
-            if (std::getenv("EMULATOR_FEX_MEMCPY_TSO"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
-            }
-            if (std::getenv("EMULATOR_FEX_X87_REDUCED_PRECISION"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION, "1");
-            }
-            if (std::getenv("EMULATOR_FEX_NO_TSO"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, "0");
-            }
-            if (std::getenv("EMULATOR_FEX_SMC_NONE"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_SMCCHECKS, "0");
-            }
-            if (std::getenv("EMULATOR_FEX_STRICT_SPLIT_LOCKS"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1");
-            }
-            if (std::getenv("EMULATOR_FEX_LRCPC2"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_HOSTFEATURES, "enablelrcpc2");
-            }
-            if (std::getenv("EMULATOR_FEX_BLOCK_JIT_NAMING"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_BLOCKJITNAMING, "1");
-            }
-
-#ifdef __APPLE__
-            const FEXCore::HostFeatures features = fetch_host_features_apple();
-#else
-            const FEXCore::HostFeatures features{}; // TODO(fex): FEXCore::FetchHostFeatures() on real HW.
-#endif
-            this->context_ = FEXCore::Context::Context::CreateNewContext(features);
-            this->context_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
-
-            this->syscall_handler_ = std::make_unique<fex_syscall_handler>(*this);
-            this->context_->SetSyscallHandler(this->syscall_handler_.get());
-
-            this->signal_delegator_ = std::make_unique<FEXCore::SignalDelegator>();
-            this->context_->SetSignalDelegator(this->signal_delegator_.get());
-
-            this->context_->InitCore();
-
-#ifdef __APPLE__
-            this->previous_active_emulator_ = install_fault_signal_handlers(*this);
-#endif
-        }
-
-#ifdef __APPLE__
-        void reserve_wow64_host_window()
-        {
-            if (this->wow64_host_window_reserved_)
-            {
-                return;
-            }
-
-            constexpr uint64_t search_ceiling = 0x8000000000ULL; // 512 GiB
-            constexpr int max_candidates = 32;
-
-            uint64_t candidate = wow64_guest_rebase_default;
-            for (int attempt = 0; attempt < max_candidates && candidate + wow64_guest_address_space_size <= search_ceiling; ++attempt)
-            {
-                mach_vm_address_t probe_addr = candidate;
-                mach_vm_size_t probe_size = 0;
-                vm_region_basic_info_data_64_t info{};
-                mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
-                mach_port_t object_name = MACH_PORT_NULL;
-                const kern_return_t probe_result = mach_vm_region(mach_task_self(), &probe_addr, &probe_size, VM_REGION_BASIC_INFO_64,
-                                                                  reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
-
-                const bool candidate_is_free = probe_result != KERN_SUCCESS || probe_addr >= candidate + wow64_guest_address_space_size;
-                if (!candidate_is_free)
-                {
-                    char path_buf[PROC_PIDPATHINFO_MAXSIZE] = {};
-                    const int path_len = proc_regionfilename(getpid(), probe_addr, path_buf, sizeof(path_buf));
-                    fprintf(stderr,
-                            "[FEX backend] wow64 host window candidate [0x%llx, 0x%llx) occupied (mapping at 0x%llx "
-                            "size=0x%llx prot=%d file=%s) - trying the next candidate\n",
-                            static_cast<unsigned long long>(candidate),
-                            static_cast<unsigned long long>(candidate + wow64_guest_address_space_size),
-                            static_cast<unsigned long long>(probe_addr), static_cast<unsigned long long>(probe_size), info.protection,
-                            path_len > 0 ? path_buf : "<none>");
-
-                    const uint64_t occupant_end = probe_addr + probe_size;
-                    candidate = (occupant_end + wow64_guest_address_space_size - 1) & ~(wow64_guest_address_space_size - 1);
-                    continue;
-                }
-
-                const kern_return_t map_result = map_fixed_anonymous_apple(reinterpret_cast<void*>(candidate),
-                                                                           wow64_guest_address_space_size, VM_PROT_NONE, VM_PROT_ALL);
-                if (map_result != KERN_SUCCESS)
-                {
-                    fprintf(stderr,
-                            "[FEX backend] failed to reserve wow64 host window at 0x%llx (kern_return=%d) - trying "
-                            "the next candidate\n",
-                            static_cast<unsigned long long>(candidate), map_result);
-                    candidate += wow64_guest_address_space_size;
-                    continue;
-                }
-
-                this->wow64_guest_rebase_ = candidate;
-                this->wow64_host_window_reserved_ = true;
-
-                // Register every host page of the freshly-reserved window in
-                // mapped_host_pages_apple_ up front (keyed by the corresponding *guest* address,
-                // matching this map's existing convention - see rebase_for). Without this, a later
-                // individual-page claim inside the window (reserve_guest_address_range/
-                // sync_host_page_apple) sees "not yet mapped" and takes the TOCTOU-safe
-                // mach_vm_allocate(VM_FLAGS_FIXED) path - which then genuinely fails, since the page
-                // really is already mapped, by this very reservation, not a foreign occupant.
-                // Registering them now means every later claim inside the window correctly takes
-                // the "already ours" -> mprotect-only path instead, which is always safe here: this
-                // whole window was reserved before any guest or FEXCore-internal code ever ran, so
-                // nothing could have raced to place a genuine foreign mapping inside it.
-                this->mapped_host_pages_apple_.insert(0, wow64_guest_address_space_size);
-                return;
-            }
-
-            fprintf(stderr,
-                    "[FEX backend] exhausted %d candidates below 0x%llx searching for a free wow64 host window - "
-                    "falling back to the default at 0x%llx with detect-and-retry\n",
-                    max_candidates, static_cast<unsigned long long>(search_ceiling),
-                    static_cast<unsigned long long>(wow64_guest_rebase_default));
-        }
-#endif
-
-        // invalidate_code_range needs to run per-acting-vcpu (it touches a specific
-        // InternalThreadState), but is called from machine-wide contexts
-        // (map_memory/apply_memory_protection). Fan out to every vCPU's thread of the relevant
-        // context (Task 5): with N threads sharing a context, invalidate the shared code buffer once,
-        // then invalidate every vCPU's own cached-code view - otherwise other vCPUs keep executing
-        // stale translations after a code-modifying event on one vCPU.
-        // A WoW64 process's other FEXCore context may hold a translation of the same byte too.
-        void invalidate_patched_breakpoint_code(const uint64_t address)
-        {
-            this->invalidate_code_range_locked(address, 1);
-        }
-
-        void invalidate_code_range_locked(uint64_t address, size_t size)
-        {
-            for (auto& vcpu : this->vcpus_)
-            {
-                vcpu->invalidate_code_range(address, size);
-            }
-        }
-
-        // --[ state ]--------------------------------------------------------------------------------
-
-        // Protects every machine-wide table below (regions_, mmio_regions_, gate_crossings_, the
-        // Apple host-page shadow tables, callret_buffers_, hook maps) against concurrent access from
-        // multiple vCPUs' host threads. Never held across a call into guest-execution code (JIT
-        // dispatch/ExecuteThread) or across a hook callback that re-enters the kernel lock - only
-        // ever taken to protect a bounded, non-reentrant table mutation/read. A synchronous fault
-        // interrupts JIT/dispatcher code only, which never holds this mutex, so signal-context
-        // acquisition here can't self-deadlock.
-        mutable std::shared_mutex tables_mutex_;
-
-        std::vector<std::unique_ptr<fex_vcpu>> vcpus_;
+        // state
 
         fextl::unique_ptr<FEXCore::Context::Context> context_{};
+        std::vector<std::unique_ptr<fex_vcpu>> vcpus_{};
+
+        // Guards every table below that more than one vCPU's host thread touches. Never held while taking FEXCore's code
+        // invalidation mutex, and never across guest execution or a hook callback.
+        mutable std::shared_mutex tables_mutex_{};
+
         std::unique_ptr<fex_syscall_handler> syscall_handler_{};
+        // Does no fault handling; the plain base only carries the dispatcher config
+        // (ThreadStopHandlerAddress, DispatcherBegin/End) that handle_fault_signal reads.
         std::unique_ptr<FEXCore::SignalDelegator> signal_delegator_{};
 
-        fextl::unique_ptr<FEXCore::Context::Context> context32_{};
-        std::unique_ptr<fex_syscall_handler> syscall_handler32_{};
-        std::unique_ptr<FEXCore::SignalDelegator> signal_delegator32_{};
-
-        bool is_wow64_process_ = false;
-        uint64_t wow64_guest_rebase_ = wow64_guest_rebase_default;
-#ifdef __APPLE__
-        // Set by reserve_wow64_host_window() iff it actually claimed [wow64_guest_rebase_,
-        // wow64_guest_rebase_ + wow64_guest_address_space_size) up front - see its doc comment. Gates
-        // the skip checks in reserved_host_ranges()/reserved_host_ranges_in() below; if the
-        // reservation attempt was skipped or failed (logged loudly either way), this stays false and
-        // both functions behave exactly as before - detect-and-report, not silently assume-safe.
-        bool wow64_host_window_reserved_ = false;
-        // The g_active_emulator that was active when this instance's constructor ran, restored on
-        // destruction - see install_fault_signal_handlers's doc comment for the nested-instance model
-        // this supports (a synchronously-run child instance during NtCreateUserProcess).
-        fex_x86_64_emulator* previous_active_emulator_ = nullptr;
-#endif
-        uint64_t wow64_turbo_dispatch_end_ = 0;
+        uintptr_t next_hook_id_ = 1;
 
         std::map<uint64_t, mapped_region> regions_;
+        // The pages FEX has translated code from since they were last invalidated, as it reports them. Only writes to
+        // these need to invalidate code; FEX only reports a page again once its code has been invalidated.
+        std::set<uint64_t> code_pages_;
+
+#ifdef __linux__
+        uint64_t host_address_end_{find_host_address_end()};
+#endif
+        uint64_t guest_arena_{};
+
         std::vector<mmio_region> mmio_regions_;
-        std::vector<std::pair<void*, size_t>> callret_buffers_;
-        std::vector<gate_crossing> gate_crossings_;
+        // Bringing a stale chunk up to date only changes host protections and caches, which reads do as well.
+        mutable std::map<uint64_t, tracked_range> tracked_ranges_;
+
+        // Every per-logical-thread call-ret buffer ever allocated by ensure_callret_buffer, so the
+        // destructor can release them - these live outside regions_ (host allocator space, not the
+        // guest address space) and outlive any individual CPUState snapshot they were allocated for.
+        std::unordered_map<uint64_t, callret_buffer_record> callret_buffers_;
+        uint64_t instance_id_{std::random_device{}() | (static_cast<uint64_t>(std::random_device{}()) << 32)};
+
+        std::map<uint64_t, size_t> claimed_host_ranges_;
+        std::vector<std::pair<uint64_t, size_t>> fixed_guest_ranges_;
+
+        // Host base of the window backing a WoW64 process's low 4GB, or 0 while guest VA == host VA.
+        uint64_t low_guest_window_{};
 
 #ifdef __APPLE__
+        // Apple Silicon's 16KB host page is coarser than the guest's 4KB architectural page, so one host
+        // mprotect cannot always express what the guest requested per 4KB page - a PE image's .text (RX)
+        // directly followed by .data (RW) share a host page. page_shadow_apple_ is the per-4KB source of
+        // truth (absent = never requested, which must still fault).
         std::map<uint64_t, memory_permission> page_shadow_apple_;
-        utils::interval_set mapped_host_pages_apple_;
-        // Pages where a real mach_vm_allocate(VM_FLAGS_FIXED) claim has already failed once, keyed by
-        // guest-relative address like mapped_host_pages_apple_ - not because anything is actually
-        // mapped there (mach_vm_region enumeration - what reserved_host_ranges()/
-        // reserved_host_ranges_in() are otherwise built from - only reports real occupants), but
-        // because the kernel refuses VM_FLAGS_FIXED at this exact address regardless of occupancy
-        // (e.g. a low-address floor extending past a PIE process's own __PAGEZERO boundary on
-        // Apple Silicon macOS). Since no host range exists for reserved_host_ranges() to discover,
-        // memory_manager's own auto-placement retry/rescan loop can never learn to avoid such an
-        // address on its own - it would keep re-picking the exact same unusable address forever.
-        // Recording it here and folding it into reserved_host_ranges()/reserved_host_ranges_in()'s
-        // own answers closes that gap.
-        std::set<uint64_t> unusable_host_pages_apple_;
+
+        // Host pages that map memory next to no-access 4KB pages, with a bit per no-access page.
+        std::map<uint64_t, uint8_t> no_access_pages_apple_;
+        size_t no_access_watchpoint_count_apple_ = 0;
+        uint64_t no_access_generation_apple_ = 0;
+
+        // Writable host pages FEX has translated code from, which are write-protected until the guest writes them.
         std::set<uint64_t> code_write_trapped_host_pages_apple_;
+
+        std::map<uint64_t, size_t> unusable_host_ranges_apple_;
 #endif
 
         hook_entry* syscall_hook_ = nullptr;
@@ -3712,115 +5849,167 @@ namespace sogen::fex
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_read_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_write_hooks_;
         std::unordered_map<emulator_hook*, execution_hook_entry> memory_execution_hooks_;
+        std::unordered_map<uint64_t, patched_execution_breakpoint> patched_execution_breakpoints_;
         std::unordered_map<emulator_hook*, memory_violation_hook_callback> memory_violation_hooks_;
         std::unordered_map<emulator_hook*, basic_block_hook_callback> basic_block_hooks_;
-        uintptr_t next_hook_id_ = 1;
-
-#ifdef __APPLE__
-        std::unordered_map<uint64_t, patched_execution_breakpoint> patched_execution_breakpoints_;
-#endif
     };
 
-#ifdef __APPLE__
     namespace
     {
-        // Bug 2 fix: a vCPU worker thread's own OS-chosen default stack is ordinary host memory,
-        // placed by the OS wherever it likes - under this backend's guest-VA==host-VA model, a new
-        // thread's stack can coincidentally land on an address the guest program is about to use,
-        // something structurally impossible in single-vCPU mode. Reserve a dedicated arena of fixed-
-        // size, fixed-offset worker stacks up front (mirroring fex_internal_arena's reservation
-        // pattern) and hand one back per vCPU index via reserve_worker_thread_stack, avoiding the
-        // wow64 host window the same way the internal arena does.
-        class fex_worker_stack_arena
+        // Keep this function async-signal-safe: it may run from a signal handler while
+        // libc or other runtime code is in an inconsistent/locked state. Avoid stdio,
+        // snprintf, allocation, locks, and other non-async-signal-safe operations.
+        // Formatting is therefore done manually into a fixed stack buffer, followed by
+        // a single write(2), which is async-signal-safe.
+        static void log_unhandled_signal(int sig, const siginfo_t* info, ucontext_t* uctx)
         {
-          public:
-            static constexpr size_t max_workers = 64;
-            static constexpr size_t stack_size = 8 * 1024 * 1024;
+            const int saved_errno = errno;
 
-            static fex_worker_stack_arena& instance()
-            {
-                static fex_worker_stack_arena arena;
-                return arena;
-            }
+            char buf[160];
+            char* out = buf;
+            const char* const end = buf + sizeof(buf);
 
-            bool get(size_t vcpu_index, void*& stack_base, size_t& out_stack_size)
-            {
-                if (vcpu_index >= max_workers)
+            const auto append_string = [&](const char* str) {
+                while (*str != '\0' && out < end)
                 {
-                    return false;
+                    *out++ = *str++;
                 }
+            };
 
-                this->ensure_installed();
-                if (this->base_ == 0)
+            const auto append_decimal = [&](int64_t value) {
+                char digits[20];
+                size_t count = 0;
+
+                uint64_t magnitude;
+                if (value < 0)
                 {
-                    return false;
-                }
-
-                stack_base = reinterpret_cast<void*>(this->base_ + vcpu_index * stack_size);
-                out_stack_size = stack_size;
-                return true;
-            }
-
-          private:
-            uintptr_t base_ = 0;
-
-            void ensure_installed()
-            {
-                if (this->base_ != 0)
-                {
-                    return;
-                }
-
-                const size_t total_size = max_workers * stack_size;
-                void* base = MAP_FAILED;
-                constexpr int max_attempts = 8;
-                for (int attempt = 0; attempt < max_attempts; ++attempt)
-                {
-                    void* candidate = ::mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                    if (candidate == MAP_FAILED)
+                    if (out < end)
                     {
-                        break;
+                        *out++ = '-';
                     }
 
-                    const auto candidate_addr = reinterpret_cast<uint64_t>(candidate);
-                    const auto candidate_end = candidate_addr + total_size;
-                    const bool overlaps_wow64_window = candidate_addr < wow64_guest_rebase_default + wow64_guest_address_space_size &&
-                                                       candidate_end > wow64_guest_rebase_default;
-                    if (!overlaps_wow64_window)
-                    {
-                        base = candidate;
-                        break;
-                    }
-
-                    traced_munmap(candidate, total_size, "wow64_candidate_cleanup");
+                    magnitude = static_cast<uint64_t>(-(value + 1)) + 1;
                 }
-
-                if (base == MAP_FAILED)
+                else
                 {
-                    return;
+                    magnitude = static_cast<uint64_t>(value);
                 }
 
-                this->base_ = reinterpret_cast<uintptr_t>(base);
-            }
-        };
-    } // namespace
-#endif
+                do
+                {
+                    digits[count++] = static_cast<char>('0' + magnitude % 10);
+                    magnitude /= 10;
+                } while (magnitude != 0);
 
-    bool fex_x86_64_emulator::reserve_worker_thread_stack([[maybe_unused]] size_t vcpu_index, [[maybe_unused]] void*& stack_base,
-                                                          [[maybe_unused]] size_t& stack_size)
-    {
+                while (count != 0 && out < end)
+                {
+                    *out++ = digits[--count];
+                }
+            };
+
+            const auto append_hex = [&](uint64_t value) {
+                constexpr char hex_digits[] = "0123456789abcdef";
+
+                char digits[16];
+                size_t count = 0;
+
+                do
+                {
+                    digits[count++] = hex_digits[value & 0xf];
+                    value >>= 4;
+                } while (value != 0);
+
+                while (count != 0 && out < end)
+                {
+                    *out++ = digits[--count];
+                }
+            };
+
+            append_string("[FEX backend] unhandled signal ");
+            append_decimal(sig);
+
+            append_string(" si_code=");
+            append_decimal(info->si_code);
+
+            append_string(" at pc=0x");
 #ifdef __APPLE__
-        return fex_worker_stack_arena::instance().get(vcpu_index, stack_base, stack_size);
+            append_hex(arm_thread_state64_get_pc(uctx->uc_mcontext->__ss));
 #else
-        return false;
+            append_hex(uctx->uc_mcontext.pc);
 #endif
-    }
 
-    // -----------------------------------------------------------------------------------------------
-    // fex_vcpu method bodies (fex_x86_64_emulator is now complete).
-    // -----------------------------------------------------------------------------------------------
+            append_string(" fault_addr=0x");
+            append_hex(reinterpret_cast<uintptr_t>(info->si_addr));
 
-    fex_vcpu::~fex_vcpu() = default;
+            if (out < end)
+            {
+                *out++ = '\n';
+            }
+
+            if (out != buf)
+            {
+                (void)::write(STDERR_FILENO, buf, static_cast<size_t>(out - buf));
+            }
+
+            errno = saved_errno;
+        }
+
+        bool is_sent_signal(const siginfo_t& info)
+        {
+#ifdef __APPLE__
+            // Darwin reports some hardware traps, like the SIGTRAP of a BRK, with si_code 0, and sent signals with
+            // SI_USER/SI_QUEUE, which are positive there.
+            return info.si_code == SI_USER || info.si_code == SI_QUEUE;
+#else
+            return info.si_code <= 0;
+#endif
+        }
+
+        void forward_sent_signal(const struct sigaction& previous, const int sig, siginfo_t* info, void* raw_ucontext)
+        {
+            if ((previous.sa_flags & SA_SIGINFO) != 0)
+            {
+                previous.sa_sigaction(sig, info, raw_ucontext);
+            }
+            else if (previous.sa_handler == SIG_DFL)
+            {
+                struct sigaction default_action{};
+                default_action.sa_handler = SIG_DFL;
+                ::sigaction(sig, &default_action, nullptr);
+                ::raise(sig);
+            }
+            else if (previous.sa_handler != SIG_IGN)
+            {
+                previous.sa_handler(sig);
+            }
+        }
+
+        void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext)
+        {
+            auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
+            const auto& previous =
+                g_previous_fault_actions[static_cast<size_t>(std::ranges::find(fault_signals, sig) - fault_signals.begin())];
+
+            // A signal that was sent rather than caused by an instruction is no fault. It goes to the previous handler without
+            // uninstalling this one, since that handler may return and later faults still need handling here.
+            if (is_sent_signal(*info))
+            {
+                forward_sent_signal(previous, sig, info, raw_ucontext);
+                return;
+            }
+
+            const bool handled = g_active_emulator != nullptr && g_active_emulator->handle_fault_signal(sig, info, raw_ucontext);
+            if (handled)
+            {
+                return;
+            }
+
+            log_unhandled_signal(sig, info, uctx);
+
+            // Returning re-executes the faulting instruction, which raises the signal again for the previous handler.
+            ::sigaction(sig, &previous, nullptr);
+        }
+    } // namespace
 
     memory_interface& fex_vcpu::memory()
     {
@@ -3832,1868 +6021,156 @@ namespace sogen::fex
         return this->emulator_;
     }
 
-    bool fex_vcpu::read_descriptor_table(int reg, descriptor_table_register& table)
+    void fex_vcpu::start(const size_t count)
     {
-        // FEX is a user-mode emulator: there is no real IDT, and the GDT is synthesized internally.
-        // Only report the GDT base we were handed via load_gdt(); everything else is unsupported.
-        if (reg == static_cast<int>(x86_register::gdtr))
-        {
-            table.base = this->gdt_base_;
-            table.limit = this->gdt_limit_;
-            return true;
-        }
-        return false;
+        this->emulator_.run(*this, count);
     }
 
-    void fex_vcpu::load_gdt(pointer_type address, uint32_t limit)
-    {
-        // Only remember the base/limit for callers querying gdtr (see read_descriptor_table). Kept
-        // per-vCPU (not on the shared emulator) - each vCPU has its own GDT page specifically so one
-        // WoW64 thread's FS descriptor (TEB32 base) can never be read from another vCPU.
-        this->gdt_base_ = address;
-        this->gdt_limit_ = limit;
-
-        const auto rebase = this->emulator_.rebase_for(this->emulator_.is_wow64_process_, address);
-        this->cpu_state().segment_arrays[0] = reinterpret_cast<FEXCore::Core::CPUState::gdt_segment*>(address + rebase);
-    }
-
-#ifdef __APPLE__
-    void fex_vcpu::start(size_t count)
-    {
-        this->emulator_.refresh_mmio_backings();
-
-        if (count > 1)
-        {
-            // FEX has CompileRIPCount() for bounded execution, but wiring exact instruction counts
-            // through the JIT exit path is non-trivial; match the KVM backend and refuse for now.
-            throw std::runtime_error("FEX backend does not support exact instruction counts yet");
-        }
-
-        // sigaltstack is per-host-thread; each vCPU's worker thread registers its own alt_stack_ once,
-        // the first time it ever enters here (a vCPU's start() always runs on the same host thread
-        // thereafter - windows_emulator's vcpu_worker owns exactly one host thread per vCPU).
-        thread_local bool sigaltstack_registered = false;
-        if (!sigaltstack_registered)
-        {
-            stack_t ss{};
-            ss.ss_sp = this->alt_stack_.data();
-            ss.ss_size = this->alt_stack_.size();
-            ss.ss_flags = 0;
-            ::sigaltstack(&ss, nullptr);
-            sigaltstack_registered = true;
-        }
-
-        // Routes this host thread's faults to this vCPU's state for the duration of guest execution.
-        const current_vcpu_scope current_vcpu_guard(*this);
-
-        if (this->active_thread_.load() == nullptr)
-        {
-            this->create_thread();
-        }
-
-        this->stop_requested_ = false;
-        // Re-arm InterruptFaultPage for this quantum - a prior stop() may have left it protected to
-        // force the last quantum's ExecuteThread to return, and it must be writable again before the
-        // JIT's per-block-entry store runs.
-        {
-            auto* const active = this->active_thread_.load();
-            ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
-        }
-
-        // A breakpoint left deferred by the previous start() (see handle_patched_execution_breakpoint
-        // and abandon_execution_step) is only stepped over here, in normal call context, once
-        // execution is actually about to resume through it - if RIP moved away in the meantime (the
-        // debugger redirected it, or restored a snapshot), just re-plant instead of stepping.
-        if (this->deferred_patched_breakpoint_)
-        {
-            const auto deferred_address = *this->deferred_patched_breakpoint_;
-            bool wrote = false;
-            {
-                const std::unique_lock lock(this->emulator_.tables_mutex_);
-                this->deferred_patched_breakpoint_.reset();
-                if (this->cpu_state().rip == deferred_address)
-                {
-                    this->arm_execution_single_step(count == 1);
-                    this->pending_execution_step_->patched_breakpoint = deferred_address;
-                }
-                else
-                {
-                    wrote = this->emulator_.set_patched_execution_breakpoint_state(deferred_address, true);
-                }
-            }
-            if (wrote)
-            {
-                this->emulator_.invalidate_patched_breakpoint_code(deferred_address);
-            }
-        }
-
-        if (!this->pending_execution_step_ && count == 1)
-        {
-            this->arm_execution_single_step(true);
-        }
-
-        // ExecuteThread runs the translated guest until the thread is asked to stop (which the
-        // syscall bridge does when a hook calls stop()), or the guest faults/exits. It can also
-        // return early because handle_fault_signal deferred a hook dispatch rather than a genuine
-        // stop - dispatch it here, in normal call context where it's actually safe to do so, then
-        // resume by calling ExecuteThread again.
-        for (;;)
-        {
-            this->active_context_->ExecuteThread(this->active_thread_.load());
-
-            const bool hook_dispatched = this->dispatch_pending_hook_if_any();
-            const bool interrupt_page_unwind = std::exchange(this->interrupt_page_unwind_, false);
-
-            // An InterruptFaultPage unwind with no stop pending is the quantum timer racing this
-            // quantum's own entry: stop() sets stop_requested_ then protects the page, but a
-            // concurrently-entered start() has already cleared the flag and only then does the
-            // timer's mprotect land - past this quantum's re-arm above. Re-arm and resume instead of
-            // treating this as a real stop.
-            if (this->stop_requested_ || (!hook_dispatched && !interrupt_page_unwind))
-            {
-                break;
-            }
-
-            // A deferred hook or a raced InterruptFaultPage unwind is resuming (no stop pending). If
-            // it was a WoW64 gate crossing, active_thread_ was just swapped to the OTHER FEXCore
-            // engine mid-quantum - re-arm the now-active engine's page here (a no-op if already
-            // writable), so it resumes cleanly instead of immediately re-faulting as a spurious stop.
-            auto* const active = this->active_thread_.load();
-            ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
-        }
-
-        // A step still pending when start() returns (e.g. a hook stopped on an unrelated fault before
-        // our own #DB/#BP could complete it) must not leak TF into the next run, nor abandon the
-        // breakpoint it was stepping over - restore the guest's own trap-flag state and re-defer that
-        // breakpoint so the block above finishes it on the next start().
-        this->abandon_execution_step();
-    }
-#else
-    void fex_vcpu::start(size_t count)
-    {
-        this->emulator_.refresh_mmio_backings();
-
-        if (count != 0)
-        {
-            throw std::runtime_error("FEX backend does not support exact instruction counts yet");
-        }
-
-        if (this->active_thread_.load() == nullptr)
-        {
-            this->create_thread();
-        }
-
-        this->stop_requested_ = false;
-        this->active_context_->ExecuteThread(this->active_thread_.load());
-    }
-#endif
-
-    void fex_vcpu::stop()
-    {
-        this->stop_requested_ = true;
-        this->request_thread_stop();
-    }
-
-    size_t fex_vcpu::read_raw_register(int reg, void* value, size_t size)
-    {
-        const auto xreg = static_cast<x86_register>(reg);
-        const auto mapping = detail::map_register(xreg);
-        auto& state = this->cpu_state();
-
-        switch (mapping.kind)
-        {
-        case detail::register_kind::gpr: {
-            // In a WoW64 process the 32-bit engine (context32_) has no architectural r8-r15: 32-bit
-            // x86 cannot address them, and when the 32-bit engine takes a real fault its SRA spill
-            // leaves those greg slots holding host register values (observed as host stack pointers).
-            // The meaningful high-register state - the wow64cpu-reserved r12-r15 (r14 = the 64-bit
-            // exception stack, r13 = CpuArea CONTEXT block, ...) that a 64-bit CONTEXT capture needs -
-            // lives in the frozen 64-bit engine (thread_), maintained by the forward gate. Source
-            // r8-r15 from there so dispatch_exception's CONTEXT64 (consumed by ntdll!
-            // KiUserExceptionDispatcher -> wow64!Wow64PrepareForException) carries the real values.
-            auto* const active = this->active_thread_.load();
-            const FEXCore::Core::CPUState& gpr_state =
-                (this->emulator_.is_wow64_process_ && active == this->thread32_ && this->thread_ != nullptr &&
-                 mapping.gpr.index >= detail::greg_r8 && mapping.gpr.index <= detail::greg_r8 + 7)
-                    ? this->thread_->CurrentFrame->State
-                    : state;
-            uint64_t raw = gpr_state.gregs[mapping.gpr.index] >> (mapping.gpr.byte_offset * 8);
-            std::memcpy(value, &raw, (std::min)(size, mapping.gpr.width));
-            return size;
-        }
-        case detail::register_kind::rip:
-            std::memcpy(value, &state.rip, (std::min)(size, sizeof(state.rip)));
-            return size;
-        case detail::register_kind::flags: {
-            const uint64_t rflags = this->read_rflags();
-            std::memcpy(value, &rflags, (std::min)(size, sizeof(rflags)));
-            return size;
-        }
-        case detail::register_kind::xmm:
-            std::memcpy(value, &state.xmm.avx.data[mapping.index][0], (std::min)(size, size_t{16}));
-            return size;
-        case detail::register_kind::mm:
-            std::memcpy(value, &state.mm[mapping.index][0], (std::min)(size, size_t{16}));
-            return size;
-        case detail::register_kind::mxcsr:
-            std::memcpy(value, &state.mxcsr, (std::min)(size, sizeof(state.mxcsr)));
-            return size;
-        case detail::register_kind::fcw:
-            std::memcpy(value, &state.FCW, (std::min)(size, sizeof(state.FCW)));
-            return size;
-        case detail::register_kind::fs_base:
-            std::memcpy(value, &state.fs_cached, (std::min)(size, sizeof(state.fs_cached)));
-            return size;
-        case detail::register_kind::gs_base:
-            std::memcpy(value, &state.gs_cached, (std::min)(size, sizeof(state.gs_cached)));
-            return size;
-        case detail::register_kind::segment: {
-            const uint16_t selector = this->segment_selector(mapping.index);
-            std::memcpy(value, &selector, (std::min)(size, sizeof(selector)));
-            return size;
-        }
-        case detail::register_kind::fsw:
-        case detail::register_kind::unsupported:
-        default:
-            std::memset(value, 0, size);
-            return size;
-        }
-    }
-
-    size_t fex_vcpu::write_raw_register(int reg, const void* value, size_t size)
-    {
-        const auto xreg = static_cast<x86_register>(reg);
-        const auto mapping = detail::map_register(xreg);
-        auto& state = this->cpu_state();
-
-        switch (mapping.kind)
-        {
-        case detail::register_kind::gpr: {
-            auto& slot = state.gregs[mapping.gpr.index];
-            if (mapping.gpr.width == 8)
-            {
-                std::memcpy(&slot, value, sizeof(slot));
-            }
-            else if (mapping.gpr.zero_extend_32)
-            {
-                uint32_t v = 0;
-                std::memcpy(&v, value, sizeof(v));
-                slot = v;
-            }
-            else
-            {
-                uint64_t incoming = 0;
-                std::memcpy(&incoming, value, mapping.gpr.width);
-                const auto shift = mapping.gpr.byte_offset * 8;
-                const uint64_t mask = ((1ULL << (mapping.gpr.width * 8)) - 1) << shift;
-                slot = (slot & ~mask) | ((incoming << shift) & mask);
-            }
-            return size;
-        }
-        case detail::register_kind::rip:
-            std::memcpy(&state.rip, value, (std::min)(size, sizeof(state.rip)));
-            return size;
-        case detail::register_kind::flags: {
-            uint64_t rflags = 0;
-            std::memcpy(&rflags, value, (std::min)(size, sizeof(rflags)));
-            this->write_rflags(rflags);
-            return size;
-        }
-        case detail::register_kind::xmm:
-            std::memcpy(&state.xmm.avx.data[mapping.index][0], value, (std::min)(size, size_t{16}));
-            return size;
-        case detail::register_kind::mm:
-            std::memcpy(&state.mm[mapping.index][0], value, (std::min)(size, size_t{16}));
-            return size;
-        case detail::register_kind::mxcsr:
-            std::memcpy(&state.mxcsr, value, (std::min)(size, sizeof(state.mxcsr)));
-            return size;
-        case detail::register_kind::fcw:
-            std::memcpy(&state.FCW, value, (std::min)(size, sizeof(state.FCW)));
-            return size;
-        case detail::register_kind::fs_base:
-            std::memcpy(&state.fs_cached, value, (std::min)(size, sizeof(state.fs_cached)));
-            return size;
-        case detail::register_kind::gs_base:
-            std::memcpy(&state.gs_cached, value, (std::min)(size, sizeof(state.gs_cached)));
-            return size;
-        case detail::register_kind::segment:
-            this->set_segment_selector(mapping.index, value, size);
-            return size;
-        case detail::register_kind::fsw:
-        case detail::register_kind::unsupported:
-        default:
-            return size;
-        }
-    }
-
-    static constexpr size_t kWow64SnapshotHeader = 8; // uint64 active-is-32 flag, kept 8 for alignment
-
-    static constexpr size_t wow64_snapshot_size()
-    {
-        return kWow64SnapshotHeader + 2 * sizeof(FEXCore::Core::CPUState);
-    }
-
+    // The whole architectural state lives in a single CPUState struct, followed by the id of the emulator it came from.
     std::vector<std::byte> fex_vcpu::save_registers() const
     {
-        // For a wow64 process, once the 32-bit engine exists a logical thread's full state spans
-        // BOTH engines (active + parked). Snapshot both, tagged with which one is active, so a
-        // thread switch preserves the parked excursion frame instead of leaking it to whichever
-        // logical thread next runs the shared engine.
-        if (this->emulator_.is_wow64_process_ && this->thread32_ != nullptr && this->thread_ != nullptr)
-        {
-            std::vector<std::byte> data(wow64_snapshot_size());
-            const uint64_t active_is_32 = (this->active_context_ == this->emulator_.context32_.get()) ? 1 : 0;
-            std::memcpy(data.data(), &active_is_32, sizeof(active_is_32));
-            std::memcpy(data.data() + kWow64SnapshotHeader, &this->thread_->CurrentFrame->State, sizeof(FEXCore::Core::CPUState));
-            std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &this->thread32_->CurrentFrame->State,
-                        sizeof(FEXCore::Core::CPUState));
-
-            // See restore_state_into's InlineJITBlockHeader comment: a parked thread's saved header
-            // is a host pointer into whatever CodeBuffer generation was current when it stopped,
-            // which FEXCore's own bookkeeping may free once some OTHER logical thread sharing this
-            // engine compiles enough new code to rotate past it. Retain that exact buffer for as long
-            // as this snapshot might still be resumed from; restore_state_into releases it again.
-            if (this->thread_->CurrentFrame->State.InlineJITBlockHeader != 0)
-            {
-                this->emulator_.context_->RetainCodeBufferAt(this->thread_->CurrentFrame->State.InlineJITBlockHeader);
-            }
-            if (this->thread32_->CurrentFrame->State.InlineJITBlockHeader != 0)
-            {
-                this->emulator_.context32_->RetainCodeBufferAt(this->thread32_->CurrentFrame->State.InlineJITBlockHeader);
-            }
-
-            return data;
-        }
-
         const auto& state = this->cpu_state();
-        std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState));
+        std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState) + sizeof(this->emulator_.instance_id_));
         std::memcpy(data.data(), &state, sizeof(state));
+        std::memcpy(data.data() + sizeof(state), &this->emulator_.instance_id_, sizeof(this->emulator_.instance_id_));
 
-        if (state.InlineJITBlockHeader != 0 && this->active_context_ != nullptr)
+        // The saved InlineJITBlockHeader points into the code buffer the state last ran in. Another logical thread
+        // running on this FEXCore thread can rotate the code buffer while this state is parked, freeing that buffer, so it
+        // is kept alive until restore_state_into releases it.
+        if (this->thread_ != nullptr && state.InlineJITBlockHeader != 0)
         {
-            this->active_context_->RetainCodeBufferAt(state.InlineJITBlockHeader);
+            this->emulator_.context_->RetainCodeBufferAt(state.InlineJITBlockHeader);
         }
-
         return data;
-    }
-
-    void fex_vcpu::restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src)
-    {
-        auto& state = thread->CurrentFrame->State;
-        const auto l1_pointer = state.L1Pointer;
-        const auto l1_mask = state.L1Mask;
-        // segment_arrays[0] is this vCPU's own GDT pointer (see load_gdt's doc comment: each vCPU
-        // has its own GDT page specifically so one thread's FS descriptor can never be read from
-        // another vCPU). A migrating thread's saved snapshot carries whichever vCPU it last ran on's
-        // GDT pointer - blindly memcpy-ing the whole CPUState here would silently overwrite this
-        // vCPU's correct GDT pointer with a stale, foreign one, corrupting every FS/SS-relative
-        // access (TEB base, stack segment base) for the rest of this thread's life on this vCPU.
-        // Preserve it exactly like L1Pointer/L1Mask below.
-        const auto segment_array_0 = state.segment_arrays[0];
-        std::memcpy(&state, src, sizeof(FEXCore::Core::CPUState));
-        state.L1Pointer = l1_pointer;
-        state.L1Mask = l1_mask;
-        state.segment_arrays[0] = segment_array_0;
-
-        // InlineJITBlockHeader is a raw host pointer to the currently-executing JIT block's own
-        // header (set by Arm64JITCore::EmitEntryPoint's `str TMP1, STATE, ...InlineJITBlockHeader`
-        // at every block's entry), read back by FEXCore's own RestoreRIPFromHostPC/GetFrameBlockInfo
-        // to reconstruct RIP and locate block metadata during synchronous fault handling. It is the
-        // wrong block for a resumed thread about to dispatch fresh from Frame->State.rip (just
-        // restored above) - EmitEntryPoint re-establishes a correct value unconditionally on the
-        // very next dispatch, and FEXCore treats a null InlineJITBlockHeader as "no block info
-        // available" and falls back to State.rip in the meantime, so zeroing it here is always safe.
-        // save_registers retained the CodeBuffer this snapshot's own value points into (see its own
-        // comment) specifically so it survives until here even if some OTHER logical thread sharing
-        // this engine rotated FEXCore's CurrentCodeBuffer past it in the meantime; release that
-        // retention now that this thread is resuming and no longer needs it kept alive on its behalf.
-        if (state.InlineJITBlockHeader != 0 && context != nullptr)
-        {
-            context->ReleaseCodeBufferAt(state.InlineJITBlockHeader);
-        }
-        state.InlineJITBlockHeader = 0;
-
-        this->ensure_callret_buffer(state);
-        thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
-
-        // The snapshot's callret_sp would resurrect call-ret entries pushed during an earlier
-        // scheduling quantum - host JIT code pointers that are only valid for the engine thread and
-        // code-buffer generation that pushed them. FEXCore wipes only the callret buffer attached to
-        // an engine thread when that thread rotates its code buffer or invalidates code (see
-        // CheckCodeBufferUpdate/InvalidateThreadCachedCodeRange); a descheduled thread's buffer is
-        // never wiped, so a resumed thread's RET can pop a matching guest address paired with a host
-        // pointer into freed or foreign-generation JIT memory (observed as ExitFunctionLink "Record
-        // outside code buffer" bails and wild host jumps under --vcpus > 1). The entries are purely a
-        // RET fast path, so dropping them on every restore is always safe.
-        state.callret_sp = state._pad1 + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4;
     }
 
     void fex_vcpu::restore_registers(const std::vector<std::byte>& register_data)
     {
-        if (register_data.size() == wow64_snapshot_size())
-        {
-            if (this->thread_ == nullptr)
-            {
-                // A wow64 thread that already ran elsewhere can migrate onto a vCPU that never
-                // executed anything: create the engines lazily here, exactly like start() does.
-                // The staged_state_ seed already carries this vCPU's own GDT pointer, because
-                // emulator_thread::restore() calls refresh_execution_context (load_gdt) first.
-                this->create_thread();
-            }
-            if (this->thread32_ == nullptr)
-            {
-                this->create_thread32();
-            }
-            uint64_t active_is_32 = 0;
-            std::memcpy(&active_is_32, register_data.data(), sizeof(active_is_32));
-            this->restore_state_into(this->thread_, this->emulator_.context_.get(), register_data.data() + kWow64SnapshotHeader);
-            this->restore_state_into(this->thread32_, this->emulator_.context32_.get(),
-                                     register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
-            if (active_is_32)
-            {
-                this->active_context_ = this->emulator_.context32_.get();
-                this->active_thread_ = this->thread32_;
-            }
-            else
-            {
-                this->active_context_ = this->emulator_.context_.get();
-                this->active_thread_ = this->thread_;
-            }
-            return;
-        }
-
-        if (register_data.size() != sizeof(FEXCore::Core::CPUState))
+        FEXCore::Core::CPUState restored{};
+        uint64_t instance_id{};
+        if (register_data.size() != sizeof(restored) + sizeof(instance_id))
         {
             throw std::runtime_error("FEX register snapshot has unexpected size");
         }
 
-        if (this->active_thread_.load() == nullptr)
+        std::memcpy(&restored, register_data.data(), sizeof(restored));
+        std::memcpy(&instance_id, register_data.data() + sizeof(restored), sizeof(instance_id));
+
+        // The call-ret buffer, descriptor tables and JIT blocks are host memory of the emulator that saved the state,
+        // so a state from a saved process gets its own.
+        if (instance_id != this->emulator_.instance_id_)
+        {
+            restored._pad1 = 0;
+            restored.callret_sp = 0;
+            restored.InlineJITBlockHeader = 0;
+        }
+
+        if (this->thread_ == nullptr)
         {
             // No thread yet: writing into staged_state_, which create_thread() will seed the
-            // real thread from.
-            std::memcpy(&this->staged_state_, register_data.data(), sizeof(FEXCore::Core::CPUState));
+            // real thread from (including installing L1Pointer/L1Mask/callret_sp correctly
+            // itself afterward). See restore_state_into for the code buffer save_registers kept alive.
+            if (restored.InlineJITBlockHeader != 0)
+            {
+                this->emulator_.context_->ReleaseCodeBufferAt(restored.InlineJITBlockHeader);
+                restored.InlineJITBlockHeader = 0;
+            }
+            const auto segment_arrays = std::to_array(this->staged_state_.segment_arrays);
+            std::memcpy(&this->staged_state_, &restored, sizeof(restored));
+            std::ranges::copy(segment_arrays, std::begin(this->staged_state_.segment_arrays));
             return;
         }
 
-        const auto incoming_cs = reinterpret_cast<const FEXCore::Core::CPUState*>(register_data.data())->cs_idx;
-        const bool incoming_is_32bit = this->emulator_.is_wow64_process_ && incoming_cs == 0x23;
-        if (incoming_is_32bit)
-        {
-            if (this->thread32_ == nullptr)
-            {
-                this->create_thread32();
-            }
-            this->active_context_ = this->emulator_.context32_.get();
-            this->active_thread_ = this->thread32_;
-        }
-        else
-        {
-            this->active_context_ = this->emulator_.context_.get();
-            this->active_thread_ = this->thread_;
-        }
-
-        this->restore_state_into(this->active_thread_.load(), this->active_context_, register_data.data());
+        this->emulator_.restore_state_into(this->thread_, restored);
     }
 
-    void fex_vcpu::set_segment_base(x86_register base, pointer_type value)
+    void fex_vcpu::notify_process_bitness(const bool is_wow64_process)
     {
-        auto& state = this->cpu_state();
-        if (base == x86_register::fs || base == x86_register::fs_base)
-        {
-            state.fs_cached = value;
-        }
-        else if (base == x86_register::gs || base == x86_register::gs_base)
-        {
-            state.gs_cached = value;
-        }
+        this->emulator_.notify_process_bitness(is_wow64_process);
     }
 
-    fex_vcpu::pointer_type fex_vcpu::get_segment_base(x86_register base)
+    void fex_vcpu::load_gdt(const pointer_type address, const uint32_t limit)
     {
-        const auto& state = this->cpu_state();
-        if (base == x86_register::fs || base == x86_register::fs_base)
-        {
-            return state.fs_cached;
-        }
-        if (base == x86_register::gs || base == x86_register::gs_base)
-        {
-            return state.gs_cached;
-        }
-        return 0;
-    }
+        // Only remember the base/limit for callers querying gdtr (see read_descriptor_table).
+        this->gdt_base_ = address;
+        this->gdt_limit_ = limit;
 
-    void fex_vcpu::notify_process_bitness(bool is_wow64_process)
-    {
-        this->emulator_.is_wow64_process_ = is_wow64_process;
-        this->emulator_.context_->SetNeedsWow64GuestRebase(is_wow64_process);
-        if (is_wow64_process)
-        {
-            this->emulator_.ensure_context32();
-        }
-    }
-
-    void fex_vcpu::register_gate_crossing(pointer_type address, size_t size, gate_crossing_kind kind)
-    {
-        const std::unique_lock lock(this->emulator_.tables_mutex_);
-        this->emulator_.gate_crossings_.push_back(gate_crossing{address, size, kind});
-    }
-
-    void fex_vcpu::set_wow64_turbo_dispatch_end(pointer_type address)
-    {
-        this->emulator_.wow64_turbo_dispatch_end_ = address;
-    }
-
-    FEXCore::Core::CPUState& fex_vcpu::cpu_state()
-    {
-        auto* const active = this->active_thread_.load();
-        if (active != nullptr)
-        {
-            return active->CurrentFrame->State;
-        }
-        return this->staged_state_;
-    }
-
-    const FEXCore::Core::CPUState& fex_vcpu::cpu_state() const
-    {
-        auto* const active = this->active_thread_.load();
-        if (active != nullptr)
-        {
-            return active->CurrentFrame->State;
-        }
-        return this->staged_state_;
+        // sogen writes real GDT descriptors (matching FEXCore::Core::CPUState::gdt_segment's
+        // bitfield layout byte-for-byte) directly into guest memory at `address`. Since guest VA
+        // == host VA under this backend's model, point FEX's own segment table at that same
+        // memory instead of duplicating it - CS/segment lookups (GetSegmentFromIndex) then see
+        // whatever sogen's loader wrote, including the long-mode (L) bit, with no extra sync step.
+        this->cpu_state().segment_arrays[0] =
+            reinterpret_cast<FEXCore::Core::CPUState::gdt_segment*>(this->emulator_.to_host_address(address));
     }
 
     uint64_t fex_vcpu::read_rflags() const
     {
-        auto* const active = this->active_thread_.load();
-        if (active != nullptr)
+        // FEXCore's ReconstructCompactedEFLAGS requires a live thread (it dereferences Thread to
+        // reach CurrentFrame->State); before create_thread(), fall back to the local
+        // reimplementation operating on the staged CPUState directly (see reconstruct_compacted_eflags).
+        if (this->thread_ != nullptr)
         {
-            return this->active_context_->ReconstructCompactedEFLAGS(active, /*WasInJIT=*/false, nullptr, 0);
+            // At rest (not in JIT) WasInJIT=false and the host GPR/PSTATE inputs are unused.
+            return this->emulator_.context_->ReconstructCompactedEFLAGS(this->thread_, /*WasInJIT=*/false, nullptr, 0);
         }
         return reconstruct_compacted_eflags(this->staged_state_);
     }
 
-    void fex_vcpu::write_rflags(uint64_t rflags)
+    void fex_vcpu::write_rflags(const uint64_t rflags)
     {
-        auto* const active = this->active_thread_.load();
-        if (active != nullptr)
+        if (this->thread_ != nullptr)
         {
-            this->active_context_->SetFlagsFromCompactedEFLAGS(active, static_cast<uint32_t>(rflags));
+            this->emulator_.context_->SetFlagsFromCompactedEFLAGS(this->thread_, static_cast<uint32_t>(rflags));
             return;
         }
         set_flags_from_compacted_eflags(this->staged_state_, static_cast<uint32_t>(rflags));
     }
 
-#ifdef __APPLE__
-    void fex_vcpu::arm_execution_single_step(const bool stop_after_step)
-    {
-        if (this->pending_execution_step_)
-        {
-            throw std::runtime_error("Nested FEX execution single-step state is not supported");
-        }
-
-        const auto rflags = this->read_rflags();
-        pending_execution_step state{};
-        state.had_trap_flag = (rflags & trap_flag_bit) != 0;
-        state.stop_after_step = stop_after_step;
-        this->pending_execution_step_ = state;
-        this->write_rflags(rflags | trap_flag_bit);
-    }
-
-    pending_execution_step fex_vcpu::take_pending_execution_step()
-    {
-        const auto state = *std::exchange(this->pending_execution_step_, std::nullopt);
-        const auto rflags = this->read_rflags();
-        this->write_rflags(state.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
-        return state;
-    }
-
-    bool fex_vcpu::complete_execution_step()
-    {
-        if (!this->pending_execution_step_)
-        {
-            return false;
-        }
-
-        pending_execution_step state{};
-        bool wrote = false;
-        {
-            const std::unique_lock lock(this->emulator_.tables_mutex_);
-            state = this->take_pending_execution_step();
-            if (state.patched_breakpoint)
-            {
-                wrote = this->emulator_.set_patched_execution_breakpoint_state(*state.patched_breakpoint, true);
-            }
-        }
-        if (wrote)
-        {
-            this->emulator_.invalidate_patched_breakpoint_code(*state.patched_breakpoint);
-        }
-
-        if (state.stop_after_step)
-        {
-            this->stop_requested_ = true;
-        }
-
-        // A #DB that completes an internal step is only consumed here (not forwarded to
-        // interrupt_hooks_) when the guest itself had not already armed TF - otherwise this same
-        // trap is also the guest's own single-step trap and must still reach interrupt_hooks_,
-        // matching WHP (see fex_vcpu::dispatch_pending_hook_if_any).
-        return !state.had_trap_flag;
-    }
-
-    void fex_vcpu::abandon_execution_step()
-    {
-        if (!this->pending_execution_step_)
-        {
-            return;
-        }
-
-        const std::unique_lock lock(this->emulator_.tables_mutex_);
-        const auto state = this->take_pending_execution_step();
-
-        if (state.patched_breakpoint)
-        {
-            this->deferred_patched_breakpoint_ = state.patched_breakpoint;
-        }
-    }
-
-    // Called from dispatch_pending_hook_if_any() (normal call context) with the guest RIP the
-    // int3/#BP trap left behind. FEXCore's JIT translation of INT3 reports RIP already advanced past
-    // the trapping 0xCC (SetRIPToNext, OpcodeDispatcher.cpp), for a real guest int3 as much as for
-    // our own patched byte - `address` here is therefore rip-1, the candidate breakpoint address, not
-    // yet the confirmed one. Returns false for anything that is not one of ours (a real guest int3,
-    // or a step-over re-trapping its own restored int3 byte - see the early-return case below), which
-    // tells the caller to fall through to interrupt_hooks_ with RIP left exactly as FEXCore reported
-    // it, preserving reports_breakpoint_rip_past_instruction()'s contract for every other consumer.
-    bool fex_vcpu::handle_patched_execution_breakpoint(const uint64_t address)
-    {
-        if (this->pending_execution_step_ && this->pending_execution_step_->patched_breakpoint == address)
-        {
-            // The step-over just executed the original instruction at this address, and it was
-            // itself 0xCC (e.g. DbgBreakPoint sitting right under our own breakpoint) - this trap is
-            // the guest's own int3, not another hit of ours. Finish the step (re-planting the
-            // breakpoint) and report "not mine" so the vector-3 dispatch falls through to
-            // interrupt_hooks_.
-            this->complete_execution_step();
-            return false;
-        }
-
-        std::vector<memory_execution_hook_callback> callbacks;
-        {
-            const std::shared_lock lock(this->emulator_.tables_mutex_);
-            if (!this->emulator_.patched_execution_breakpoints_.contains(address))
-            {
-                return false;
-            }
-
-            for (const auto& [_, hook] : this->emulator_.memory_execution_hooks_)
-            {
-                if (hook.patched_breakpoint && hook.address == address)
-                {
-                    callbacks.push_back(hook.callback);
-                }
-            }
-        }
-
-        // Confirmed match: normalize RIP back to the 0xCC's own address so the callback and the
-        // step-over below both see/resume from it, same as KVM/WHP already report for their own
-        // breakpoints.
-        this->cpu_state().rip = address;
-
-        // The 0xCC stays planted while the callbacks run (they may block on the kernel lock), so
-        // other vCPUs executing this address in the meantime still hit it.
-        for (const auto& callback : callbacks)
-        {
-            callback(*this, address);
-        }
-
-        std::optional<uint64_t> replanted_address{};
-        bool wrote_this_address = false;
-        {
-            const std::unique_lock lock(this->emulator_.tables_mutex_);
-            wrote_this_address = this->emulator_.set_patched_execution_breakpoint_state(address, false);
-
-            if (this->pending_execution_step_)
-            {
-                const auto vacated = std::exchange(this->pending_execution_step_->patched_breakpoint, std::nullopt);
-                if (vacated && this->emulator_.set_patched_execution_breakpoint_state(*vacated, true))
-                {
-                    replanted_address = vacated;
-                }
-            }
-
-            if (this->stop_requested_)
-            {
-                this->deferred_patched_breakpoint_ = address;
-            }
-            else
-            {
-                if (!this->pending_execution_step_)
-                {
-                    this->arm_execution_single_step(false);
-                }
-                else
-                {
-                    // The trap on the 0xCC used up the one instruction EmitTFCheck lets run after TF is
-                    // set, so without re-arming TF here the #DB would fire before the original instruction
-                    // (now restored) executes.
-                    this->write_rflags(this->read_rflags() | trap_flag_bit);
-                }
-
-                this->pending_execution_step_->patched_breakpoint = address;
-            }
-        }
-
-        if (wrote_this_address)
-        {
-            this->emulator_.invalidate_patched_breakpoint_code(address);
-        }
-        if (replanted_address)
-        {
-            this->emulator_.invalidate_patched_breakpoint_code(*replanted_address);
-        }
-
-        return true;
-    }
-#endif
-
-    uint16_t fex_vcpu::segment_selector(int index) const
-    {
-        const auto& state = this->cpu_state();
-        switch (index)
-        {
-        case 0:
-            return state.es_idx;
-        case 1:
-            return state.cs_idx;
-        case 2:
-            return state.ss_idx;
-        case 3:
-            return state.ds_idx;
-        case 4:
-            return state.fs_idx;
-        case 5:
-            return state.gs_idx;
-        default:
-            return 0;
-        }
-    }
-
-    void fex_vcpu::set_segment_selector(int index, const void* value, size_t size)
-    {
-        uint16_t selector = 0;
-        std::memcpy(&selector, value, (std::min)(size, sizeof(selector)));
-        auto& state = this->cpu_state();
-        switch (index)
-        {
-        case 0:
-            state.es_idx = selector;
-            break;
-        case 1:
-            state.cs_idx = selector;
-            break;
-        case 2:
-            state.ss_idx = selector;
-            break;
-        case 3:
-            state.ds_idx = selector;
-            break;
-        case 4:
-            state.fs_idx = selector;
-            break;
-        case 5:
-            state.gs_idx = selector;
-            break;
-        default:
-            break;
-        }
-    }
-
-    void fex_vcpu::request_thread_stop()
-    {
-        // Forces the in-flight ExecuteThread to return, whether called from the same thread
-        // (synchronously, e.g. from within a syscall hook) or a different one (e.g. a quantum
-        // timer thread). FEXCore's JIT emits a `str zr, [InterruptFaultPage]` at every translated
-        // block's entry when Config.NeedsPendingInterruptFaultCheck is set - protecting that page
-        // makes the next block entry fault, landing in handle_fault_signal, which redirects any
-        // fault on InterruptFaultPage into FEXCore's own ThreadStopHandlerAddress.
-        auto* const active = this->active_thread_.load();
-        if (active == nullptr)
-        {
-            return;
-        }
-
-        ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_NONE);
-    }
-
-    void fex_vcpu::create_thread()
-    {
-        // Seed the FEX thread from the staged CPUState the loader populated before the first start().
-        this->thread_ = this->emulator_.context_->CreateThread(this->staged_state_.rip, this->staged_state_.gregs[detail::greg_rsp],
-                                                               &this->staged_state_);
-        this->active_context_ = this->emulator_.context_.get();
-        this->active_thread_ = this->thread_;
-
-        // FEXCore's core does not set up the "call-ret stack" (its own dedicated shadow stack for
-        // x86 CALL/RET emulation, SRA-mapped to callret_sp) - replicate the embedder glue here.
-        this->ensure_callret_stack(this->thread_->CurrentFrame->State);
-
-#ifdef __APPLE__
-        // See exit_function_link_jit_write_wrapper's doc comment: intercept the plain function-
-        // pointer slot JIT-compiled code calls through to patch call sites, so the write into the
-        // (MAP_JIT) code buffer happens with this thread's JIT write-protection disabled. Every
-        // vCPU's thread shares the same original pointer - write-once.
-        uint64_t expected_zero = 0;
-        g_original_exit_function_link.compare_exchange_strong(expected_zero, this->thread_->CurrentFrame->Pointers.ExitFunctionLink);
-        this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
-#endif
-
-        // Build thread32_ here too, in this ordinary call context, rather than leaving it to be
-        // lazily created on the process's first gate crossing (unsafe from a signal handler).
-        if (this->emulator_.is_wow64_process_ && this->thread32_ == nullptr)
-        {
-            this->create_thread32();
-        }
-    }
-
-    void fex_vcpu::create_thread32()
-    {
-        this->thread32_ = this->emulator_.context32_->CreateThread(0, 0, nullptr);
-
-        // Real Windows shares one GDT across both bitnesses of a wow64 process - point context32_'s
-        // segment table at the exact same physical GDT memory sogen's loader wrote for this vCPU's
-        // context_ engine.
-        const auto rebase = this->emulator_.rebase_for(this->emulator_.is_wow64_process_, this->gdt_base_);
-        this->thread32_->CurrentFrame->State.segment_arrays[0] =
-            reinterpret_cast<FEXCore::Core::CPUState::gdt_segment*>(this->gdt_base_ + rebase);
-
-        // ensure_callret_stack writes into whatever this->active_thread_ currently is - temporarily
-        // point it at the new thread32_ engine so it gets its own private call-ret stack set up
-        // correctly, then restore whatever was active before.
-        auto* const previously_active_thread = this->active_thread_.load();
-        this->active_thread_ = this->thread32_;
-        this->ensure_callret_stack(this->thread32_->CurrentFrame->State);
-        this->active_thread_ = previously_active_thread;
-    }
-
-    void fex_vcpu::ensure_callret_buffer(FEXCore::Core::CPUState& state)
-    {
-        if (state._pad1 == 0)
-        {
-            const size_t host_page = static_cast<size_t>(::getpagesize());
-            constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-            const size_t callret_alloc_size = callret_stack_size + 2 * host_page;
-
-            void* alloc_base = FEXCore::Allocator::mmap(nullptr, callret_alloc_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (alloc_base == MAP_FAILED)
-            {
-                throw std::runtime_error("FEX backend failed to allocate the call-ret stack");
-            }
-
-            auto* callret_stack_base = static_cast<uint8_t*>(alloc_base) + host_page;
-            if (::mprotect(callret_stack_base, callret_stack_size, PROT_READ | PROT_WRITE) != 0)
-            {
-                throw std::runtime_error("FEX backend failed to make the call-ret stack writable");
-            }
-
-            state._pad1 = reinterpret_cast<uint64_t>(callret_stack_base);
-            state.callret_sp = reinterpret_cast<uint64_t>(callret_stack_base) + callret_stack_size / 4;
-
-            const std::unique_lock lock(this->emulator_.tables_mutex_);
-            this->emulator_.callret_buffers_.emplace_back(alloc_base, callret_alloc_size);
-        }
-    }
-
-    void fex_vcpu::ensure_callret_stack(FEXCore::Core::CPUState& state)
-    {
-        this->ensure_callret_buffer(state);
-        this->active_thread_.load()->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
-    }
-
-    void fex_vcpu::invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread,
-                                            uint64_t address, size_t size) const
-    {
-        if (context == nullptr)
-        {
-            return;
-        }
-
-        // InvalidateCodeBuffersCodeRange/InvalidateThreadCachedCodeRange both require the caller to
-        // already hold GetCodeInvalidationMutex() exclusively.
-        std::unique_lock lock(context->GetCodeInvalidationMutex());
-
-#ifdef __APPLE__
-        ::pthread_jit_write_protect_np(0);
-#endif
-        context->InvalidateCodeBuffersCodeRange(address, size);
-        if (thread != nullptr)
-        {
-            context->InvalidateThreadCachedCodeRange(thread, address, size);
-        }
-#ifdef __APPLE__
-        ::pthread_jit_write_protect_np(1);
-#endif
-    }
-
-    void fex_vcpu::invalidate_code_range(uint64_t address, size_t size) const
-    {
-        if (!this->active_context_)
-        {
-            return;
-        }
-
-        // A WoW64 process runs two independent FEXCore contexts, and the one active here is usually not the
-        // one holding the stale code: a 32-bit thread's VirtualProtect/WriteProcessMemory reaches the emulator
-        // through the 64-bit wow64 syscall path.
-        this->invalidate_code_range_in(this->emulator_.context_.get(), this->thread_, address, size);
-        this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
-    }
-
-#ifdef __APPLE__
-    int& fex_vcpu::jit_write_protect_retry_count_for(const uint64_t fault_addr)
-    {
-        const uint64_t now_ns = monotonic_now_ns();
-        jit_write_protect_retry_slot* free_slot = nullptr;
-        for (auto& slot : this->jit_write_protect_retry_slots_)
-        {
-            if (slot.used && slot.address == fault_addr)
-            {
-                if (now_ns - slot.last_fault_ns > jit_write_protect_retry_reset_window_ns)
-                {
-                    slot.count = 0;
-                }
-                slot.last_fault_ns = now_ns;
-                return slot.count;
-            }
-            if (free_slot == nullptr && !slot.used)
-            {
-                free_slot = &slot;
-            }
-        }
-
-        auto& slot =
-            (free_slot != nullptr)
-                ? *free_slot
-                : this->jit_write_protect_retry_slots_[this->jit_write_protect_retry_next_evict_++ % jit_write_protect_retry_slot_count];
-        slot.address = fault_addr;
-        slot.count = 0;
-        slot.used = true;
-        slot.last_fault_ns = now_ns;
-        return slot.count;
-    }
-
-    // Applies a decode_arm64_load result once its data has been fetched - writes the (possibly
-    // extended) value into the destination register and advances PC past the single decoded
-    // instruction.
-    void fex_vcpu::complete_decoded_load(ucontext_t* uctx, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
-    {
-        if (decoded.is_vector)
-        {
-            __uint128_t value{};
-            std::memcpy(&value, data, sizeof(value));
-            auto* fprs = reinterpret_cast<__uint128_t*>(&uctx->uc_mcontext->__ns.__v[0]);
-            fprs[decoded.rt] = value;
-            arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + 4));
-            return;
-        }
-
-        uint64_t raw_value = 0;
-        std::memcpy(&raw_value, data, decoded.size);
-
-        uint64_t result = 0;
-        switch (decoded.size)
-        {
-        case 1:
-            result =
-                decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw_value))) : (raw_value & 0xFFULL);
-            break;
-        case 2:
-            result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw_value)))
-                                         : (raw_value & 0xFFFFULL);
-            break;
-        case 4:
-            result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(raw_value)))
-                                         : (raw_value & 0xFFFFFFFFULL);
-            break;
-        default:
-            result = raw_value;
-            break;
-        }
-
-        if (!decoded.dest_is_64bit)
-        {
-            result &= 0xFFFFFFFFULL;
-        }
-
-        if (decoded.rt <= 28)
-        {
-            uctx->uc_mcontext->__ss.__x[decoded.rt] = result;
-        }
-        else if (decoded.rt == 29)
-        {
-            uctx->uc_mcontext->__ss.__fp = result;
-        }
-        else if (decoded.rt == 30)
-        {
-            uctx->uc_mcontext->__ss.__lr = result;
-        }
-
-        arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + 4));
-    }
-
-    bool fex_vcpu::handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
-    {
-        const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-        const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-        const auto decoded = decode_arm64_load(insn);
-        if (!decoded)
-        {
-            char buf[128];
-            const int len = snprintf(buf, sizeof(buf), "[MMIO] unrecognized instruction 0x%08x at pc=%p for fault_addr=0x%llx\n", insn,
-                                     reinterpret_cast<void*>(pc), static_cast<unsigned long long>(fault_addr));
-            if (len > 0)
-            {
-                const auto write_len = static_cast<size_t>(len) < sizeof(buf) ? static_cast<size_t>(len) : sizeof(buf);
-                ::write(STDERR_FILENO, buf, write_len);
-            }
-            return false;
-        }
-
-        alignas(16) std::byte buffer[16]{};
-        region.read_cb(fault_addr - region.address, buffer, decoded->size);
-        this->complete_decoded_load(uctx, *decoded, buffer, pc);
-        return true;
-    }
-
-    namespace
-    {
-        // x86 keeps plain unaligned loads/stores single-copy atomic as long as they stay inside one
-        // cache line (Intel SDM vol. 3A, 9.1.1), and the faulted LDAR/LDAPR/STLR additionally
-        // carried acquire/release ordering - a plain memcpy emulation provides neither, so another
-        // vCPU doing a concurrent non-faulting access to overlapping bytes could observe a torn
-        // value. Accesses contained in one aligned 16-byte window go through 128-bit atomics
-        // (single-copy atomic per LSE2, which every Apple Silicon core has); accesses spanning two
-        // windows keep the memcpy but regain the ordering via fences - hardware x86 still
-        // guarantees atomicity for those when they stay inside one cache line, an ARM64 host simply
-        // has no primitive wide enough to reproduce it.
-        bool contained_in_atomic_window(const uint64_t addr, const uint32_t size)
-        {
-            constexpr uint64_t window_mask = ~uint64_t{15};
-            return (addr & window_mask) == ((addr + size - 1) & window_mask);
-        }
-
-        void read_memory_single_copy_atomic(const uint64_t addr, void* out, const uint32_t size)
-        {
-            if (contained_in_atomic_window(addr, size))
-            {
-                const uint64_t window = addr & ~uint64_t{15};
-                const auto value = __atomic_load_n(reinterpret_cast<const unsigned __int128*>(window), __ATOMIC_SEQ_CST);
-                std::memcpy(out, reinterpret_cast<const std::byte*>(&value) + (addr - window), size);
-                return;
-            }
-
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            std::memcpy(out, reinterpret_cast<const void*>(addr), size);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-        }
-
-        void write_memory_single_copy_atomic(const uint64_t addr, const void* data, const uint32_t size)
-        {
-            if (contained_in_atomic_window(addr, size))
-            {
-                const uint64_t window = addr & ~uint64_t{15};
-                auto* const target = reinterpret_cast<unsigned __int128*>(window);
-                auto expected = __atomic_load_n(target, __ATOMIC_RELAXED);
-                while (true)
-                {
-                    auto desired = expected;
-                    std::memcpy(reinterpret_cast<std::byte*>(&desired) + (addr - window), data, size);
-                    if (__atomic_compare_exchange_n(target, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
-                    {
-                        return;
-                    }
-                }
-            }
-
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            std::memcpy(reinterpret_cast<void*>(addr), data, size);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-        }
-    }
-
-    // Real hardware LDAR/LDAPR/STLR (load-acquire/store-release) instructions require natural
-    // alignment, unlike plain LDR/STR - but x86 permits unaligned accesses freely, and FEX uses this
-    // family to model x86's stronger memory ordering on ARM's weaker one, so an ordinary unaligned
-    // guest access to otherwise legitimately mapped memory can fault here. Under real multi-vCPU
-    // concurrency, two vCPUs can hit this same handler for the same address at the same time -
-    // tables_mutex_ makes the emulated access mutually exclusive against every other vCPU that also
-    // faults, while the single-copy-atomic helpers above protect against concurrent accesses that
-    // never fault and thus never take the mutex.
-    bool fex_vcpu::handle_misaligned_atomic_fault(ucontext_t* uctx, uint64_t fault_addr)
-    {
-        const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-
-        // FEXCore rewrites a faulting TSO access in its own JIT code into a plain access plus barrier, so
-        // the site stops faulting; emulating it here every time costs a signal per execution.
-        auto* const active = this->active_thread_.load();
-        if (this->active_context_ && this->active_context_->IsAddressInCodeBuffer(active, pc))
-        {
-            ::pthread_jit_write_protect_np(0);
-            const auto pc_adjustment = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
-                active, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc, &uctx->uc_mcontext->__ss.__x[0]);
-            ::pthread_jit_write_protect_np(1);
-            if (pc_adjustment)
-            {
-                arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + *pc_adjustment));
-                return true;
-            }
-        }
-
-        const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-
-        const std::unique_lock lock(this->emulator_.tables_mutex_);
-
-        if (const auto load = decode_arm64_load(insn))
-        {
-            alignas(16) std::byte buffer[16]{};
-            read_memory_single_copy_atomic(fault_addr, buffer, load->size);
-            this->complete_decoded_load(uctx, *load, buffer, pc);
-            return true;
-        }
-
-        if (const auto store = decode_arm64_store(insn))
-        {
-            uint64_t value = 0;
-            if (store->rt <= 28)
-            {
-                value = uctx->uc_mcontext->__ss.__x[store->rt];
-            }
-            else if (store->rt == 29)
-            {
-                value = uctx->uc_mcontext->__ss.__fp;
-            }
-            else if (store->rt == 30)
-            {
-                value = uctx->uc_mcontext->__ss.__lr;
-            }
-
-            write_memory_single_copy_atomic(fault_addr, &value, store->size);
-            arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + 4));
-            return true;
-        }
-
-        return false;
-    }
-
-    bool fex_vcpu::handle_callret_stack_fault(ucontext_t* uctx, uint64_t fault_addr) const
-    {
-        auto* const active = this->active_thread_.load();
-        if (active == nullptr || active->CallRetStackBase == nullptr)
-        {
-            return false;
-        }
-        const auto base = reinterpret_cast<uint64_t>(active->CallRetStackBase);
-        const auto host_page = static_cast<uint64_t>(::getpagesize());
-        constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-        if (fault_addr < base - host_page || fault_addr >= base + callret_stack_size + host_page)
-        {
-            return false;
-        }
-        uctx->uc_mcontext->__ss.__x[25] = base + callret_stack_size / 4;
-        return true;
-    }
-
-    bool fex_vcpu::handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr)
-    {
-        const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-        const auto guest_fault_addr = this->emulator_.unrebase_fault_addr(fault_addr);
-        const auto guest_page = guest_fault_addr & ~(page_size - 1);
-        memory_permission declared;
-        {
-            const std::shared_lock lock(this->emulator_.tables_mutex_);
-            const auto shadow_it = this->emulator_.page_shadow_apple_.find(guest_page);
-            declared = (shadow_it != this->emulator_.page_shadow_apple_.end()) ? shadow_it->second : memory_permission::none;
-        }
-
-        memory_operation operation = memory_operation::exec;
-        if (fault_addr != pc)
-        {
-            const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-            operation = decode_arm64_store(insn) ? memory_operation::write : memory_operation::read;
-        }
-
-        if ((declared & operation) == operation)
-        {
-            // decode_arm64_store does not recognize every store form, but a trapped page only faults on writes.
-            if (this->emulator_.untrap_code_writes_apple(guest_fault_addr))
-            {
-                return true;
-            }
-            return this->handle_misaligned_atomic_fault(uctx, fault_addr);
-        }
-
-        const auto type = (declared == memory_permission::none) ? memory_violation_type::unmapped : memory_violation_type::protection;
-
-        // This fault interrupted live guest-translated JIT code at an arbitrary point. Reconstruct the
-        // real guest rip from the live host PC (FEX's block-chaining advances execution without
-        // rewriting CurrentFrame->State.rip, which is frequently stale here).
-        auto* const active = this->active_thread_.load();
-        if (const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(active, pc))
-        {
-            active->CurrentFrame->State.rip = recon_rip;
-        }
-
-        pending_fault_dispatch dispatch{};
-        dispatch.kind = pending_fault_kind::memory_violation;
-        dispatch.address = guest_fault_addr;
-        dispatch.size = 1;
-        dispatch.operation = operation;
-        dispatch.type = type;
-
-        this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/false);
-        return true;
-    }
-
-    bool fex_vcpu::host_pc_in_any_dispatcher(uint64_t pc) const
-    {
-        for (const auto* delegator : {this->emulator_.signal_delegator_.get(), this->emulator_.signal_delegator32_.get()})
-        {
-            if (delegator == nullptr)
-            {
-                continue;
-            }
-            const auto& cfg = delegator->GetConfig();
-            if (pc >= cfg.DispatcherBegin && pc < cfg.DispatcherEnd)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // context_/context32_ each own an independently JIT-compiled dispatcher (ThreadStopHandlerAddress
-    // and friends live at different host addresses per context), so redirecting a fault into "the"
-    // stop handler must pick the delegator matching whichever context actually faulted - see the same
-    // active_context_-keyed selection already done for the vector==14 gate-crossing case below.
-    FEXCore::SignalDelegator* fex_vcpu::active_signal_delegator() const
-    {
-        return (this->active_context_ == this->emulator_.context32_.get()) //
-                   ? this->emulator_.signal_delegator32_.get()
-                   : this->emulator_.signal_delegator_.get();
-    }
-
-    bool fex_vcpu::dispatch_pending_hook_if_any()
-    {
-        const pending_fault_dispatch dispatch = this->pending_fault_dispatch_;
-        this->pending_fault_dispatch_.kind = pending_fault_kind::none;
-
-        switch (dispatch.kind)
-        {
-        case pending_fault_kind::memory_violation:
-            for (auto& [_, hook] : this->emulator_.memory_violation_hooks_)
-            {
-                hook(*this, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
-            }
-            return true;
-        case pending_fault_kind::interrupt:
-#ifdef __APPLE__
-            if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_BP) &&
-                this->handle_patched_execution_breakpoint(this->cpu_state().rip - 1))
-            {
-                return true;
-            }
-            if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_DB) && this->complete_execution_step())
-            {
-                return true;
-            }
-#endif
-            for (auto& [_, hook] : this->emulator_.interrupt_hooks_)
-            {
-                hook(*this, dispatch.vector);
-            }
-            return true;
-        case pending_fault_kind::gate_crossing:
-            return true;
-        case pending_fault_kind::none:
-        default:
-            return false;
-        }
-    }
-
-    void fex_vcpu::defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled)
-    {
-        this->pending_fault_dispatch_ = dispatch;
-        const auto& cfg = this->active_signal_delegator()->GetConfig();
-        const auto target = sra_already_spilled ? cfg.ThreadStopHandlerAddress : cfg.ThreadStopHandlerAddressSpillSRA;
-        arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(target));
-    }
-
-    bool fex_vcpu::enter_wow64_32bit_from_run_simulated_code(const gate_crossing& gate)
-    {
-        const auto& src = this->thread_->CurrentFrame->State;
-
-        uint64_t teb64 = 0;
-        if (!this->emulator_.try_read_memory(src.gs_cached + 0x30, &teb64, sizeof(teb64)) || teb64 == 0)
-        {
-            return false;
-        }
-        uint64_t cpu_area = 0;
-        if (!this->emulator_.try_read_memory(teb64 + 0x1488, &cpu_area, sizeof(cpu_area)) || cpu_area == 0)
-        {
-            return false;
-        }
-        const uint64_t block = cpu_area + 0x80;
-
-        bool reads_ok = true;
-        const auto read32 = [&](uint64_t offset) -> uint32_t {
-            uint32_t value = 0;
-            if (!this->emulator_.try_read_memory(block + offset, &value, sizeof(value)))
-            {
-                reads_ok = false;
-            }
-            return value;
-        };
-
-        const uint32_t edi = read32(0x20);
-        const uint32_t esi = read32(0x24);
-        const uint32_t ebx = read32(0x28);
-        const uint32_t edx = read32(0x2c);
-        const uint32_t ecx = read32(0x30);
-        const uint32_t eax = read32(0x34);
-        const uint32_t ebp = read32(0x38);
-        const uint32_t eip = read32(0x3c);
-        const uint32_t eflags = read32(0x44);
-        const uint32_t esp = read32(0x48);
-
-        if (!reads_ok)
-        {
-            return false;
-        }
-
-        if (this->thread32_ == nullptr)
-        {
-            return false;
-        }
-        auto& dst = this->thread32_->CurrentFrame->State;
-
-        marshal_architectural_state(src, dst);
-
-        dst.gregs[detail::greg_rax] = eax;
-        dst.gregs[detail::greg_rcx] = ecx;
-        dst.gregs[detail::greg_rdx] = edx;
-        dst.gregs[detail::greg_rbx] = ebx;
-        dst.gregs[detail::greg_rsp] = esp;
-        dst.gregs[detail::greg_rbp] = ebp;
-        dst.gregs[detail::greg_rsi] = esi;
-        dst.gregs[detail::greg_rdi] = edi;
-        dst.rip = eip;
-        set_flags_from_compacted_eflags(dst, eflags);
-
-        for (int i = 0; i < 6; ++i)
-        {
-            this->emulator_.try_read_memory(block + 0xf0 + static_cast<uint64_t>(i) * 0x10, &dst.xmm.avx.data[i][0], 16);
-        }
-
-        dst.cs_idx = 0x23;
-        dst.ss_idx = 0x2b;
-        dst.ds_idx = 0x2b;
-        dst.es_idx = 0x2b;
-        dst.fs_idx = 0x53;
-        dst.gs_idx = 0;
-        dst.cs_cached = fex_x86_64_emulator::gdt_segment_base(dst, 0x23);
-        dst.ss_cached = fex_x86_64_emulator::gdt_segment_base(dst, 0x2b);
-        dst.ds_cached = fex_x86_64_emulator::gdt_segment_base(dst, 0x2b);
-        dst.es_cached = fex_x86_64_emulator::gdt_segment_base(dst, 0x2b);
-        dst.fs_cached = fex_x86_64_emulator::gdt_segment_base(dst, 0x53);
-        dst.gs_cached = 0;
-
-        auto& state64 = this->thread_->CurrentFrame->State;
-        if (src.rip == gate.address)
-        {
-            const uint64_t entry_rsp = state64.gregs[detail::greg_rsp];
-            const auto spill = [&](uint64_t below_entry, int greg) {
-                const uint64_t value = state64.gregs[greg];
-                this->emulator_.write_marshal_state(entry_rsp - below_entry, &value, sizeof(value));
-            };
-            spill(0x08, 15);
-            spill(0x10, 14);
-            spill(0x18, 13);
-            spill(0x20, 12);
-            spill(0x28, detail::greg_rbx);
-            spill(0x30, detail::greg_rsi);
-            spill(0x38, detail::greg_rdi);
-            spill(0x40, detail::greg_rbp);
-            state64.gregs[detail::greg_rsp] = entry_rsp - 0xA8;
-        }
-
-        state64.gregs[12] = teb64;
-        state64.gregs[13] = block;
-        state64.gregs[14] = state64.gregs[detail::greg_rsp];
-        state64.gregs[15] = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0;
-
-        this->active_context_ = this->emulator_.context32_.get();
-        this->active_thread_ = this->thread32_;
-        return true;
-    }
-
-    bool fex_vcpu::enter_wow64_64bit_from_wow64svc_thunk(const gate_crossing& gate)
-    {
-        const uint64_t image_base = gate.address & ~static_cast<uint64_t>(0xFFFF);
-        const uint64_t generic_dispatch =
-            this->emulator_.wow64_turbo_dispatch_end_ != 0 ? this->emulator_.wow64_turbo_dispatch_end_ : image_base + 0x17af;
-        const uint64_t jump_table = image_base + 0x36d0;
-
-        auto* const active = this->active_thread_.load();
-        const auto& src32 = active->CurrentFrame->State;
-        const uint32_t eax = static_cast<uint32_t>(src32.gregs[detail::greg_rax]);
-        const uint32_t ecx = static_cast<uint32_t>(src32.gregs[detail::greg_rcx]);
-        const uint32_t edx = static_cast<uint32_t>(src32.gregs[detail::greg_rdx]);
-        const uint32_t ebx = static_cast<uint32_t>(src32.gregs[detail::greg_rbx]);
-        const uint32_t ebp = static_cast<uint32_t>(src32.gregs[detail::greg_rbp]);
-        const uint32_t esi = static_cast<uint32_t>(src32.gregs[detail::greg_rsi]);
-        const uint32_t edi = static_cast<uint32_t>(src32.gregs[detail::greg_rdi]);
-        const uint32_t esp = static_cast<uint32_t>(src32.gregs[detail::greg_rsp]);
-        const uint32_t eflags = reconstruct_compacted_eflags(src32);
-
-        uint32_t return_eip = 0;
-        if (!this->emulator_.try_read_memory(esp, &return_eip, sizeof(return_eip)))
-        {
-            return false;
-        }
-
-        const auto& state64 = this->thread_->CurrentFrame->State;
-        uint64_t teb64 = 0;
-        if (!this->emulator_.try_read_memory(state64.gs_cached + 0x30, &teb64, sizeof(teb64)) || teb64 == 0)
-        {
-            return false;
-        }
-        uint64_t cpu_area = 0;
-        if (!this->emulator_.try_read_memory(teb64 + 0x1488, &cpu_area, sizeof(cpu_area)) || cpu_area == 0)
-        {
-            return false;
-        }
-        const uint64_t block = cpu_area + 0x80;
-
-        const auto write32 = [&](uint64_t offset, uint32_t value) {
-            this->emulator_.write_marshal_state(block + offset, &value, sizeof(value));
-        };
-        write32(0x20, edi);
-        write32(0x24, esi);
-        write32(0x28, ebx);
-        write32(0x2c, edx);
-        write32(0x30, ecx);
-        write32(0x34, eax);
-        write32(0x38, ebp);
-        write32(0x3c, return_eip);
-        write32(0x44, eflags);
-        write32(0x48, esp + 4);
-        for (int i = 0; i < 6; ++i)
-        {
-            this->emulator_.write_marshal_state(block + 0xf0 + static_cast<uint64_t>(i) * 0x10, &src32.xmm.avx.data[i][0], 16);
-        }
-
-        auto& dst64 = this->thread_->CurrentFrame->State;
-        dst64.rip = generic_dispatch;
-        dst64.gregs[detail::greg_rax] = eax;
-        dst64.gregs[detail::greg_rcx] = ecx;
-        dst64.gregs[detail::greg_rdx] = edx;
-        dst64.gregs[detail::greg_rbx] = ebx;
-        dst64.gregs[detail::greg_rbp] = ebp;
-        dst64.gregs[detail::greg_rsi] = esi;
-        dst64.gregs[detail::greg_rdi] = edi;
-        dst64.gregs[11] = static_cast<uint64_t>(esp) + 8;
-        dst64.gregs[13] = block;
-        dst64.gregs[15] = jump_table;
-
-        this->active_context_ = this->emulator_.context_.get();
-        this->active_thread_ = this->thread_;
-
-        return true;
-    }
-
-    bool fex_vcpu::enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
-    {
-        return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
-    }
-
-    bool fex_vcpu::perform_bitness_switch(const uint64_t target_rip, const uint64_t target_rsp, const uint16_t target_cs)
-    {
-        auto* const acting_thread = this->active_thread_.load();
-        const auto& src = acting_thread->CurrentFrame->State;
-        const bool target_is_64bit = (target_cs == wow64_user_code_selector_64bit);
-
-        FEXCore::Context::Context* dst_context = nullptr;
-        FEXCore::Core::InternalThreadState* dst_thread = nullptr;
-        if (target_is_64bit)
-        {
-            dst_context = this->emulator_.context_.get();
-            dst_thread = this->thread_;
-        }
-        else
-        {
-            if (this->thread32_ == nullptr)
-            {
-                return false;
-            }
-            dst_context = this->emulator_.context32_.get();
-            dst_thread = this->thread32_;
-        }
-
-        auto& dst = dst_thread->CurrentFrame->State;
-
-        const auto saved_es_idx = dst.es_idx;
-        const auto saved_cs_idx = dst.cs_idx;
-        const auto saved_ss_idx = dst.ss_idx;
-        const auto saved_ds_idx = dst.ds_idx;
-        const auto saved_fs_idx = dst.fs_idx;
-        const auto saved_gs_idx = dst.gs_idx;
-        const auto saved_es_cached = dst.es_cached;
-        const auto saved_cs_cached = dst.cs_cached;
-        const auto saved_ss_cached = dst.ss_cached;
-        const auto saved_ds_cached = dst.ds_cached;
-        const auto saved_fs_cached = dst.fs_cached;
-        const auto saved_gs_cached = dst.gs_cached;
-
-        const auto saved_r12 = dst.gregs[12];
-        const auto saved_r13 = dst.gregs[13];
-        const auto saved_r14 = dst.gregs[14];
-        const auto saved_r15 = dst.gregs[15];
-
-        const auto saved_rax = dst.gregs[detail::greg_rax];
-        const auto saved_rbx = dst.gregs[detail::greg_rbx];
-        const auto saved_rcx = dst.gregs[detail::greg_rcx];
-        const auto saved_rdx = dst.gregs[detail::greg_rdx];
-
-        marshal_architectural_state(src, dst);
-
-        dst.es_idx = saved_es_idx;
-        dst.cs_idx = saved_cs_idx;
-        dst.ss_idx = saved_ss_idx;
-        dst.ds_idx = saved_ds_idx;
-        dst.fs_idx = saved_fs_idx;
-        dst.gs_idx = saved_gs_idx;
-        dst.es_cached = saved_es_cached;
-        dst.cs_cached = saved_cs_cached;
-        dst.ss_cached = saved_ss_cached;
-        dst.ds_cached = saved_ds_cached;
-        dst.fs_cached = saved_fs_cached;
-        dst.gs_cached = saved_gs_cached;
-        dst.gregs[12] = saved_r12;
-        dst.gregs[13] = saved_r13;
-        dst.gregs[14] = saved_r14;
-        dst.gregs[15] = saved_r15;
-        dst.gregs[detail::greg_rax] = saved_rax;
-        dst.gregs[detail::greg_rbx] = saved_rbx;
-        dst.gregs[detail::greg_rcx] = saved_rcx;
-        dst.gregs[detail::greg_rdx] = saved_rdx;
-
-        dst.rip = target_rip;
-        dst.gregs[detail::greg_rsp] = target_rsp;
-
-        this->active_context_ = dst_context;
-        this->active_thread_ = dst_thread;
-        return true;
-    }
-
-    bool fex_vcpu::perform_gate_crossing(const gate_crossing& gate)
-    {
-        if (gate.kind == gate_crossing_kind::wow64_run_simulated_code)
-        {
-            return this->enter_wow64_32bit_from_run_simulated_code(gate);
-        }
-
-        if (gate.kind == gate_crossing_kind::wow64cpu_dispatch)
-        {
-            return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
-        }
-
-        if (gate.kind == gate_crossing_kind::far_jmp_bitness_switch)
-        {
-            return this->enter_bitness_switch_from_far_jmp(gate);
-        }
-
-        auto* const active = this->active_thread_.load();
-        const auto& src = active->CurrentFrame->State;
-        return this->perform_bitness_switch(src.gregs[detail::greg_rax], src.gregs[detail::greg_rbx],
-                                            static_cast<uint16_t>(src.gregs[detail::greg_rcx]));
-    }
-
-    bool fex_vcpu::handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext)
-    {
-        auto* const active_thread = this->active_thread_.load();
-        if (active_thread == nullptr)
-        {
-            return false;
-        }
-
-        auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
-
-        if (sig == SIGSEGV || sig == SIGBUS)
-        {
-            const auto fault_addr = reinterpret_cast<uint64_t>(info->si_addr);
-
-            const auto interrupt_page_addr = reinterpret_cast<uint64_t>(active_thread->InterruptFaultPage);
-            if (fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(active_thread->InterruptFaultPage))
-            {
-                const auto fault_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-                const bool is_dispatch_code =
-                    this->active_context_ && this->active_context_->IsAddressInCodeBuffer(active_thread, fault_pc);
-
-                const bool is_strb_epilogue_write = (*reinterpret_cast<const uint32_t*>(fault_pc) & 0xFFC00000u) == 0x39000000u;
-
-                if (is_dispatch_code && !is_strb_epilogue_write)
-                {
-                    active_thread->CurrentFrame->State.rip = this->active_context_->RestoreRIPFromHostPC(active_thread, fault_pc);
-                    this->interrupt_page_unwind_ = true;
-                    const auto& stop_cfg = this->active_signal_delegator()->GetConfig();
-                    arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss,
-                                                   reinterpret_cast<void*>(stop_cfg.ThreadStopHandlerAddressSpillSRA));
-                    return true;
-                }
-
-                arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(fault_pc + 4));
-                return true;
-            }
-
-            {
-                const auto host_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-                if (fault_addr == host_pc && this->host_pc_in_any_dispatcher(host_pc))
-                {
-                    ::pthread_jit_write_protect_np(1);
-                    return true;
-                }
-            }
-
-            if (this->handle_callret_stack_fault(uctx, fault_addr))
-            {
-                return true;
-            }
-
-            const auto pc_for_mmio_check = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-            if (fault_addr != pc_for_mmio_check)
-            {
-                const auto guest_fault_addr = this->emulator_.unrebase_fault_addr(fault_addr);
-                const std::shared_lock lock(this->emulator_.tables_mutex_);
-                for (const auto& region : this->emulator_.mmio_regions_)
-                {
-                    if (guest_fault_addr >= region.address && guest_fault_addr < region.address + region.size)
-                    {
-                        return this->handle_mmio_fault(uctx, region, guest_fault_addr);
-                    }
-                }
-            }
-
-            if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->active_context_ &&
-                this->active_context_->IsAddressInCodeBuffer(active_thread, fault_addr))
-            {
-                auto& retry_count = this->jit_write_protect_retry_count_for(fault_addr);
-                constexpr int max_write_protect_retries = 4;
-                if (retry_count < max_write_protect_retries)
-                {
-                    ++retry_count;
-                    ::pthread_jit_write_protect_np(0);
-                    return true;
-                }
-            }
-
-            if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->handle_general_memory_violation(uctx, fault_addr))
-            {
-                return true;
-            }
-        }
-
-        if ((sig == SIGSEGV || sig == SIGBUS) && (info->si_code == SEGV_ACCERR || info->si_code == SEGV_MAPERR))
-        {
-            const auto guard_page = active_thread->JITGuardPage;
-            const auto fault_addr = reinterpret_cast<uintptr_t>(info->si_addr);
-            if (guard_page != 0 && fault_addr >= guard_page && fault_addr < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
-            {
-                auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
-                auto* fprs = reinterpret_cast<__uint128_t*>(&uctx->uc_mcontext->__ns.__v[0]);
-                auto* pc_ptr = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss.__pc);
-                FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(active_thread->RestartJump, active_thread->JITGuardOverflowArgument, gprs,
-                                                                fprs, pc_ptr);
-                return true;
-            }
-
-            if (this->active_context_ && this->active_context_->IsAddressInCodeBuffer(active_thread, fault_addr))
-            {
-                const auto fault_addr_u64 = reinterpret_cast<uint64_t>(info->si_addr);
-                auto& retry_count = this->jit_write_protect_retry_count_for(fault_addr_u64);
-                constexpr int max_write_protect_retries = 4;
-                if (retry_count < max_write_protect_retries)
-                {
-                    ++retry_count;
-                    const uint64_t faulting_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-                    const bool is_instruction_fetch = (faulting_pc == fault_addr_u64);
-                    ::pthread_jit_write_protect_np(is_instruction_fetch ? 1 : 0);
-                    return true;
-                }
-            }
-        }
-
-        const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-
-        if (!this->host_pc_in_any_dispatcher(pc))
-        {
-            if ((sig == SIGSEGV || sig == SIGBUS) && this->active_context_ &&
-                this->active_context_->IsAddressInCodeBuffer(active_thread, pc) &&
-                this->handle_general_memory_violation(uctx, reinterpret_cast<uint64_t>(info->si_addr)))
-            {
-                return true;
-            }
-
-            return false;
-        }
-
-        auto* frame = active_thread->CurrentFrame;
-        if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
-        {
-            return false;
-        }
-
-        auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
-
-        constexpr int gp_fault_vector = 13;
-        constexpr uint32_t idt_reference_bit = 0x2;
-        if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
-        {
-            vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
-        }
-
-        frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
-
-        pending_fault_dispatch dispatch{};
-        if (vector == 14)
-        {
-            if (const auto gate = this->emulator_.find_gate_crossing(frame->State.rip))
-            {
-                auto* const source_signal_delegator = (this->active_context_ == this->emulator_.context32_.get())
-                                                          ? this->emulator_.signal_delegator32_.get()
-                                                          : this->emulator_.signal_delegator_.get();
-
-                if (this->perform_gate_crossing(*gate))
-                {
-                    this->pending_fault_dispatch_.kind = pending_fault_kind::gate_crossing;
-                    const auto& stop_cfg = source_signal_delegator->GetConfig();
-                    arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(stop_cfg.ThreadStopHandlerAddress));
-                    return true;
-                }
-            }
-
-            const auto err_code = frame->SynchronousFaultData.err_code;
-            const bool is_write = (err_code & 0x2) != 0;
-            const bool is_instr_fetch = (err_code & 0x10) != 0;
-            dispatch.kind = pending_fault_kind::memory_violation;
-            dispatch.address = frame->State.rip;
-            dispatch.size = 1;
-            dispatch.operation = is_instr_fetch ? memory_operation::exec : is_write ? memory_operation::write : memory_operation::read;
-            dispatch.type = (err_code & 0x1) ? memory_violation_type::protection : memory_violation_type::unmapped;
-        }
-        else
-        {
-            dispatch.kind = pending_fault_kind::interrupt;
-            dispatch.vector = vector;
-        }
-
-        this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/true);
-        return true;
-    }
-#endif
-
-#ifdef __APPLE__
-    namespace
-    {
-        void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext)
-        {
-            auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
-
-            const bool handled = t_current_vcpu != nullptr && t_current_vcpu->handle_fault_signal(sig, info, raw_ucontext);
-            if (handled)
-            {
-                return;
-            }
-
-            char buf[1024];
-            const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-            int len = snprintf(buf, sizeof(buf), "[FEX backend] unhandled signal %d si_code=%d at pc=0x%llx fault_addr=%p\n", sig,
-                               info->si_code, static_cast<unsigned long long>(pc), info->si_addr);
-            // Full host GPR dump: a wild host-level branch (e.g. a corrupt JIT link target) leaves its
-            // source only in registers - lr identifies a blr's call site, x25 (REG_CALLRET_SP) the
-            // call-ret shadow stack, x28 (STATE) the engine thread - none of which the pc/fault_addr
-            // line alone can recover post-mortem.
-            if (len > 0 && static_cast<size_t>(len) < sizeof(buf))
-            {
-                const auto& ss = uctx->uc_mcontext->__ss;
-                for (int i = 0; i < 29 && static_cast<size_t>(len) < sizeof(buf); ++i)
-                {
-                    len += snprintf(buf + len, sizeof(buf) - static_cast<size_t>(len), "x%d=0x%llx%s", i,
-                                    static_cast<unsigned long long>(ss.__x[i]), (i % 6 == 5) ? "\n" : " ");
-                }
-                if (static_cast<size_t>(len) < sizeof(buf))
-                {
-                    len += snprintf(buf + len, sizeof(buf) - static_cast<size_t>(len), "fp=0x%llx lr=0x%llx sp=0x%llx\n",
-                                    static_cast<unsigned long long>(arm_thread_state64_get_fp(ss)),
-                                    static_cast<unsigned long long>(arm_thread_state64_get_lr(ss)),
-                                    static_cast<unsigned long long>(arm_thread_state64_get_sp(ss)));
-                }
-            }
-            if (len > 0)
-            {
-                const auto write_len = static_cast<size_t>(len) < sizeof(buf) ? static_cast<size_t>(len) : sizeof(buf);
-                ::write(STDERR_FILENO, buf, write_len);
-            }
-
-            struct sigaction default_action = {};
-            default_action.sa_handler = SIG_DFL;
-            ::sigaction(sig, &default_action, nullptr);
-            ::raise(sig);
-        }
-    } // namespace
-#endif
-
-    // -----------------------------------------------------------------------------------------------
-    // fex_syscall_handler method bodies (fex_x86_64_emulator and fex_vcpu are now complete).
-    // -----------------------------------------------------------------------------------------------
-
     uint64_t fex_syscall_handler::HandleSyscall(FEXCore::Core::CpuStateFrame* /*frame*/, FEXCore::HLE::SyscallArguments* /*args*/)
     {
-        // Called from the guest-execution thread that issued this syscall, so t_current_vcpu (set for
-        // the duration of fex_vcpu::start()'s ExecuteThread loop) is the correct acting vCPU - not
-        // always vcpu 0, under real multi-vCPU concurrency.
-        auto* const vcpu = t_current_vcpu;
-
+        // SyscallOp sets CPUState.rip to the address of the `syscall` instruction itself before invoking
+        // us, which is the convention sogen's shared syscall layer expects: it leaves rip so that
+        // advancing by the 2-byte syscall length always yields the intended next rip - the following
+        // instruction for a plain syscall, and the real target for a redirecting one, which sets
+        // rip = target - 2. On non-_WIN32 hosts `syscall` is not FLAGS_BLOCK_END, so without the
+        // unconditional advance below the JIT falls through and either re-executes the syscall on block
+        // re-entry or, for a redirect, branches into the middle of an instruction at target - 2.
+        auto& vcpu = *t_running_vcpu;
         auto* hook = this->emulator_.syscall_hook_;
         if (hook != nullptr && hook->callback)
         {
-            hook->callback(*vcpu, 0);
+            // The Windows syscall layer reads/writes guest registers itself through the emulator, so the
+            // hook needs no data argument here. It places the NT status in RAX before returning.
+            hook->callback(vcpu, 0);
         }
 
-        vcpu->cpu_state().rip += 2;
+        this->emulator_.refresh_mmio_backings();
+        vcpu.cpu_state().rip += 2;
 
-        if (vcpu->stop_requested_)
+        if (vcpu.stop_requested_)
         {
-            vcpu->request_thread_stop();
+            vcpu.request_thread_stop();
         }
+#ifdef __APPLE__
+        else
+        {
+            this->emulator_.arm_watchpoints_apple(vcpu);
+        }
+#endif
 
-        return vcpu->cpu_state().gregs[detail::greg_rax];
+        // FEX writes our return value into guest RAX; hand back whatever the hook already set so the
+        // value is preserved.
+        return vcpu.cpu_state().gregs[detail::greg_rax];
     }
 
     FEXCore::HLE::ExecutableRangeInfo fex_syscall_handler::QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* /*thread*/,
                                                                                      uint64_t address)
     {
-        const std::shared_lock lock(this->emulator_.tables_mutex_);
-
-        for (const auto& gate : this->emulator_.gate_crossings_)
-        {
-            if (address >= gate.address && address < gate.address + gate.size)
-            {
-                return {};
-            }
-        }
-
+        // FEXCore checks this before compiling a guest address and synthesizes a #PF if it is not
+        // reported executable here, so a blanket {} would make every guest instruction fetch look like
+        // a DEP violation.
+        const tables_lock lock(this->emulator_.tables_mutex_, false);
         auto& regions = this->emulator_.regions_;
         auto it = regions.upper_bound(address);
         if (it == regions.begin())
@@ -5713,43 +6190,219 @@ namespace sogen::fex
             return {};
         }
 
-        uint64_t base = it->first;
-        uint64_t end = region_end;
-        for (const auto& gate : this->emulator_.gate_crossings_)
-        {
-            const uint64_t gate_end = gate.address + gate.size;
-            if (gate_end <= address)
-            {
-                base = (std::max)(base, gate_end);
-            }
-            else if (gate.address > address)
-            {
-                end = (std::min)(end, gate.address);
-            }
-        }
-
         return {
-            .Base = base,
-            .Size = end - base,
+            .Base = it->first,
+            .Size = region_end - it->first,
             .Writable = (perms & memory_permission::write) != memory_permission::none,
         };
+    }
+
+    void fex_syscall_handler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* /*thread*/, const uint64_t start,
+                                                       const uint64_t length)
+    {
+        const tables_lock lock(this->emulator_.tables_mutex_, true);
+        for (uint64_t page = start & ~(page_size - 1); page < start + length; page += page_size)
+        {
+            this->emulator_.code_pages_.insert(page);
+        }
+
+#ifdef __APPLE__
+        this->emulator_.trap_code_writes_apple(start, length);
+#endif
     }
 
     std::optional<FEXCore::ExecutableFileSectionInfo> fex_syscall_handler::LookupExecutableFileSection(
         FEXCore::Core::InternalThreadState* /*thread*/, uint64_t /*guest_addr*/)
     {
+        // We do not back guest code by host file sections, so there is nothing to look up.
         return std::nullopt;
     }
 
-#ifdef __APPLE__
-    void fex_syscall_handler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* /*thread*/, const uint64_t start,
-                                                       const uint64_t length)
+    void fex_vcpu::arm_execution_single_step(const bool stop_after_step)
     {
-        this->emulator_.trap_code_writes_apple(start, length);
-    }
-#endif
+        if (this->pending_execution_step_)
+        {
+            throw std::runtime_error("Nested FEX execution single-step state is not supported");
+        }
 
-    std::unique_ptr<x86_64_emulator> create_x86_64_emulator(size_t vcpu_count)
+        const auto rflags = this->read_rflags();
+        this->pending_execution_step_ = pending_execution_step{
+            .had_trap_flag = (rflags & trap_flag_bit) != 0,
+            .stop_after_step = stop_after_step,
+        };
+        this->write_rflags(rflags | trap_flag_bit);
+    }
+
+    pending_execution_step fex_vcpu::take_pending_execution_step()
+    {
+        const auto state = *std::exchange(this->pending_execution_step_, std::nullopt);
+        const auto rflags = this->read_rflags();
+        this->write_rflags(state.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+        return state;
+    }
+
+    // Returns whether the #DB was this backend's own step, which the guest does not see. A #DB the guest asked for with
+    // its own TF still reaches the interrupt hooks.
+    bool fex_vcpu::complete_execution_step()
+    {
+        if (!this->pending_execution_step_)
+        {
+            return false;
+        }
+
+        pending_execution_step state{};
+        bool replanted = false;
+        {
+            const tables_lock lock(this->emulator_.tables_mutex_, true);
+            state = this->take_pending_execution_step();
+            if (state.patched_breakpoint)
+            {
+                replanted = this->emulator_.set_patched_execution_breakpoint_state(*state.patched_breakpoint, true);
+            }
+        }
+
+        if (replanted)
+        {
+            this->emulator_.invalidate_code_range(*state.patched_breakpoint, 1);
+        }
+
+        if (state.stop_after_step)
+        {
+            this->stop_requested_ = true;
+        }
+
+        return !state.had_trap_flag;
+    }
+
+    void fex_vcpu::abandon_execution_step()
+    {
+        if (!this->pending_execution_step_)
+        {
+            return;
+        }
+
+        const tables_lock lock(this->emulator_.tables_mutex_, true);
+        const auto state = this->take_pending_execution_step();
+        if (state.patched_breakpoint)
+        {
+            this->deferred_patched_breakpoint_ = state.patched_breakpoint;
+        }
+    }
+
+    // A breakpoint left deferred by the previous run is only stepped over once execution actually resumes on it. If RIP
+    // moved away in the meantime (a debugger redirected it, or a state was restored), the breakpoint is planted again.
+    void fex_vcpu::resume_deferred_patched_breakpoint(const size_t count)
+    {
+        if (!this->deferred_patched_breakpoint_)
+        {
+            return;
+        }
+
+        const auto address = *this->deferred_patched_breakpoint_;
+        bool replanted = false;
+        {
+            const tables_lock lock(this->emulator_.tables_mutex_, true);
+            this->deferred_patched_breakpoint_.reset();
+            if (this->cpu_state().rip == address)
+            {
+                this->arm_execution_single_step(count == 1);
+                this->pending_execution_step_->patched_breakpoint = address;
+            }
+            else
+            {
+                replanted = this->emulator_.set_patched_execution_breakpoint_state(address, true);
+            }
+        }
+
+        if (replanted)
+        {
+            this->emulator_.invalidate_code_range(address, 1);
+        }
+    }
+
+    // Called for a #BP with RIP at the trapping 0xCC. Returns false for a 0xCC that is not one of ours - a guest int3, or
+    // the original instruction under our breakpoint being an int3 itself - which then reaches the interrupt hooks.
+    bool fex_vcpu::handle_patched_execution_breakpoint(const uint64_t address)
+    {
+        if (this->pending_execution_step_ && this->pending_execution_step_->patched_breakpoint == address)
+        {
+            this->complete_execution_step();
+            return false;
+        }
+
+        std::vector<memory_execution_hook_callback> callbacks{};
+        {
+            const tables_lock lock(this->emulator_.tables_mutex_, false);
+            if (!this->emulator_.patched_execution_breakpoints_.contains(address))
+            {
+                return false;
+            }
+
+            for (const auto& [_, hook] : this->emulator_.memory_execution_hooks_)
+            {
+                if (hook.patched_breakpoint && hook.address == address)
+                {
+                    callbacks.push_back(hook.callback);
+                }
+            }
+        }
+
+        // The 0xCC stays planted while the callbacks run (they may block on the kernel lock), so other vCPUs executing
+        // this address in the meantime still hit it.
+        for (const auto& callback : callbacks)
+        {
+            callback(*this, address);
+        }
+
+        bool restored = false;
+        std::optional<uint64_t> replanted{};
+        {
+            const tables_lock lock(this->emulator_.tables_mutex_, true);
+            restored = this->emulator_.set_patched_execution_breakpoint_state(address, false);
+
+            if (this->pending_execution_step_)
+            {
+                const auto vacated = std::exchange(this->pending_execution_step_->patched_breakpoint, std::nullopt);
+                if (vacated && this->emulator_.set_patched_execution_breakpoint_state(*vacated, true))
+                {
+                    replanted = vacated;
+                }
+            }
+
+            if (this->stop_requested_)
+            {
+                this->deferred_patched_breakpoint_ = address;
+            }
+            else
+            {
+                if (!this->pending_execution_step_)
+                {
+                    this->arm_execution_single_step(false);
+                }
+                else
+                {
+                    // The trap on the 0xCC used up the one instruction FEXCore's TF check lets run after TF is set, so
+                    // without setting TF again the #DB would fire before the restored original instruction executes.
+                    this->write_rflags(this->read_rflags() | trap_flag_bit);
+                }
+
+                this->pending_execution_step_->patched_breakpoint = address;
+            }
+        }
+
+        if (restored)
+        {
+            this->emulator_.invalidate_code_range(address, 1);
+        }
+        if (replanted)
+        {
+            this->emulator_.invalidate_code_range(*replanted, 1);
+        }
+
+        return true;
+    }
+
+    std::unique_ptr<x86_64_emulator> create_x86_64_emulator(const size_t vcpu_count)
     {
         return std::make_unique<fex_x86_64_emulator>(vcpu_count);
     }

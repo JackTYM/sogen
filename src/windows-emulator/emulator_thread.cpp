@@ -4,12 +4,12 @@
 #include "cpu_context.hpp"
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
+#include "debug_object.hpp"
 #include "syscall_utils.hpp"
 #include "syscalls/wait_trace.hpp"
 
 namespace sogen
 {
-
     namespace
     {
         // TEB64/TEB32's NlsCache field is a pointer real ntdll (LdrpInitializeProcess) allocates and
@@ -104,24 +104,31 @@ namespace sogen
             }
         }
 
-        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id)
+        wait_state observe_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
         {
+            auto& c = win_emu.process;
             const auto type = h.value.type;
 
             switch (type)
             {
+            case handle_types::device: {
+                const auto* container = c.devices.get(h);
+                const auto* pipe = container ? container->get_internal_device<named_pipe>() : nullptr;
+                return pipe && pipe->signaled ? wait_state::signaled : wait_state::not_signaled;
+            }
             default:
                 break;
 
             case handle_types::process: {
                 if (h == GUEST_PROCESS_HANDLE)
                 {
-                    if (c.exit_status.has_value())
-                    {
-                        return wait_state::signaled;
-                    }
+                    return c.exit_status.has_value() ? wait_state::signaled : wait_state::not_signaled;
+                }
 
-                    break;
+                if (const auto* process = c.processes.get(h); process && process->process && win_emu.processes())
+                {
+                    const auto status = win_emu.processes()->exit_status(process->process);
+                    return status && status.status.has_value() ? wait_state::signaled : wait_state::not_signaled;
                 }
 
                 const auto child = c.child_processes.find(h.value.id);
@@ -132,6 +139,18 @@ namespace sogen
 
                 break;
             }
+
+            case handle_types::managed_thread:
+                if (const auto* thread = c.managed_threads.get(h); thread && win_emu.processes())
+                {
+                    const auto status = win_emu.processes()->exit_status(thread->process);
+                    if (status && status.status.has_value())
+                    {
+                        return wait_state::signaled;
+                    }
+                }
+
+                break;
 
             case handle_types::event: {
                 if (h.value.is_pseudo)
@@ -149,11 +168,19 @@ namespace sogen
             }
 
             case handle_types::file: {
-                // File I/O is synchronous in the emulator, so no operation is ever in flight when a
-                // wait is issued -- the file object's built-in event stays signaled.
-                if (h.value.is_pseudo || c.files.get(h))
+                if (h == STDIN_HANDLE)
+                {
+                    return win_emu.console().input_available() ? wait_state::signaled : wait_state::not_signaled;
+                }
+
+                if (h.value.is_pseudo)
                 {
                     return wait_state::signaled;
+                }
+
+                if (const auto* f = c.files.get(h))
+                {
+                    return f->change_watches.empty() ? wait_state::signaled : wait_state::not_signaled;
                 }
 
                 break;
@@ -170,13 +197,8 @@ namespace sogen
             }
 
             case handle_types::timer: {
-                auto* t = c.timers.get(h);
-                if (t && t->is_signaled(c.steady_now()))
-                {
-                    return wait_state::signaled;
-                }
-
-                break;
+                auto* entry = c.timers.get(h);
+                return entry && entry->is_signaled(win_emu.clock()) ? wait_state::signaled : wait_state::not_signaled;
             }
 
             case handle_types::semaphore: {
@@ -200,7 +222,7 @@ namespace sogen
             }
 
             case handle_types::io_completion: {
-                io_completion_wait::materialize_signaled_wait_packets(c, h);
+                io_completion_wait::materialize_signaled_wait_packets(win_emu, h);
                 const auto* completion = c.io_completions.get(h);
                 if (completion && !completion->queue.empty())
                 {
@@ -226,19 +248,26 @@ namespace sogen
             return wait_state::not_signaled;
         }
 
-        std::optional<wait_state> consume_object_signal(process_context& c, const handle h, const uint32_t current_thread_id)
+        std::optional<wait_state> consume_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
         {
+            auto& c = win_emu.process;
             switch (h.value.type)
             {
+            case handle_types::device: {
+                const auto* container = c.devices.get(h);
+                const auto* pipe = container ? container->get_internal_device<named_pipe>() : nullptr;
+                return pipe && pipe->signaled ? std::optional{wait_state::signaled} : std::nullopt;
+            }
             case handle_types::process: {
                 if (h == GUEST_PROCESS_HANDLE)
                 {
-                    if (!c.exit_status.has_value())
-                    {
-                        return std::nullopt;
-                    }
+                    return c.exit_status.has_value() ? std::optional{wait_state::signaled} : std::nullopt;
+                }
 
-                    return wait_state::signaled;
+                if (const auto* process = c.processes.get(h); process && process->process && win_emu.processes())
+                {
+                    const auto status = win_emu.processes()->exit_status(process->process);
+                    return status && status.status.has_value() ? std::optional{wait_state::signaled} : std::nullopt;
                 }
 
                 const auto child = c.child_processes.find(h.value.id);
@@ -248,6 +277,17 @@ namespace sogen
                 }
 
                 return wait_state::signaled;
+            }
+
+            case handle_types::managed_thread: {
+                const auto* thread = c.managed_threads.get(h);
+                if (!thread || !win_emu.processes())
+                {
+                    return std::nullopt;
+                }
+
+                const auto status = win_emu.processes()->exit_status(thread->process);
+                return status && status.status.has_value() ? std::optional{wait_state::signaled} : std::nullopt;
             }
 
             case handle_types::event: {
@@ -271,7 +311,13 @@ namespace sogen
             }
 
             case handle_types::file: {
-                if (!h.value.is_pseudo && !c.files.get(h))
+                if (h.value.is_pseudo)
+                {
+                    return wait_state::signaled;
+                }
+
+                const auto* f = c.files.get(h);
+                if (!f || !f->change_watches.empty())
                 {
                     return std::nullopt;
                 }
@@ -296,12 +342,12 @@ namespace sogen
             }
 
             case handle_types::timer: {
-                auto* t = c.timers.get(h);
-                if (!t || !t->try_consume_signal(c.steady_now()))
+                auto* entry = c.timers.get(h);
+                if (!entry || !entry->is_signaled(win_emu.clock()))
                 {
                     return std::nullopt;
                 }
-
+                entry->consume_signal();
                 return wait_state::signaled;
             }
 
@@ -326,7 +372,7 @@ namespace sogen
             }
 
             case handle_types::io_completion: {
-                io_completion_wait::materialize_signaled_wait_packets(c, h);
+                io_completion_wait::materialize_signaled_wait_packets(win_emu, h);
                 const auto* completion = c.io_completions.get(h);
                 if (!completion || completion->queue.empty())
                 {
@@ -452,6 +498,10 @@ namespace sogen
           create_flags(create_flags),
           last_registers(context.default_register_set)
     {
+        if (context.is_wow64_process && context.native_architecture != windows_guest_architecture::x86_64)
+        {
+            throw std::invalid_argument("WoW64 thread setup requires an x86-64 Windows guest");
+        }
         this->suspended = create_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED;
 
         // native 64-bit
@@ -496,19 +546,12 @@ namespace sogen
             const auto nls_cache_addr = resolve_nls_cache(*this->gs_segment, context);
 
             this->teb64->access([&](TEB64& teb_obj) {
-                // Skips GetCurrentNlsCache
-                // This hack can be removed once this is fixed:
-                // https://github.com/momo5502/emulator/issues/128
-                reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
-
                 // See nls_cache_placeholder's doc comment.
                 teb_obj.NlsCache = nls_cache_addr;
 
                 teb_obj.ClientId.UniqueProcess = context.process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
                 teb_obj.DeallocationStack = this->stack_base;
-                // TODO: Proper GuaranteedStack implementation.
-                teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
                 teb_obj.NtTib.StackLimit = this->stack_base;
                 teb_obj.NtTib.StackBase = this->stack_base + this->stack_size;
                 teb_obj.NtTib.Self = this->teb64->value();
@@ -527,10 +570,15 @@ namespace sogen
                     if (const auto* wnd = context.windows.get(context.default_desktop_window_handle))
                     {
                         info.spwndDesktop = wnd->guest.value();
+                        info.flags = 0x1;
                     }
                 });
                 teb_obj.Win32ClientInfo.arr[4] = desktop_info_obj.value();
                 teb_obj.Win32ClientInfo.arr[29] = USER_DEFAULT_DPI_CONTEXT;
+
+                this->client_thread_info = this->gs_segment->reserve<USER_CLIENTTHREADINFO>();
+                teb_obj.Win32ClientInfo.arr[12] = this->client_thread_info->value();
+                this->publish_client_thread_info();
             });
 
             return;
@@ -606,8 +654,6 @@ namespace sogen
 
             // Native 64-bit stack
             teb_obj.DeallocationStack = this->stack_base;
-            // TODO: Proper GuaranteedStack implementation.
-            teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
             teb_obj.NtTib.StackLimit = this->stack_base;
             teb_obj.NtTib.StackBase = wow64_cpureserved_base;
             teb_obj.NtTib.Self = this->teb64->value();
@@ -638,10 +684,15 @@ namespace sogen
                 if (const auto* wnd = context.windows.get(context.default_desktop_window_handle))
                 {
                     info.spwndDesktop = wnd->guest.value();
+                    info.flags = 0x1;
                 }
             });
             teb_obj.Win32ClientInfo.arr[4] = desktop_info_obj.value();
             teb_obj.Win32ClientInfo.arr[29] = USER_DEFAULT_DPI_CONTEXT;
+
+            this->client_thread_info = this->gs_segment->reserve<USER_CLIENTTHREADINFO>();
+            teb_obj.Win32ClientInfo.arr[12] = this->client_thread_info->value();
+            this->publish_client_thread_info();
         });
 
         // Allocate dynamic 32-bit stack for WOW64 thread
@@ -668,8 +719,6 @@ namespace sogen
         this->teb32->access([&](TEB32& teb32_obj) {
             // Set NT_TIB32 fields
             teb32_obj.DeallocationStack = static_cast<uint32_t>(nttib32_stack_limit);
-            // TODO: Proper GuaranteedStack implementation.
-            teb32_obj.GuaranteedStackBytes = static_cast<ULONG>(this->wow64_stack_size.value());
             teb32_obj.NtTib.Self = static_cast<uint32_t>(teb32_addr);                // Self pointer to 32-bit TEB
             teb32_obj.NtTib.StackBase = static_cast<uint32_t>(nttib32_stack_base);   // Top of 32-bit stack (High address)
             teb32_obj.NtTib.StackLimit = static_cast<uint32_t>(nttib32_stack_limit); // Bottom of 32-bit stack (Low address)
@@ -818,15 +867,46 @@ namespace sogen
         }
     }
 
+    void emulator_thread::remember_message_wait(cpu_interface& emu, const windows_arch_abi& abi)
+    {
+        // Syscall returns overwrite RAX's service ID on x64, but X0's first argument on ARM64.
+        this->message_wait_return_register = abi.return_value(emu);
+    }
+
+    // A WH_GETMESSAGE hook sees a message before GetMessage returns it, so a waiting GetMessage runs again instead of
+    // being completed by the scheduler.
+    bool emulator_thread::has_hooked_message(windows_emulator& win_emu)
+    {
+        return this->get_message_hook && this->await_msg &&
+               this->peek_pending_message(win_emu, this->await_msg->hwnd_filter, this->await_msg->filter_min, this->await_msg->filter_max)
+                   .has_value();
+    }
+
+    // A parked thread resumes right after its syscall instruction.
+    void emulator_thread::restart_message_wait(cpu_interface& emu, const windows_arch_abi& abi)
+    {
+        const auto return_register = *this->message_wait_return_register;
+        this->message_wait_deadline = this->await_time;
+        this->mark_as_ready(STATUS_SUCCESS);
+        this->pending_status.reset();
+
+        abi.rewind_syscall(emu, abi.instruction_pointer(emu));
+        abi.return_value(emu, return_register);
+    }
+
     void emulator_thread::mark_as_ready(const NTSTATUS status)
     {
+        ++this->ended_waits;
         this->pending_status = status;
+        this->message_wait_return_register.reset();
         this->await_time = {};
         this->await_objects = {};
         this->await_msg = {};
         this->await_msg_mask = {};
         this->await_io_completion = {};
         this->await_alpc = {};
+        this->await_debug_event = {};
+        this->await_file_io = {};
         this->await_host_condition = {};
 
         // TODO: Find out if this is correct
@@ -1007,11 +1087,9 @@ namespace sogen
         }
     }
 
-    std::optional<msg> emulator_thread::peek_pending_message(windows_emulator& win_emu, hwnd hwnd_filter, UINT filter_min, UINT filter_max,
-                                                             bool remove)
+    std::optional<msg> emulator_thread::peek_queued_message(process_context& process, const hwnd hwnd_filter, const UINT filter_min,
+                                                            const UINT filter_max, const bool remove)
     {
-        (void)this->synthesize_due_user_timer(win_emu, hwnd_filter, filter_min, filter_max);
-
         for (auto it = message_queue.begin(); it != message_queue.end(); ++it)
         {
             if (hwnd_filter == static_cast<hwnd>(-1))
@@ -1021,7 +1099,7 @@ namespace sogen
                     continue;
                 }
             }
-            else if (hwnd_filter != 0 && !window_matches_filter(win_emu.process, it->window, hwnd_filter))
+            else if (hwnd_filter != 0 && !window_matches_filter(process, it->window, hwnd_filter))
             {
                 continue;
             }
@@ -1049,7 +1127,7 @@ namespace sogen
                 });
 
                 message_queue.erase(it);
-                win_emu.process.update_message_key_state(msg);
+                process.update_message_key_state(msg);
 
                 constexpr uint32_t imdt_unavailable = 0;
                 constexpr uint32_t imdt_keyboard = 1;
@@ -1066,8 +1144,20 @@ namespace sogen
                 {
                     this->current_input_device = imdt_unavailable;
                 }
+                this->publish_client_thread_info();
             }
             return msg;
+        }
+
+        return std::nullopt;
+    }
+
+    std::optional<msg> emulator_thread::peek_pending_message(windows_emulator& win_emu, hwnd hwnd_filter, UINT filter_min, UINT filter_max,
+                                                             bool remove)
+    {
+        if (auto queued_message = this->peek_queued_message(win_emu.process, hwnd_filter, filter_min, filter_max, remove))
+        {
+            return queued_message;
         }
 
         if ((filter_min == 0 && filter_max == 0) || (filter_min <= WM_PAINT && WM_PAINT <= filter_max))
@@ -1100,6 +1190,11 @@ namespace sogen
                     .pt = {.x = win_emu.process.cursor_x, .y = win_emu.process.cursor_y},
                 };
             }
+        }
+
+        if (this->synthesize_due_user_timer(win_emu, hwnd_filter, filter_min, filter_max))
+        {
+            return this->peek_queued_message(win_emu.process, hwnd_filter, filter_min, filter_max, remove);
         }
 
         return std::nullopt;
@@ -1141,8 +1236,8 @@ namespace sogen
 
         if (try_coalesce && this->can_coalesce_message(msg))
         {
-            this->queue_status_changed_bits |= bits;
             message_queue.back() = msg;
+            this->mark_queue_status_changed(bits);
             return;
         }
 
@@ -1151,8 +1246,65 @@ namespace sogen
         });
 
         this->message_queue_status_bits |= bits;
-        this->queue_status_changed_bits |= bits;
         message_queue.push_back(msg);
+        this->mark_queue_status_changed(bits);
+        win_emu.wake_idle_vcpu();
+    }
+
+    // Activating a window moves the keyboard focus to it; losing activation takes the focus away.
+    void emulator_thread::set_active_window(const hwnd window)
+    {
+        this->active_window = window;
+        this->focus_window = window;
+        this->publish_client_thread_info();
+    }
+
+    void emulator_thread::set_focus_window(const hwnd window)
+    {
+        this->focus_window = window;
+        this->publish_client_thread_info();
+    }
+
+    void emulator_thread::forget_window(const hwnd window)
+    {
+        if (this->active_window == window)
+        {
+            this->active_window = 0;
+        }
+
+        if (this->focus_window == window)
+        {
+            this->focus_window = 0;
+        }
+
+        this->publish_client_thread_info();
+    }
+
+    void emulator_thread::mark_queue_status_changed(const uint32_t bits)
+    {
+        this->queue_status_changed_bits |= bits;
+        this->publish_client_thread_info();
+    }
+
+    void emulator_thread::clear_queue_status_changed(const uint32_t bits)
+    {
+        this->queue_status_changed_bits &= ~bits;
+        this->publish_client_thread_info();
+    }
+
+    void emulator_thread::publish_client_thread_info() const
+    {
+        if (!this->client_thread_info)
+        {
+            return;
+        }
+
+        this->client_thread_info->access([&](USER_CLIENTTHREADINFO& info) {
+            info.change_bits = static_cast<uint16_t>(this->queue_status_changed_bits);
+            info.wake_bits = static_cast<uint16_t>(this->message_queue_status_bits);
+            info.focus_window = this->focus_window;
+            info.active_window = this->active_window;
+        });
     }
 
     void emulator_thread::post_translated_message(windows_emulator& win_emu, msg msg)
@@ -1201,12 +1353,25 @@ namespace sogen
             });
 
             it = this->message_queue.erase(it);
+            this->publish_client_thread_info();
         }
     }
 
     bool emulator_thread::is_terminated() const
     {
         return this->exit_status.has_value();
+    }
+
+    bool emulator_thread::can_be_deleted(const vcpu_context* unloading_vcpu) const
+    {
+        const auto loaded = this->last_vcpu && this->last_vcpu != unloading_vcpu && this->last_vcpu->active_thread == this;
+        return this->ref_count == 0 && this->is_terminated() && !loaded && !this->registers_in_transit &&
+               this->pending_register_accesses == 0;
+    }
+
+    bool emulator_thread::deleter(emulator_thread& t)
+    {
+        return ref_counted_object::deleter(t) && t.can_be_deleted();
     }
 
     bool emulator_thread::is_thread_ready(windows_emulator& win_emu)
@@ -1264,7 +1429,7 @@ namespace sogen
                 {
                     const auto& obj = this->await_objects[i];
 
-                    const auto state = observe_object_signal(process, obj, this->id);
+                    const auto state = observe_object_signal(win_emu, obj, this->id);
                     const auto signaled = state != wait_state::not_signaled;
                     all_signaled &= signaled;
 
@@ -1275,7 +1440,7 @@ namespace sogen
 
                     if (signaled && this->await_any)
                     {
-                        const auto consumed_state = consume_object_signal(process, obj, this->id);
+                        const auto consumed_state = consume_object_signal(win_emu, obj, this->id);
                         if (!consumed_state.has_value())
                         {
                             throw std::runtime_error("Failed to consume object signal!");
@@ -1283,7 +1448,7 @@ namespace sogen
 
                         if (this->await_msg_mask.has_value())
                         {
-                            this->queue_status_changed_bits |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+                            this->mark_queue_status_changed(QS_POSTMESSAGE | QS_ALLPOSTMESSAGE);
                         }
 
                         this->mark_as_ready(*consumed_state == wait_state::abandoned ? (STATUS_ABANDONED_WAIT_0 + i) : (STATUS_WAIT_0 + i));
@@ -1311,7 +1476,7 @@ namespace sogen
 
                 for (const auto& obj : this->await_objects)
                 {
-                    const auto consumed_state = consume_object_signal(process, obj, this->id);
+                    const auto consumed_state = consume_object_signal(win_emu, obj, this->id);
                     if (!consumed_state.has_value())
                     {
                         throw std::runtime_error("Failed to consume object signal!");
@@ -1342,6 +1507,17 @@ namespace sogen
             return false;
         }
 
+        if (this->await_file_io)
+        {
+            const auto status = this->memory_ptr->read_memory<NTSTATUS>(*this->await_file_io);
+            if (status == STATUS_PENDING)
+            {
+                return false;
+            }
+            this->mark_as_ready(status);
+            return true;
+        }
+
         if (this->await_time.has_value())
         {
             return complete_if_timed_out(STATUS_SUCCESS);
@@ -1358,6 +1534,25 @@ namespace sogen
             }
 
             return complete_if_timed_out(STATUS_TIMEOUT);
+        }
+
+        if (this->await_debug_event.has_value())
+        {
+            const auto wait = *this->await_debug_event;
+            if (deliver_debug_event(win_emu, wait.debug_object, wait.state_change))
+            {
+                this->mark_as_ready(STATUS_SUCCESS);
+                return true;
+            }
+
+            constexpr auto infinite = std::chrono::steady_clock::time_point::min();
+            if (wait.timeout.has_value() && wait.timeout.value() != infinite && wait.timeout.value() < clock.steady_now())
+            {
+                this->mark_as_ready(STATUS_TIMEOUT);
+                return true;
+            }
+
+            return false;
         }
 
         if (this->await_io_completion.has_value())
@@ -1377,7 +1572,7 @@ namespace sogen
             if (wait.type == io_completion_wait_type::remove_single)
             {
                 io_completion_message message{};
-                if (io_completion_wait::dequeue_io_completion_message(process, wait.io_completion_handle, message))
+                if (io_completion_wait::dequeue_io_completion_message(win_emu, wait.io_completion_handle, message))
                 {
                     emulator_object<emulator_pointer>{*this->memory_ptr, wait.key_context_ptr}.write_if_valid(message.key_context);
                     emulator_object<emulator_pointer>{*this->memory_ptr, wait.apc_context_ptr}.write_if_valid(message.apc_context);
@@ -1400,7 +1595,7 @@ namespace sogen
             if (wait.type == io_completion_wait_type::remove_multiple)
             {
                 const auto removed = io_completion_wait::dequeue_io_completion_entries(
-                    process, wait.io_completion_handle,
+                    win_emu, wait.io_completion_handle,
                     emulator_object<FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>>>{*this->memory_ptr, wait.completion_entries_ptr},
                     wait.max_entries);
 
@@ -1434,11 +1629,16 @@ namespace sogen
 
         if (this->await_msg.has_value())
         {
+            if (this->get_message_hook)
+            {
+                return false;
+            }
+
             if (const auto m = this->peek_pending_message(win_emu, this->await_msg->hwnd_filter, this->await_msg->filter_min,
                                                           this->await_msg->filter_max, true))
             {
                 this->await_msg->message.write(*m);
-                this->current_message_time = m->time;
+                this->record_current_message(*m);
 
                 uint64_t active_handle = 0;
                 uint64_t active_window_ptr = 0;
@@ -1487,7 +1687,50 @@ namespace sogen
         return true;
     }
 
-    void emulator_thread::setup_registers(x86_64_cpu& emu, const process_context& context) const
+    void emulator_thread::setup_if_necessary(cpu_interface& emu, const process_context& context)
+    {
+        if (!this->setup_done)
+        {
+            this->setup_registers(emu, context);
+            this->setup_done = true;
+        }
+        if (this->pending_status.has_value())
+        {
+            context.abi().return_value(emu, static_cast<uint64_t>(*this->pending_status));
+            this->pending_status.reset();
+        }
+    }
+
+    void emulator_thread::setup_registers(cpu_interface& emu, const process_context& context) const
+    {
+        if (context.is_wow64_process)
+        {
+            auto* x64 = dynamic_cast<x86_64_cpu*>(&emu);
+            if (!x64 || context.native_architecture != windows_guest_architecture::x86_64)
+            {
+                throw std::invalid_argument("WoW64 thread bootstrap does not match the guest CPU");
+            }
+            this->setup_wow64_registers(*x64, context);
+            return;
+        }
+        if (!this->teb64 || !this->gs_segment)
+        {
+            throw std::runtime_error("Missing native thread environment");
+        }
+        const native_thread_bootstrap bootstrap{
+            .stack_base = this->stack_base,
+            .stack_size = this->stack_size,
+            .teb = this->teb64->value(),
+            .start_address = this->start_address,
+            .argument = this->argument,
+            .rtl_user_thread_start = context.rtl_user_thread_start,
+            .ldr_initialize_thunk = context.ldr_initialize_thunk,
+            .ntdll_image_base = context.ntdll_image_base,
+        };
+        context.abi().initialize_native_thread(emu, bootstrap);
+    }
+
+    void emulator_thread::setup_wow64_registers(x86_64_cpu& emu, const process_context& context) const
     {
         if (!this->gs_segment)
         {
@@ -1519,10 +1762,10 @@ namespace sogen
         setup_stack(emu, context, this->stack_base, static_cast<size_t>(this->stack_size));
         emu.set_segment_base(x86_register::gs, this->gs_segment->get_base());
 
-        // x86's power-on/reset FPU control word masks every floating-point exception (round-to-nearest);
-        // a zero-initialized control word instead leaves inexact/precision (PM) unmasked, and guest code
-        // that reads it via fnstcw (e.g. the CRT's pow/_except1 path) then raises
-        // STATUS_FLOAT_INEXACT_RESULT on the first inexact result - a crash real Windows never produces.
+        // x86 power-on defaults: all exceptions masked, round-to-nearest. Some backends initialise these
+        // registers to 0, leaving every floating-point exception unmasked - including the near-ubiquitous
+        // inexact/precision condition - so guest code reading the live control word via fnstcw (e.g. the
+        // CRT's pow/_except1 path) raises a STATUS_FLOAT_INEXACT_RESULT that never occurs on real Windows.
         emu.reg<uint16_t>(x86_register::fpcw, 0x037F);
         emu.reg<uint32_t>(x86_register::mxcsr, 0x1F80);
 
@@ -1546,19 +1789,29 @@ namespace sogen
         emu.reg(x86_register::rip, context.ldr_initialize_thunk);
     }
 
-    void emulator_thread::refresh_execution_context(x86_64_cpu& emu) const
+    void emulator_thread::refresh_execution_context(cpu_interface& cpu, const uint64_t gdt_base) const
     {
+        if (dynamic_cast<arm64_cpu*>(&cpu))
+        {
+            return;
+        }
+        auto* x64 = dynamic_cast<x86_64_cpu*>(&cpu);
+        if (!x64)
+        {
+            throw std::invalid_argument("Unsupported Windows thread CPU architecture");
+        }
+        auto& emu = *x64;
         // Point this vCPU's GDTR at its own per-vCPU GDT. The saved thread context restores whatever
         // GDTR the thread last ran with (possibly another vCPU's GDT), so re-assert it here on every
         // switch. Cheap and keeps each vCPU reading its own descriptors.
-        const auto gdt_base = gdt_base_for_vcpu(this->memory_ptr->gdt_base(), emu.index());
-        emu.load_gdt(gdt_base, GDT_LIMIT);
+        const auto vcpu_gdt_base = gdt_base + emu.index() * GDT_LIMIT;
+        emu.load_gdt(vcpu_gdt_base, GDT_LIMIT);
 
         if (this->teb32.has_value())
         {
             // Refresh this vCPU's WOW64 FS descriptor with this thread's 32-bit TEB base, so a 64<->32
             // transition that reloads FS reads the correct base regardless of which vCPU runs the thread.
-            setup_wow64_fs_segment(*this->memory_ptr, this->teb32->value(), gdt_base);
+            setup_wow64_fs_segment(*this->memory_ptr, this->teb32->value(), vcpu_gdt_base);
         }
     }
 
@@ -1575,12 +1828,23 @@ namespace sogen
 
     callback_frame::~callback_frame() = default;
 
-    void callback_frame::save_registers(x86_64_cpu& emu)
+    void callback_frame::save_registers(guest_cpu& cpu)
     {
-        if (this->rip != 0)
+        if (this->rip != 0 || this->arm64_registers)
         {
             throw std::runtime_error("Attempt to overwrite callback frame register snapshot");
         }
+
+        if (auto* arm64 = dynamic_cast<arm64_cpu*>(&cpu))
+        {
+            arm64_context context{};
+            context.ContextFlags = arm64_context_all;
+            cpu_context::save(*arm64, context);
+            this->arm64_registers = context;
+            return;
+        }
+
+        auto& emu = dynamic_cast<x86_64_cpu&>(cpu);
 
         this->rip = emu.reg(x86_register::rip);
         this->rbp = emu.reg(x86_register::rbp);
@@ -1607,12 +1871,25 @@ namespace sogen
         this->gs = emu.reg<uint16_t>(x86_register::gs);
     }
 
-    void callback_frame::restore_registers(x86_64_cpu& emu) const
+    void callback_frame::restore_registers(guest_cpu& cpu) const
     {
+        if (auto* arm64 = dynamic_cast<arm64_cpu*>(&cpu))
+        {
+            if (!this->arm64_registers)
+            {
+                throw std::runtime_error("Attempt to restore registers from an uninitialized callback frame");
+            }
+
+            cpu_context::restore(*arm64, *this->arm64_registers);
+            return;
+        }
+
         if (this->rip == 0)
         {
             throw std::runtime_error("Attempt to restore registers from an uninitialized callback frame");
         }
+
+        auto& emu = dynamic_cast<x86_64_cpu&>(cpu);
 
         emu.reg<uint16_t>(x86_register::cs, this->cs);
         emu.reg<uint16_t>(x86_register::ss, this->ss);
@@ -1665,6 +1942,7 @@ namespace sogen
         buffer.write(this->es);
         buffer.write(this->fs);
         buffer.write(this->gs);
+        buffer.write_optional(this->arm64_registers);
 
         buffer.write(static_cast<bool>(this->state));
         if (this->state)
@@ -1699,6 +1977,7 @@ namespace sogen
         buffer.read(this->es);
         buffer.read(this->fs);
         buffer.read(this->gs);
+        buffer.read_optional(this->arm64_registers);
 
         bool has_state{};
         buffer.read(has_state);

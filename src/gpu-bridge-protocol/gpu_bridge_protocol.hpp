@@ -16,7 +16,7 @@ namespace sogen::gpu_bridge
     // Identifies a valid bridge and lets the guest detect a host that speaks a different
     // protocol revision before issuing any further commands.
     inline constexpr uint32_t protocol_magic = 0x55504753; // 'SGPU'
-    inline constexpr uint32_t protocol_version = 27;
+    inline constexpr uint32_t protocol_version = 40;
 
     // Windows IOCTL encoding: CTL_CODE(DeviceType, Function, Method, Access).
     //   value = (DeviceType << 16) | (Access << 14) | (Function << 2) | Method
@@ -169,11 +169,44 @@ namespace sogen::gpu_bridge
         cmd_copy_image = 0x884,
         get_physical_device_memory_budget = 0x885,
         // Coalesced vkUpdateDescriptorSets: payload is a concatenation of update_descriptor_sets_request blobs
-        // (each a header + its descriptor_write[]), applied in issue order.
+        // (each a header + its descriptor_write[] + inline-uniform data), applied in issue order.
         update_descriptor_sets_batch = 0x886,
         cmd_blit_image = 0x887,
         reset_descriptor_pool = 0x888,
         cmd_clear_attachments = 0x889,
+        cmd_copy_query_pool_results = 0x88A,
+        cmd_draw_indexed_indirect = 0x88B,
+        cmd_draw_indexed_indirect_count = 0x88C,
+        cmd_draw_indirect = 0x88D,
+        cmd_draw_indirect_count = 0x88E,
+        cmd_next_subpass = 0x88F,
+        free_descriptor_sets = 0x890,
+        get_shader_module_identifier = 0x891,
+        get_shader_module_create_info_identifier = 0x892,
+        get_descriptor_set_layout_support = 0x893,
+        cmd_bind_transform_feedback_buffers = 0x894,
+        cmd_begin_transform_feedback = 0x895,
+        cmd_end_transform_feedback = 0x896,
+        cmd_begin_query_indexed = 0x897,
+        cmd_end_query_indexed = 0x898,
+        cmd_draw_indirect_byte_count = 0x899,
+        cmd_write_timestamp2 = 0x89A,
+        get_physical_device_cooperative_matrix_properties = 0x89B,
+        get_physical_device_fragment_shading_rates = 0x89C,
+        get_physical_device_calibrateable_time_domains = 0x89D,
+        create_pipeline_cache = 0x89E,
+        destroy_pipeline_cache = 0x89F,
+        get_pipeline_cache_data = 0x8A0,
+        merge_pipeline_caches = 0x8A1,
+        get_device_memory_commitment = 0x8A2,
+        get_calibrated_timestamps = 0x8A3,
+        get_surface_support = 0x8A4,
+        get_surface_formats = 0x8A5,
+        get_surface_present_modes = 0x8A6,
+        cmd_set_sample_mask = 0x8A7,
+        cmd_push_descriptor_set = 0x8A8,
+        get_render_area_granularity = 0x8A9,
+        cmd_dispatch_base = 0x8AA,
     };
 
     // Discriminator for cmd_set_dynamic_u32: the family of extended-dynamic-state setters that all take a
@@ -192,6 +225,9 @@ namespace sogen::gpu_bridge
         depth_bias_enable = 9,
         primitive_restart_enable = 10,
         depth_clip_enable = 11,
+        alpha_to_coverage_enable = 12,
+        rasterization_samples = 13,
+        line_rasterization_mode = 14,
     };
 
     // Discriminator for cmd_set_stencil: which of the three single-value stencil dynamic states to set.
@@ -237,6 +273,7 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_get_image_memory_requirements =
         make_ioctl(static_cast<uint32_t>(command::get_image_memory_requirements));
     inline constexpr uint32_t ioctl_get_image_subresource_layout = make_ioctl(static_cast<uint32_t>(command::get_image_subresource_layout));
+    inline constexpr uint32_t ioctl_get_render_area_granularity = make_ioctl(static_cast<uint32_t>(command::get_render_area_granularity));
     inline constexpr uint32_t ioctl_bind_image_memory = make_ioctl(static_cast<uint32_t>(command::bind_image_memory));
     inline constexpr uint32_t ioctl_create_surface = make_ioctl(static_cast<uint32_t>(command::create_surface));
     inline constexpr uint32_t ioctl_destroy_surface = make_ioctl(static_cast<uint32_t>(command::destroy_surface));
@@ -247,6 +284,9 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_queue_present = make_ioctl(static_cast<uint32_t>(command::queue_present));
     inline constexpr uint32_t ioctl_create_shader_module = make_ioctl(static_cast<uint32_t>(command::create_shader_module));
     inline constexpr uint32_t ioctl_destroy_shader_module = make_ioctl(static_cast<uint32_t>(command::destroy_shader_module));
+    inline constexpr uint32_t ioctl_get_shader_module_identifier = make_ioctl(static_cast<uint32_t>(command::get_shader_module_identifier));
+    inline constexpr uint32_t ioctl_get_shader_module_create_info_identifier =
+        make_ioctl(static_cast<uint32_t>(command::get_shader_module_create_info_identifier));
     inline constexpr uint32_t ioctl_create_image_view = make_ioctl(static_cast<uint32_t>(command::create_image_view));
     inline constexpr uint32_t ioctl_destroy_image_view = make_ioctl(static_cast<uint32_t>(command::destroy_image_view));
     inline constexpr uint32_t ioctl_create_buffer_view = make_ioctl(static_cast<uint32_t>(command::create_buffer_view));
@@ -264,14 +304,20 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_create_graphics_pipeline = make_ioctl(static_cast<uint32_t>(command::create_graphics_pipeline));
     inline constexpr uint32_t ioctl_destroy_pipeline = make_ioctl(static_cast<uint32_t>(command::destroy_pipeline));
     inline constexpr uint32_t ioctl_get_surface_capabilities = make_ioctl(static_cast<uint32_t>(command::get_surface_capabilities));
+    inline constexpr uint32_t ioctl_get_surface_support = make_ioctl(static_cast<uint32_t>(command::get_surface_support));
+    inline constexpr uint32_t ioctl_get_surface_formats = make_ioctl(static_cast<uint32_t>(command::get_surface_formats));
+    inline constexpr uint32_t ioctl_get_surface_present_modes = make_ioctl(static_cast<uint32_t>(command::get_surface_present_modes));
     inline constexpr uint32_t ioctl_record_commands = make_ioctl(static_cast<uint32_t>(command::record_commands));
     inline constexpr uint32_t ioctl_create_descriptor_set_layout = make_ioctl(static_cast<uint32_t>(command::create_descriptor_set_layout));
+    inline constexpr uint32_t ioctl_get_descriptor_set_layout_support =
+        make_ioctl(static_cast<uint32_t>(command::get_descriptor_set_layout_support));
     inline constexpr uint32_t ioctl_destroy_descriptor_set_layout =
         make_ioctl(static_cast<uint32_t>(command::destroy_descriptor_set_layout));
     inline constexpr uint32_t ioctl_create_descriptor_pool = make_ioctl(static_cast<uint32_t>(command::create_descriptor_pool));
     inline constexpr uint32_t ioctl_destroy_descriptor_pool = make_ioctl(static_cast<uint32_t>(command::destroy_descriptor_pool));
     inline constexpr uint32_t ioctl_reset_descriptor_pool = make_ioctl(static_cast<uint32_t>(command::reset_descriptor_pool));
     inline constexpr uint32_t ioctl_allocate_descriptor_sets = make_ioctl(static_cast<uint32_t>(command::allocate_descriptor_sets));
+    inline constexpr uint32_t ioctl_free_descriptor_sets = make_ioctl(static_cast<uint32_t>(command::free_descriptor_sets));
     inline constexpr uint32_t ioctl_update_descriptor_sets = make_ioctl(static_cast<uint32_t>(command::update_descriptor_sets));
     inline constexpr uint32_t ioctl_update_descriptor_sets_batch = make_ioctl(static_cast<uint32_t>(command::update_descriptor_sets_batch));
     inline constexpr uint32_t ioctl_create_sampler = make_ioctl(static_cast<uint32_t>(command::create_sampler));
@@ -313,6 +359,18 @@ namespace sogen::gpu_bridge
         make_ioctl(static_cast<uint32_t>(command::invalidate_mapped_memory_direct));
     inline constexpr uint32_t ioctl_get_physical_device_memory_budget =
         make_ioctl(static_cast<uint32_t>(command::get_physical_device_memory_budget));
+    inline constexpr uint32_t ioctl_get_physical_device_cooperative_matrix_properties =
+        make_ioctl(static_cast<uint32_t>(command::get_physical_device_cooperative_matrix_properties));
+    inline constexpr uint32_t ioctl_get_physical_device_fragment_shading_rates =
+        make_ioctl(static_cast<uint32_t>(command::get_physical_device_fragment_shading_rates));
+    inline constexpr uint32_t ioctl_get_physical_device_calibrateable_time_domains =
+        make_ioctl(static_cast<uint32_t>(command::get_physical_device_calibrateable_time_domains));
+    inline constexpr uint32_t ioctl_get_device_memory_commitment = make_ioctl(static_cast<uint32_t>(command::get_device_memory_commitment));
+    inline constexpr uint32_t ioctl_get_calibrated_timestamps = make_ioctl(static_cast<uint32_t>(command::get_calibrated_timestamps));
+    inline constexpr uint32_t ioctl_create_pipeline_cache = make_ioctl(static_cast<uint32_t>(command::create_pipeline_cache));
+    inline constexpr uint32_t ioctl_destroy_pipeline_cache = make_ioctl(static_cast<uint32_t>(command::destroy_pipeline_cache));
+    inline constexpr uint32_t ioctl_get_pipeline_cache_data = make_ioctl(static_cast<uint32_t>(command::get_pipeline_cache_data));
+    inline constexpr uint32_t ioctl_merge_pipeline_caches = make_ioctl(static_cast<uint32_t>(command::merge_pipeline_caches));
 
     // Opaque identifier handed to the guest in place of a host Vulkan handle. The host keeps the
     // real VkInstance / VkPhysicalDevice / ... in a table and the guest only ever sees this id, so
@@ -356,6 +414,39 @@ namespace sogen::gpu_bridge
         int32_t vk_result;
         uint32_t count; // number of physical devices reported by the host
         // object_id devices[count];
+    };
+
+    struct physical_device_enumeration_request
+    {
+        object_id physical_device;
+        uint32_t max_count;
+        uint32_t has_entries;
+    };
+
+    struct physical_device_enumeration_response
+    {
+        int32_t vk_result;
+        uint32_t count;
+    };
+
+    struct cooperative_matrix_property
+    {
+        uint32_t m_size;
+        uint32_t n_size;
+        uint32_t k_size;
+        uint32_t a_type;
+        uint32_t b_type;
+        uint32_t c_type;
+        uint32_t result_type;
+        uint32_t saturating_accumulation;
+        uint32_t scope;
+    };
+
+    struct fragment_shading_rate
+    {
+        uint32_t sample_counts;
+        uint32_t width;
+        uint32_t height;
     };
 
     // ioctl_get_physical_device_properties: in (out = raw VkPhysicalDeviceProperties bytes)
@@ -733,8 +824,19 @@ namespace sogen::gpu_bridge
     struct queue_submit_request
     {
         object_id queue;
-        object_id command_buffer;
         object_id fence; // null_object for no fence
+        uint32_t wait_count;
+        uint32_t command_buffer_count;
+        uint32_t signal_count;
+        uint32_t has_timeline_info;
+    };
+
+    struct submit_semaphore_entry
+    {
+        object_id semaphore;
+        uint32_t stage_mask; // VkPipelineStageFlags
+        uint32_t reserved;
+        uint64_t value; // timeline value; zero for binary semaphores
     };
 
     struct queue_wait_idle_request
@@ -814,6 +916,8 @@ namespace sogen::gpu_bridge
         object_id device;
         uint64_t size; // VkDeviceSize allocationSize
         uint32_t memory_type_index;
+        uint32_t flags;       // VkMemoryAllocateFlags
+        uint32_t device_mask; // VkMemoryAllocateFlagsInfo::deviceMask
         uint32_t reserved;
     };
 
@@ -828,6 +932,19 @@ namespace sogen::gpu_bridge
     {
         object_id device;
         object_id memory;
+    };
+
+    struct get_device_memory_commitment_request
+    {
+        object_id device;
+        object_id memory;
+    };
+
+    struct get_device_memory_commitment_response
+    {
+        int32_t vk_result;
+        uint32_t reserved;
+        uint64_t committed_bytes;
     };
 
     struct create_buffer_request
@@ -918,6 +1035,18 @@ namespace sogen::gpu_bridge
         uint32_t reserved;
         uint64_t guest_address; // 0 => not mappable directly, caller falls back to staging
     };
+
+    inline constexpr uint64_t whole_size = ~0ULL; // VK_WHOLE_SIZE
+
+    constexpr bool is_direct_map_range_valid(const uint64_t mapping_size, const uint64_t offset, const uint64_t size)
+    {
+        if (offset >= mapping_size)
+        {
+            return false;
+        }
+
+        return size == whole_size || (size != 0 && size <= mapping_size - offset);
+    }
 
     struct unmap_memory_direct_request
     {
@@ -1018,6 +1147,8 @@ namespace sogen::gpu_bridge
         uint32_t dst_access_mask;
         uint32_t old_layout; // VkImageLayout
         uint32_t new_layout;
+        uint32_t src_queue_family_index;
+        uint32_t dst_queue_family_index;
     };
 
     struct cmd_clear_color_image_request
@@ -1045,19 +1176,29 @@ namespace sogen::gpu_bridge
         uint32_t reserved2;
     };
 
-    // the buffer at offset 0;
     struct cmd_copy_image_to_buffer_request
     {
         object_id command_buffer;
         object_id image;
         object_id buffer;
-        uint32_t image_layout; // VkImageLayout (current layout of the image)
+        uint64_t buffer_offset;       // byte offset of this region's destination within the (sub-allocated) buffer
+        uint32_t image_layout;        // VkImageLayout (current layout of the image)
+        uint32_t buffer_row_length;   // 0 = tightly packed
+        uint32_t buffer_image_height; // 0 = tightly packed
+        int32_t image_offset_x;
+        int32_t image_offset_y;
+        int32_t image_offset_z;
         uint32_t width;
         uint32_t height;
+        uint32_t depth;
+        uint32_t mip_level;
+        uint32_t base_array_layer;
+        uint32_t layer_count;
         uint32_t aspect_mask; // VkImageAspectFlags
     };
 
-    // buffer (offset 0) into mip 0 / layer 0 of the image.
+    static_assert(sizeof(cmd_copy_image_to_buffer_request) == 88, "wire layout drift");
+
     struct cmd_copy_buffer_to_image_request
     {
         object_id command_buffer;
@@ -1079,8 +1220,8 @@ namespace sogen::gpu_bridge
         uint32_t aspect_mask; // VkImageAspectFlags
     };
 
-    // Resolves a multisampled source image into a single-sample destination (full image, mip 0 / layer 0).
-    // DXVK uses this to resolve an MSAA backbuffer before presentation.
+    static_assert(sizeof(cmd_copy_buffer_to_image_request) == 88, "wire layout drift");
+
     struct cmd_resolve_image_request
     {
         object_id command_buffer;
@@ -1088,9 +1229,23 @@ namespace sogen::gpu_bridge
         object_id dst_image;
         uint32_t src_layout; // VkImageLayout
         uint32_t dst_layout; // VkImageLayout
+        uint32_t src_aspect_mask;
+        uint32_t src_mip_level;
+        uint32_t src_base_array_layer;
+        uint32_t src_layer_count;
+        int32_t src_offset_x;
+        int32_t src_offset_y;
+        int32_t src_offset_z;
+        uint32_t dst_aspect_mask;
+        uint32_t dst_mip_level;
+        uint32_t dst_base_array_layer;
+        uint32_t dst_layer_count;
+        int32_t dst_offset_x;
+        int32_t dst_offset_y;
+        int32_t dst_offset_z;
         uint32_t width;
         uint32_t height;
-        uint32_t aspect_mask; // VkImageAspectFlags
+        uint32_t depth;
     };
 
     // Copies one VkImageCopy region from a source image to a destination image (vkCmdCopyImage[2]). DXVK
@@ -1184,10 +1339,18 @@ namespace sogen::gpu_bridge
         float max_anisotropy;
         float min_lod;
         float max_lod;
+        uint32_t flags;                              // VkSamplerCreateFlags
+        uint32_t unnormalized_coordinates;           // VkBool32
+        uint32_t has_reduction_mode;                 // VkSamplerReductionModeCreateInfo present
+        uint32_t reduction_mode;                     // VkSamplerReductionMode
+        uint32_t has_custom_border_color;            // VkSamplerCustomBorderColorCreateInfoEXT present
+        uint32_t custom_border_format;               // VkFormat
+        std::array<uint32_t, 4> custom_border_color; // VkClearColorValue bits
     };
 
     struct create_surface_request
     {
+        object_id instance;
         uint64_t hwnd;
     };
 
@@ -1207,12 +1370,22 @@ namespace sogen::gpu_bridge
     {
         object_id device;
         object_id surface;
-        uint32_t format; // VkFormat (use B8G8R8A8_UNORM to match the UI backend's bgra8)
+        object_id old_swapchain;
+        uint32_t flags;
+        uint32_t format;
+        uint32_t color_space;
         uint32_t width;
         uint32_t height;
+        uint32_t image_array_layers;
         uint32_t min_image_count;
-        uint32_t image_usage;  // VkImageUsageFlags requested on swapchain images
-        uint32_t present_mode; // VkPresentModeKHR (ignored; effectively FIFO)
+        uint32_t image_usage;
+        uint32_t sharing_mode;
+        uint32_t queue_family_index_count;
+        uint32_t pre_transform;
+        uint32_t composite_alpha;
+        uint32_t present_mode;
+        uint32_t clipped;
+        // uint32_t queue_family_indices[queue_family_index_count];
     };
 
     struct create_swapchain_response
@@ -1246,6 +1419,7 @@ namespace sogen::gpu_bridge
     struct acquire_next_image_request
     {
         object_id swapchain;
+        uint64_t timeout;
         object_id semaphore; // null_object if the caller passed VK_NULL_HANDLE
         object_id fence;     // null_object if the caller passed VK_NULL_HANDLE
     };
@@ -1262,7 +1436,7 @@ namespace sogen::gpu_bridge
         object_id queue;
         object_id swapchain;
         uint32_t image_index;
-        uint32_t reserved;
+        uint32_t wait_semaphore_count;
     };
 
     // Shared output for the "create a device child" commands below (one new object id).
@@ -1280,14 +1454,58 @@ namespace sogen::gpu_bridge
         object_id object;
     };
 
-    // ioctl_create_shader_module: in header immediately followed by `code_size` bytes of SPIR-V;
-    // out = object_response
+    // ioctl_create_shader_module / ioctl_get_shader_module_create_info_identifier: header immediately
+    // followed by `code_size` bytes of SPIR-V. The create command returns object_response; the identifier
+    // command returns shader_module_identifier_response.
     struct create_shader_module_request
     {
         object_id device;
         uint32_t code_size; // bytes (multiple of 4)
-        uint32_t reserved;
+        uint32_t flags;     // VkShaderModuleCreateFlags
         // uint8_t code[code_size];
+    };
+
+    inline constexpr uint32_t max_shader_module_identifier_size = 32;
+
+    struct shader_module_identifier_response
+    {
+        int32_t vk_result;
+        uint32_t identifier_size;
+        std::array<uint8_t, max_shader_module_identifier_size> identifier;
+    };
+
+    struct create_pipeline_cache_request
+    {
+        object_id device;
+        uint32_t flags;             // VkPipelineCacheCreateFlags
+        uint32_t initial_data_size; // bytes immediately following this header
+        // uint8_t initial_data[initial_data_size];
+    };
+
+    struct get_pipeline_cache_data_request
+    {
+        object_id device;
+        object_id pipeline_cache;
+        uint64_t max_data_size; // guest-provided capacity
+        uint32_t has_data;      // non-zero when pData was supplied, even if max_data_size is zero
+        uint32_t reserved;
+    };
+
+    struct get_pipeline_cache_data_response
+    {
+        int32_t vk_result;
+        uint32_t reserved;
+        uint64_t data_size; // bytes written, or total required for a count-only query
+        // uint8_t data[data_size];
+    };
+
+    struct merge_pipeline_caches_request
+    {
+        object_id device;
+        object_id destination_cache;
+        uint32_t source_count;
+        uint32_t reserved;
+        // object_id source_caches[source_count];
     };
 
     struct create_image_view_request
@@ -1399,6 +1617,24 @@ namespace sogen::gpu_bridge
         uint32_t reserved;
     };
 
+    struct cmd_begin_query_indexed_request
+    {
+        object_id command_buffer;
+        object_id query_pool;
+        uint32_t query;
+        uint32_t flags;
+        uint32_t index;
+        uint32_t reserved;
+    };
+
+    struct cmd_end_query_indexed_request
+    {
+        object_id command_buffer;
+        object_id query_pool;
+        uint32_t query;
+        uint32_t index;
+    };
+
     struct cmd_write_timestamp_request
     {
         object_id command_buffer;
@@ -1407,27 +1643,222 @@ namespace sogen::gpu_bridge
         uint32_t pipeline_stage; // VkPipelineStageFlagBits
     };
 
+    struct transform_feedback_buffer_binding
+    {
+        object_id buffer;
+        uint64_t offset;
+        uint64_t size;
+    };
+
+    struct cmd_bind_transform_feedback_buffers_request
+    {
+        object_id command_buffer;
+        uint32_t first_binding;
+        uint32_t binding_count;
+    };
+
+    struct transform_feedback_counter_buffer
+    {
+        object_id buffer;
+        uint64_t offset;
+    };
+
+    struct cmd_transform_feedback_request
+    {
+        object_id command_buffer;
+        uint32_t first_counter_buffer;
+        uint32_t counter_buffer_count;
+        uint32_t has_counter_buffers;
+        uint32_t has_counter_buffer_offsets;
+    };
+
+    struct cmd_draw_indirect_byte_count_request
+    {
+        object_id command_buffer;
+        object_id counter_buffer;
+        uint64_t counter_buffer_offset;
+        uint32_t counter_offset;
+        uint32_t vertex_stride;
+        uint32_t instance_count;
+        uint32_t first_instance;
+    };
+
+    struct cmd_write_timestamp2_request
+    {
+        object_id command_buffer;
+        object_id query_pool;
+        uint32_t query;
+        uint32_t reserved;
+        uint64_t pipeline_stage; // VkPipelineStageFlags2
+    };
+
+    struct cmd_copy_query_pool_results_request
+    {
+        object_id command_buffer;
+        object_id query_pool;
+        uint32_t first_query;
+        uint32_t query_count;
+        object_id destination_buffer;
+        uint64_t destination_offset;
+        uint64_t stride;
+        uint32_t flags;
+        uint32_t reserved;
+    };
+
+    struct cmd_draw_indexed_indirect_request
+    {
+        object_id command_buffer;
+        object_id buffer;
+        uint64_t offset;
+        uint32_t draw_count;
+        uint32_t stride;
+    };
+
+    struct cmd_draw_indexed_indirect_count_request
+    {
+        object_id command_buffer;
+        object_id buffer;
+        uint64_t offset;
+        object_id count_buffer;
+        uint64_t count_buffer_offset;
+        uint32_t max_draw_count;
+        uint32_t stride;
+    };
+
+    struct cmd_draw_indirect_request
+    {
+        object_id command_buffer;
+        object_id buffer;
+        uint64_t offset;
+        uint32_t draw_count;
+        uint32_t stride;
+    };
+
+    struct cmd_draw_indirect_count_request
+    {
+        object_id command_buffer;
+        object_id buffer;
+        uint64_t offset;
+        object_id count_buffer;
+        uint64_t count_buffer_offset;
+        uint32_t max_draw_count;
+        uint32_t stride;
+    };
+
+    struct cmd_next_subpass_request
+    {
+        object_id command_buffer;
+        uint32_t contents;
+        uint32_t reserved;
+    };
+
+    struct render_pass_attachment
+    {
+        uint32_t flags;
+        uint32_t format;
+        uint32_t samples;
+        uint32_t load_op;
+        uint32_t store_op;
+        uint32_t stencil_load_op;
+        uint32_t stencil_store_op;
+        uint32_t initial_layout;
+        uint32_t final_layout;
+        uint32_t has_stencil_layouts;
+        uint32_t stencil_initial_layout;
+        uint32_t stencil_final_layout;
+    };
+
+    struct render_pass_reference
+    {
+        uint32_t attachment;
+        uint32_t layout;
+        uint32_t aspect_mask;
+        uint32_t stencil_layout; // VK_IMAGE_LAYOUT_UNDEFINED => no separate stencil layout
+    };
+
+    // A subpass takes its references from the request's reference array in this order: inputs, colors, color
+    // resolves (color_count of them when has_color_resolve), the depth-stencil attachment, its resolve.
+    struct render_pass_subpass
+    {
+        uint32_t flags;
+        uint32_t bind_point;
+        uint32_t view_mask;
+        uint32_t input_count;
+        uint32_t color_count;
+        uint32_t has_color_resolve;
+        uint32_t has_depth_stencil;
+        uint32_t has_depth_stencil_resolve;
+        uint32_t depth_resolve_mode;
+        uint32_t stencil_resolve_mode;
+        uint32_t preserve_count;
+        uint32_t reserved;
+    };
+
+    struct render_pass_dependency
+    {
+        uint32_t src_subpass;
+        uint32_t dst_subpass;
+        uint32_t src_stage_mask;
+        uint32_t dst_stage_mask;
+        uint32_t src_access_mask;
+        uint32_t dst_access_mask;
+        uint32_t flags;
+        int32_t view_offset;
+        uint32_t has_memory_barrier2; // the dependency chains a VkMemoryBarrier2, whose masks replace the ones above
+        uint32_t reserved;
+        uint64_t src_stage_mask2;
+        uint64_t dst_stage_mask2;
+        uint64_t src_access_mask2;
+        uint64_t dst_access_mask2;
+    };
+
     // out = object_response
     struct create_render_pass_request
     {
         object_id device;
-        uint32_t format;         // VkFormat of the color attachment
-        uint32_t load_op;        // VkAttachmentLoadOp
-        uint32_t store_op;       // VkAttachmentStoreOp
-        uint32_t initial_layout; // VkImageLayout
-        uint32_t final_layout;   // VkImageLayout (PRESENT_SRC_KHR is mapped to TRANSFER_SRC_OPTIMAL)
-        uint32_t depth_format;   // VkFormat of the depth attachment, or 0 for no depth attachment
+        uint32_t flags;
+        uint32_t attachment_count;
+        uint32_t subpass_count;
+        uint32_t reference_count;
+        uint32_t dependency_count;
+        uint32_t preserve_count;
+        uint32_t correlated_view_mask_count;
         uint32_t reserved;
+        // render_pass_attachment attachments[attachment_count];
+        // render_pass_subpass subpasses[subpass_count];
+        // render_pass_reference references[reference_count];
+        // render_pass_dependency dependencies[dependency_count];
+        // uint32_t preserve_attachments[preserve_count]; // consumed by the subpasses in order
+        // uint32_t correlated_view_masks[correlated_view_mask_count];
     };
 
+    struct framebuffer_attachment_image
+    {
+        uint32_t flags;
+        uint32_t usage;
+        uint32_t width;
+        uint32_t height;
+        uint32_t layer_count;
+        uint32_t view_format_count;
+    };
+
+    inline constexpr uint32_t framebuffer_create_imageless_bit = 0x1; // VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT
+
+    // Imageless framebuffers describe their attachments instead of naming views.
+    // out = object_response
     struct create_framebuffer_request
     {
         object_id device;
         object_id render_pass;
-        object_id image_view; // color attachment
-        object_id depth_view; // depth attachment, or null_object for none
+        uint32_t flags;
+        uint32_t attachment_count;
         uint32_t width;
         uint32_t height;
+        uint32_t layers;
+        uint32_t reserved;
+        // object_id views[attachment_count]; or, when imageless:
+        // framebuffer_attachment_image images[attachment_count];
+        // uint32_t view_formats[]; // each image's view_format_count formats, in image order
     };
 
     // variable-length list of descriptor-set-layout ids: this header is immediately followed by
@@ -1460,6 +1891,13 @@ namespace sogen::gpu_bridge
         uint32_t offset;
     };
 
+    // A VkVertexInputBindingDivisorDescription flattened to plain integers.
+    struct vertex_input_divisor
+    {
+        uint32_t binding;
+        uint32_t divisor;
+    };
+
     // A VkSpecializationMapEntry flattened (size is size_t in Vulkan; the wire keeps it 32-bit because the
     // guest is 32-bit and DXVK's spec constants are all 4 bytes). DXVK bakes d3d9 render state -- notably
     // SpecAlphaCompareOp (a VkCompareOp) -- into shaders via specialization constants; dropping them defaults
@@ -1472,9 +1910,9 @@ namespace sogen::gpu_bridge
         uint32_t size;
     };
 
-    // color attachment). The vertex input state is variable-length: the input buffer is this header
-    // immediately followed by `binding_count` vertex_input_binding entries and then `attribute_count`
-    // vertex_input_attribute entries. Both counts 0 => no vertex input (vertices baked into the shader).
+    // color attachment). The vertex input state is variable-length: the input buffer is this header,
+    // followed by binding_count vertex_input_binding entries, attribute_count vertex_input_attribute entries,
+    // and divisor_count vertex_input_divisor entries. Zero counts mean the corresponding state is absent.
     // out = object_response
     inline constexpr uint32_t max_color_attachments = 8;
 
@@ -1493,13 +1931,39 @@ namespace sogen::gpu_bridge
         uint32_t color_write_mask;       // VkColorComponentFlags
     };
 
+    struct get_calibrated_timestamps_request
+    {
+        object_id device;
+        uint32_t timestamp_count;
+        uint32_t reserved;
+        // uint32_t time_domains[timestamp_count];
+    };
+
+    struct get_calibrated_timestamps_response
+    {
+        int32_t vk_result;
+        uint32_t reserved;
+        uint64_t max_deviation;
+        // uint64_t timestamps[timestamp_count];
+    };
+
+    struct shader_stage_source
+    {
+        object_id module;
+        uint32_t identifier_size;
+        uint32_t reserved;
+        std::array<uint8_t, max_shader_module_identifier_size> identifier{};
+    };
+
     struct create_graphics_pipeline_request
     {
         object_id device;
-        object_id render_pass; // 0 => dynamic rendering: use the attachment formats below, and viewport/scissor are dynamic
+        object_id pipeline_cache; // null_object => VK_NULL_HANDLE
+        object_id render_pass;    // 0 => dynamic rendering: use the attachment formats below, and viewport/scissor are dynamic
         object_id pipeline_layout;
-        object_id vertex_shader;
-        object_id fragment_shader;
+        shader_stage_source vertex_shader;
+        shader_stage_source fragment_shader;
+        uint32_t flags; // VkPipelineCreateFlags
         uint32_t width;
         uint32_t height;
         uint32_t depth_test_enable;  // VkBool32 (0 => no depth-stencil state, as before)
@@ -1518,6 +1982,8 @@ namespace sogen::gpu_bridge
         uint32_t dynamic_state_count;                                // number of uint32 VkDynamicState values that follow the attributes
         uint32_t primitive_topology;
         uint32_t primitive_restart_enable;
+        uint32_t rasterization_stream;
+        uint32_t rasterization_stream_flags;
         // Per-stage specialization constants (DXVK bakes d3d9 render state into the shaders this way).
         uint32_t vs_spec_entry_count;
         uint32_t vs_spec_data_size;
@@ -1526,10 +1992,13 @@ namespace sogen::gpu_bridge
         // Per-color-attachment blend state (DXVK bakes D3D9 alpha blending statically). blend_attachment_count
         // entries are valid; the rest are zero. When blend_attachment_count == 0 the host disables blending.
         uint32_t blend_attachment_count;
-        uint32_t reserved_blend;
+        uint32_t divisor_count; // number of vertex_input_divisor entries trailing the attributes
+        uint32_t subpass;
+        uint32_t reserved_subpass;
         std::array<pipeline_blend_attachment, max_color_attachments> blend_attachments{};
         // vertex_input_binding bindings[binding_count];
         // vertex_input_attribute attributes[attribute_count];
+        // vertex_input_divisor divisors[divisor_count];
         // uint32_t dynamic_states[dynamic_state_count]; // VkDynamicState values DXVK declared on the pipeline
         // specialization_map_entry vs_spec_entries[vs_spec_entry_count];
         // uint8_t vs_spec_data[vs_spec_data_size];
@@ -1540,8 +2009,11 @@ namespace sogen::gpu_bridge
     struct create_compute_pipeline_request
     {
         object_id device;
+        object_id pipeline_cache; // null_object => VK_NULL_HANDLE
         object_id pipeline_layout;
-        object_id shader_module;
+        shader_stage_source shader;
+        uint32_t flags; // VkPipelineCreateFlags
+        uint32_t reserved;
     };
 
     struct create_compute_pipeline_response
@@ -1557,14 +2029,16 @@ namespace sogen::gpu_bridge
         object_id command_buffer;
         object_id render_pass;
         object_id framebuffer;
+        int32_t x;
+        int32_t y;
         uint32_t width;
         uint32_t height;
-        float clear_r;
-        float clear_g;
-        float clear_b;
-        float clear_a;
-        float clear_depth;
+        uint32_t contents;
+        uint32_t clear_value_count;
+        uint32_t attachment_count; // views of an imageless framebuffer
         uint32_t reserved;
+        // VkClearValue clear_values[clear_value_count]; (16 bytes each)
+        // object_id attachments[attachment_count];
     };
 
     struct cmd_bind_pipeline_request
@@ -1573,6 +2047,31 @@ namespace sogen::gpu_bridge
         object_id pipeline;
         uint32_t bind_point; // VkPipelineBindPoint (0 = graphics, 1 = compute)
         uint32_t reserved;
+    };
+
+    struct get_render_area_granularity_request
+    {
+        object_id device;
+        object_id render_pass;
+    };
+
+    struct get_render_area_granularity_response
+    {
+        int32_t vk_result;
+        uint32_t width;
+        uint32_t height;
+        uint32_t reserved;
+    };
+
+    struct cmd_dispatch_base_request
+    {
+        object_id command_buffer;
+        uint32_t base_group_x;
+        uint32_t base_group_y;
+        uint32_t base_group_z;
+        uint32_t group_count_x;
+        uint32_t group_count_y;
+        uint32_t group_count_z;
     };
 
     struct cmd_dispatch_request
@@ -1790,13 +2289,22 @@ namespace sogen::gpu_bridge
         uint32_t value;
     };
 
+    // cmd_set_sample_mask: `mask` holds ceil(samples / 32) words, which is at most two for 64 samples.
+    struct cmd_set_sample_mask_request
+    {
+        object_id command_buffer;
+        uint32_t samples;
+        std::array<uint32_t, 2> mask{};
+        uint32_t reserved;
+    };
+
     struct cmd_bind_index_buffer_request
     {
         object_id command_buffer;
         object_id buffer;
         uint64_t offset;     // VkDeviceSize
+        uint64_t size;       // VkDeviceSize
         uint32_t index_type; // VkIndexType
-        uint32_t reserved;
     };
 
     struct cmd_draw_indexed_request
@@ -1834,6 +2342,7 @@ namespace sogen::gpu_bridge
         uint32_t descriptor_type;  // VkDescriptorType
         uint32_t descriptor_count; // array size (1 for a scalar binding)
         uint32_t stage_flags;      // VkShaderStageFlags
+        uint32_t binding_flags;    // VkDescriptorBindingFlags
     };
 
     // ioctl_create_descriptor_set_layout: in header immediately followed by `binding_count`
@@ -1842,8 +2351,23 @@ namespace sogen::gpu_bridge
     {
         object_id device;
         uint32_t binding_count;
-        uint32_t reserved;
+        uint32_t flags; // VkDescriptorSetLayoutCreateFlags
         // descriptor_set_layout_binding bindings[binding_count];
+    };
+
+    struct get_descriptor_set_layout_support_request
+    {
+        object_id device;
+        uint32_t binding_count;
+        uint32_t flags; // VkDescriptorSetLayoutCreateFlags
+        // descriptor_set_layout_binding bindings[binding_count];
+    };
+
+    struct descriptor_set_layout_support_response
+    {
+        int32_t vk_result;
+        uint32_t supported; // VkBool32
+        uint32_t max_variable_descriptor_count;
     };
 
     // One pool size (trailing-array element of create_descriptor_pool).
@@ -1860,7 +2384,8 @@ namespace sogen::gpu_bridge
         object_id device;
         uint32_t max_sets;
         uint32_t pool_size_count;
-        uint32_t reserved;
+        uint32_t flags; // VkDescriptorPoolCreateFlags
+        uint32_t max_inline_uniform_block_bindings;
         // descriptor_pool_size pool_sizes[pool_size_count];
     };
 
@@ -1874,14 +2399,16 @@ namespace sogen::gpu_bridge
     };
 
     // ioctl_allocate_descriptor_sets: in header immediately followed by `set_count` object_id set-layout
-    // ids; out = allocate_descriptor_sets_response header followed by `count` object_id set ids
+    // ids and `variable_descriptor_count_count` uint32_t descriptor counts; out =
+    // allocate_descriptor_sets_response header followed by `count` object_id set ids
     struct allocate_descriptor_sets_request
     {
         object_id device;
         object_id descriptor_pool;
         uint32_t set_count;
-        uint32_t reserved;
+        uint32_t variable_descriptor_count_count;
         // object_id set_layouts[set_count];
+        // uint32_t variable_descriptor_counts[variable_descriptor_count_count];
     };
 
     struct allocate_descriptor_sets_response
@@ -1891,33 +2418,63 @@ namespace sogen::gpu_bridge
         // object_id sets[count];
     };
 
+    struct free_descriptor_sets_request
+    {
+        object_id device;
+        object_id descriptor_pool;
+        uint32_t set_count;
+        uint32_t reserved;
+    };
+
     // One descriptor write (trailing-array element of update_descriptor_sets). Models a single buffer or
-    // image descriptor per write (descriptor_count == 1). For buffer types the buffer/offset/range fields
-    // apply; for image types (combined image sampler) the sampler/image_view/image_layout fields apply.
+    // image descriptor per write. Inline-uniform-block writes instead reference bytes trailing the write array.
     struct descriptor_write
     {
         object_id dst_set;
         uint32_t dst_binding;
         uint32_t dst_array_element;
         uint32_t descriptor_type; // VkDescriptorType
-        uint32_t reserved;
-        object_id buffer;      // VK_DESCRIPTOR_TYPE_*_BUFFER: the bound buffer (else null_object)
+        uint32_t inline_uniform_data_offset;
+        object_id buffer_or_view;
         uint64_t offset;       // buffer offset
         uint64_t range;        // buffer range (VK_WHOLE_SIZE allowed)
         object_id sampler;     // image types: the sampler (else null_object)
         object_id image_view;  // image types: the sampled image view (else null_object)
         uint32_t image_layout; // image types: VkImageLayout
-        uint32_t reserved2;
+        uint32_t inline_uniform_data_size;
     };
 
-    // ioctl_update_descriptor_sets: in header immediately followed by `write_count` descriptor_write
-    // entries; out = result_response
+    // ioctl_update_descriptor_sets: header, descriptor_write[write_count], descriptor_copy[copy_count], then inline data.
     struct update_descriptor_sets_request
     {
         object_id device;
         uint32_t write_count;
+        uint32_t copy_count;
+        uint32_t inline_uniform_data_size;
+    };
+
+    struct descriptor_copy
+    {
+        object_id src_set;
+        uint32_t src_binding;
+        uint32_t src_array_element;
+        object_id dst_set;
+        uint32_t dst_binding;
+        uint32_t dst_array_element;
+        uint32_t descriptor_count;
         uint32_t reserved;
-        // descriptor_write writes[write_count];
+    };
+
+    // vkCmdPushDescriptorSetKHR, recorded into the command buffer: followed by descriptor_write[write_count] (their dst_set
+    // is ignored) and then inline_uniform_data_size bytes of inline-uniform data.
+    struct cmd_push_descriptor_set_request
+    {
+        object_id command_buffer;
+        object_id pipeline_layout;
+        uint32_t bind_point;
+        uint32_t set;
+        uint32_t write_count;
+        uint32_t inline_uniform_data_size;
     };
 
     // immediately followed by `set_count` object_id descriptor-set ids. Bind point is graphics.
@@ -1933,14 +2490,68 @@ namespace sogen::gpu_bridge
         // uint32_t dynamic_offsets[dynamic_offset_count];
     };
 
-    // ioctl_get_surface_capabilities: in (out = raw VkSurfaceCapabilitiesKHR bytes). The bridge has no
-    // real surface, so it returns synthetic caps with currentExtent = (0xFFFFFFFF, 0xFFFFFFFF), i.e.
-    // "the application chooses the extent". A real driver (when the guest links the real loader) returns
-    // the true client-area extent instead.
+    // ioctl_get_surface_capabilities: in; out = raw VkSurfaceCapabilitiesKHR bytes from the host WSI.
     struct get_surface_capabilities_request
     {
         object_id physical_device;
         object_id surface;
+    };
+
+    struct get_surface_capabilities_response
+    {
+        int32_t vk_result;
+        uint32_t reserved;
+        // raw VkSurfaceCapabilitiesKHR bytes follow
+    };
+
+    struct get_surface_support_request
+    {
+        object_id physical_device;
+        object_id surface;
+        uint32_t queue_family_index;
+        uint32_t reserved;
+    };
+
+    struct get_surface_support_response
+    {
+        int32_t vk_result;
+        uint32_t supported;
+    };
+
+    struct surface_format
+    {
+        uint32_t format;
+        uint32_t color_space;
+    };
+
+    struct get_surface_formats_request
+    {
+        object_id physical_device;
+        object_id surface;
+        uint32_t max_count;
+        uint32_t reserved;
+    };
+
+    struct get_surface_formats_response
+    {
+        int32_t vk_result;
+        uint32_t count;
+        // surface_format formats[count];
+    };
+
+    struct get_surface_present_modes_request
+    {
+        object_id physical_device;
+        object_id surface;
+        uint32_t max_count;
+        uint32_t reserved;
+    };
+
+    struct get_surface_present_modes_response
+    {
+        int32_t vk_result;
+        uint32_t count;
+        // uint32_t modes[count];
     };
 
     // whole command buffer's recording (begin -> cmds -> end) crosses the bridge in a single IOCTL
@@ -1965,16 +2576,36 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(object_id) == 8 && alignof(object_id) == 8, "object_id must be a portable 64-bit value");
     static_assert(sizeof(command_record_header) == 8, "wire layout drift");
     static_assert(sizeof(version_response) == 8, "wire layout drift");
-    static_assert(sizeof(allocate_memory_request) == 24, "wire layout drift");
+    static_assert(sizeof(allocate_memory_request) == 32, "wire layout drift");
     static_assert(sizeof(bind_buffer_memory_request) == 32, "wire layout drift");
     static_assert(sizeof(cmd_draw_request) == 24, "wire layout drift");
     static_assert(sizeof(cmd_bind_pipeline_request) == 24, "wire layout drift");
     static_assert(sizeof(cmd_dispatch_request) == 24, "wire layout drift");
+    static_assert(sizeof(get_render_area_granularity_request) == 16, "wire layout drift");
+    static_assert(sizeof(get_render_area_granularity_response) == 16, "wire layout drift");
+    static_assert(sizeof(cmd_dispatch_base_request) == 32, "wire layout drift");
     static_assert(sizeof(cmd_dispatch_indirect_request) == 24, "wire layout drift");
     static_assert(sizeof(cmd_clear_depth_stencil_image_request) == 56, "wire layout drift");
     static_assert(sizeof(get_image_subresource_layout_request) == 32, "wire layout drift");
     static_assert(sizeof(get_image_subresource_layout_response) == 48, "wire layout drift");
+    static_assert(sizeof(queue_present_request) == 24, "wire layout drift");
+    static_assert(sizeof(create_surface_request) == 16, "wire layout drift");
+    static_assert(sizeof(create_swapchain_request) == 80, "wire layout drift");
+    static_assert(sizeof(cmd_pipeline_barrier_request) == 72, "wire layout drift");
+    static_assert(sizeof(acquire_next_image_request) == 32, "wire layout drift");
+    static_assert(sizeof(get_surface_support_request) == 24, "wire layout drift");
+    static_assert(sizeof(surface_format) == 8, "wire layout drift");
     static_assert(sizeof(create_buffer_view_request) == 40, "wire layout drift");
+    static_assert(sizeof(create_shader_module_request) == 16, "wire layout drift");
+    static_assert(sizeof(vertex_input_divisor) == 8, "wire layout drift");
+    static_assert(sizeof(shader_module_identifier_response) == 40, "wire layout drift");
+    static_assert(sizeof(shader_stage_source) == 48, "wire layout drift");
+    static_assert(sizeof(create_pipeline_cache_request) == 16, "wire layout drift");
+    static_assert(sizeof(get_pipeline_cache_data_request) == 32, "wire layout drift");
+    static_assert(sizeof(get_pipeline_cache_data_response) == 16, "wire layout drift");
+    static_assert(sizeof(merge_pipeline_caches_request) == 24, "wire layout drift");
+    static_assert(sizeof(create_compute_pipeline_request) == 80, "wire layout drift");
+    static_assert(sizeof(create_graphics_pipeline_request) == 520, "wire layout drift");
     static_assert(sizeof(buffer_copy_region) == 24, "wire layout drift");
     static_assert(sizeof(cmd_copy_buffer_request) == 32, "wire layout drift");
     static_assert(sizeof(create_query_pool_request) == 24, "wire layout drift");
@@ -1983,7 +2614,32 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(cmd_reset_query_pool_request) == 24, "wire layout drift");
     static_assert(sizeof(cmd_begin_query_request) == 24, "wire layout drift");
     static_assert(sizeof(cmd_end_query_request) == 24, "wire layout drift");
+    static_assert(sizeof(cmd_begin_query_indexed_request) == 32, "wire layout drift");
+    static_assert(sizeof(cmd_end_query_indexed_request) == 24, "wire layout drift");
+    static_assert(sizeof(transform_feedback_buffer_binding) == 24, "wire layout drift");
+    static_assert(sizeof(cmd_bind_transform_feedback_buffers_request) == 16, "wire layout drift");
+    static_assert(sizeof(transform_feedback_counter_buffer) == 16, "wire layout drift");
+    static_assert(sizeof(cmd_transform_feedback_request) == 24, "wire layout drift");
+    static_assert(sizeof(cmd_draw_indirect_byte_count_request) == 40, "wire layout drift");
+    static_assert(sizeof(cmd_write_timestamp2_request) == 32, "wire layout drift");
     static_assert(sizeof(cmd_write_timestamp_request) == 24, "wire layout drift");
+    static_assert(sizeof(cmd_copy_query_pool_results_request) == 56, "wire layout drift");
+    static_assert(sizeof(create_descriptor_pool_request) == 24, "wire layout drift");
+    static_assert(sizeof(allocate_descriptor_sets_request) == 24, "wire layout drift");
+    static_assert(sizeof(cmd_draw_indexed_indirect_request) == 32, "wire layout drift");
+    static_assert(sizeof(cmd_draw_indexed_indirect_count_request) == 48, "wire layout drift");
+    static_assert(sizeof(cmd_draw_indirect_request) == 32, "wire layout drift");
+    static_assert(sizeof(cmd_draw_indirect_count_request) == 48, "wire layout drift");
+    static_assert(sizeof(cmd_next_subpass_request) == 16, "wire layout drift");
+    static_assert(sizeof(render_pass_attachment) == 48, "wire layout drift");
+    static_assert(sizeof(render_pass_reference) == 16, "wire layout drift");
+    static_assert(sizeof(render_pass_subpass) == 48, "wire layout drift");
+    static_assert(sizeof(render_pass_dependency) == 72, "wire layout drift");
+    static_assert(sizeof(create_render_pass_request) == 40, "wire layout drift");
+    static_assert(sizeof(framebuffer_attachment_image) == 24, "wire layout drift");
+    static_assert(sizeof(create_framebuffer_request) == 40, "wire layout drift");
+    static_assert(sizeof(cmd_begin_render_pass_request) == 56, "wire layout drift");
+    static_assert(sizeof(free_descriptor_sets_request) == 24, "wire layout drift");
     static_assert(sizeof(reset_query_pool_request) == 24, "wire layout drift");
     static_assert(sizeof(vertex_buffer_binding) == 16, "wire layout drift");
     static_assert(sizeof(vertex_buffer_binding2) == 32, "wire layout drift");
@@ -2006,9 +2662,13 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(cmd_set_stencil_request) == 24, "wire layout drift");
     static_assert(sizeof(cmd_set_stencil_op_request) == 32, "wire layout drift");
     static_assert(sizeof(cmd_set_dynamic_u32_request) == 16, "wire layout drift");
-    static_assert(sizeof(descriptor_set_layout_binding) == 16, "wire layout drift");
+    static_assert(sizeof(cmd_set_sample_mask_request) == 24, "wire layout drift");
+    static_assert(sizeof(descriptor_set_layout_binding) == 20, "wire layout drift");
+    static_assert(sizeof(get_descriptor_set_layout_support_request) == 16, "wire layout drift");
+    static_assert(sizeof(descriptor_set_layout_support_response) == 12, "wire layout drift");
     static_assert(sizeof(cmd_bind_descriptor_sets_request) == 32, "wire layout drift");
-    static_assert(sizeof(create_sampler_request) == 64, "wire layout drift");
+    static_assert(sizeof(cmd_push_descriptor_set_request) == 32, "wire layout drift");
+    static_assert(sizeof(create_sampler_request) == 104, "wire layout drift");
     static_assert(sizeof(enumerate_device_extension_properties_request) == 16, "wire layout drift");
     static_assert(sizeof(queue_family_properties) == 28, "wire layout drift");
     static_assert(sizeof(enumerate_device_extension_properties_response) == 8, "wire layout drift");
@@ -2026,4 +2686,12 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(get_physical_device_image_format_properties_request) == 32, "wire layout drift");
     static_assert(sizeof(get_physical_device_image_format_properties_response) == 40, "wire layout drift");
     static_assert(sizeof(reset_descriptor_pool_request) == 24, "wire layout drift");
+    static_assert(sizeof(physical_device_enumeration_request) == 16, "wire layout drift");
+    static_assert(sizeof(physical_device_enumeration_response) == 8, "wire layout drift");
+    static_assert(sizeof(cooperative_matrix_property) == 36, "wire layout drift");
+    static_assert(sizeof(fragment_shading_rate) == 12, "wire layout drift");
+    static_assert(sizeof(get_device_memory_commitment_request) == 16, "wire layout drift");
+    static_assert(sizeof(get_device_memory_commitment_response) == 16, "wire layout drift");
+    static_assert(sizeof(get_calibrated_timestamps_request) == 16, "wire layout drift");
+    static_assert(sizeof(get_calibrated_timestamps_response) == 16, "wire layout drift");
 }

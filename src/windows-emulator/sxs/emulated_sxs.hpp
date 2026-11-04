@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assembly_resolver.hpp"
+#include "../windows_path.hpp"
 
 #include <cstddef>
 #include <filesystem>
@@ -29,10 +30,10 @@ namespace sogen::sxs
       private:
         const file_system& file_sys_;
 
-        std::optional<std::filesystem::path> translate(std::u16string_view windows_path_text) const;
+        static std::optional<windows_path> to_absolute_path(std::u16string_view windows_path_text);
     };
 
-    std::optional<std::vector<std::byte>> read_host_file(const std::filesystem::path& path);
+    std::optional<std::vector<std::byte>> read_guest_file(const file_system& file_sys, const windows_path& path);
     std::u16string directory_of(std::u16string_view path);
 
     // Maps activation context data into the emulated process the way csrss maps its section view: read-only,

@@ -2,8 +2,8 @@
 #include "api_port.hpp"
 
 #include "../win32k_userconnect.hpp"
-#include "../sxs/csr_activation_context.hpp"
 #include "../windows_emulator.hpp"
+#include "../sxs/activation_context_request.hpp"
 
 namespace sogen
 {
@@ -14,6 +14,23 @@ namespace sogen
         {
             return server_dll_index <= std::numeric_limits<uint32_t>::max() &&
                    static_cast<uint32_t>(server_dll_index) == win32k_userconnect::k_user_server_dll_index;
+        }
+
+        constexpr uint32_t k_base_srv_nls_get_user_info_api = 0x0001001b;
+        constexpr uint32_t k_base_srv_sxs_create_activation_context_api = 0x0001001e;
+
+        bool is_api_request(windows_emulator& win_emu, const lpc_request_context& c, const uint32_t expected_api)
+        {
+            const ULONG api_number_offset = 0x08u;
+
+            if (c.send_buffer_length < api_number_offset + sizeof(uint32_t))
+            {
+                return false;
+            }
+
+            uint32_t api_number{};
+            return win_emu.memory.try_read_memory(c.send_buffer + api_number_offset, &api_number, sizeof(api_number)) &&
+                   api_number == expected_api;
         }
 
         struct wow64_userconnect_payload
@@ -54,8 +71,8 @@ namespace sogen
                 return false;
             }
 
-            if (payload.user_connect_length != sizeof(WIN32K_USERCONNECT32) &&
-                payload.user_connect_length != (sizeof(WIN32K_USERCONNECT32) + win32k_userconnect::k_wow64_userconnect_header_size))
+            if (payload.user_connect_length != sizeof(USER_SHAREDINFO) &&
+                payload.user_connect_length != (sizeof(USER_SHAREDINFO) + win32k_userconnect::k_wow64_userconnect_header_size))
             {
                 return false;
             }
@@ -79,20 +96,9 @@ namespace sogen
                 return destination_status;
             }
 
-            // user32's UserClientDllInitialize raw-copies this 0x238-byte reply verbatim into its
-            // global _gSharedInfo, so the reply must be in the SHAREDINFO layout the client reads
-            // (awmControl at 0x98, DefWindowMsgs at 0x218, DefWindowSpecMsgs at 0x228). The WoW64
-            // client uses the same 8-byte-slotted layout as the 64-bit one; all handle-table
-            // allocations for a WoW64 process live below 4GB, so the narrowed low dwords are valid.
-            USER_SHAREDINFO shared{};
-            win32k_userconnect::populate_user_shared_info(shared, win_emu.process);
-
-            try
-            {
-                const emulator_object<USER_SHAREDINFO> shared_obj{win_emu.memory, destination};
-                shared_obj.write(shared);
-            }
-            catch (...)
+            // user32's UserClientDllInitialize raw-copies this reply verbatim into _gSharedInfo, and
+            // the WoW64 client slots SHAREDINFO the same way the 64-bit one does.
+            if (!win32k_userconnect::try_write_user_shared_info(win_emu.memory, destination, win_emu.process))
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -129,9 +135,19 @@ namespace sogen
 
             lpc_request_result handle_request(windows_emulator& win_emu, const lpc_request_context& c) override
             {
-                if (auto result = try_handle_sxs_create_activation_context(win_emu, c))
+                if (is_api_request(win_emu, c, k_base_srv_sxs_create_activation_context_api))
                 {
-                    return std::move(*result);
+                    return sxs::handle_create_activation_context(win_emu, c);
+                }
+
+                if (is_api_request(win_emu, c, k_base_srv_nls_get_user_info_api))
+                {
+                    // BASESRV BaseSrvNlsGetUserInfo, called by kernelbase's GetCurrentNlsCache.
+                    // Sogen does not emulate the private 0x67c-byte NLS server cache. Returning
+                    // a failing status here intentionally selects GetCurrentNlsCache's native
+                    // registry-backed fallback (Control Panel\International / NlsUpdateCacheInfo)
+                    // instead of reporting success with an uninitialized capture buffer.
+                    return {STATUS_NOT_SUPPORTED, lpc_request_result::reply_in_place};
                 }
 
                 wow64_userconnect_payload payload{};

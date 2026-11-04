@@ -4,12 +4,13 @@
 #include "memory_manager.hpp"
 #include "kernel_state.hpp"
 #include "shared_backing.hpp"
+#include "filesystem/guest_file.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <string_view>
 #include <serialization_helper.hpp>
-#include <utils/file_handle.hpp>
+#include <utils/time.hpp>
 #include <platform/synchronisation.hpp>
 #include <platform/win_pefile.hpp>
 #include <platform/window.hpp>
@@ -17,81 +18,93 @@
 namespace sogen
 {
 
+    // Suspensions made through a thread state-change object are undone when the object is closed.
+    struct thread_state_change : ref_counted_object
+    {
+        uint32_t thread_id{};
+        uint32_t suspend_count{};
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->thread_id);
+            buffer.write(this->suspend_count);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->thread_id);
+            buffer.read(this->suspend_count);
+        }
+    };
+
     struct timer : ref_counted_object
     {
         std::u16string name{};
-        bool manual_reset{true};
-        bool active{false};
-        bool signaled{false};
-        std::chrono::steady_clock::time_point due{};
-        std::chrono::milliseconds period{0};
+        bool extended{};
+        bool synchronization{};
+        bool signaled{};
+        std::optional<std::chrono::steady_clock::time_point> due_time{};
+        int64_t period_nanoseconds{};
 
-        void arm(const std::chrono::steady_clock::time_point due_time, const std::chrono::milliseconds period_ms)
+        bool is_signaled(utils::clock& clock)
         {
-            this->active = true;
-            this->signaled = false;
-            this->due = due_time;
-            this->period = period_ms;
+            return this->due_time ? this->is_signaled(clock.steady_now()) : this->signaled;
         }
 
         bool is_signaled(const std::chrono::steady_clock::time_point now)
         {
-            if (this->active && now >= this->due)
+            if (this->due_time && *this->due_time <= now)
             {
                 this->signaled = true;
-
-                if (this->period.count() > 0)
+                if (this->period_nanoseconds > 0)
                 {
-                    const auto elapsed_periods = (now - this->due) / this->period + 1;
-                    this->due += elapsed_periods * this->period;
+                    const auto period = std::chrono::nanoseconds(this->period_nanoseconds);
+                    const auto elapsed = now - *this->due_time;
+                    const auto remaining = period - elapsed % period;
+                    *this->due_time = remaining > std::chrono::steady_clock::time_point::max() - now
+                                          ? std::chrono::steady_clock::time_point::max()
+                                          : now + remaining;
                 }
                 else
                 {
-                    this->active = false;
+                    this->due_time.reset();
                 }
             }
-
             return this->signaled;
         }
 
-        bool try_consume_signal(const std::chrono::steady_clock::time_point now)
+        void consume_signal()
         {
-            if (!this->is_signaled(now))
-            {
-                return false;
-            }
-
-            if (!this->manual_reset)
+            if (this->synchronization)
             {
                 this->signaled = false;
             }
+        }
 
-            return true;
+        void cancel()
+        {
+            this->due_time.reset();
+            this->period_nanoseconds = 0;
         }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
-            buffer.write(this->manual_reset);
-            buffer.write(this->active);
+            buffer.write(this->extended);
+            buffer.write(this->synchronization);
             buffer.write(this->signaled);
-            buffer.write(static_cast<int64_t>(this->due.time_since_epoch().count()));
-            buffer.write(static_cast<int64_t>(this->period.count()));
+            buffer.write_optional(this->due_time);
+            buffer.write(this->period_nanoseconds);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->name);
-            buffer.read(this->manual_reset);
-            buffer.read(this->active);
+            buffer.read(this->extended);
+            buffer.read(this->synchronization);
             buffer.read(this->signaled);
-
-            int64_t due_ticks{};
-            int64_t period_ms{};
-            buffer.read(due_ticks);
-            buffer.read(period_ms);
-            this->due = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(due_ticks));
-            this->period = std::chrono::milliseconds(period_ms);
+            buffer.read_optional(this->due_time);
+            buffer.read(this->period_nanoseconds);
         }
     };
 
@@ -189,6 +202,67 @@ namespace sogen
             buffer.read(this->kill_on_close);
             buffer.read(this->limit_flags);
             buffer.read_vector(this->assigned_child_record_ids);
+        }
+    };
+
+    // A debugger's view of the child processes it debugs; their events reach it through the process manager.
+    struct debug_object : ref_counted_object
+    {
+        struct debuggee
+        {
+            uint64_t process{};
+            uint32_t process_id{};
+            bool exit_reported{};
+            std::vector<uint32_t> thread_ids{};
+
+            void serialize(utils::buffer_serializer& buffer) const
+            {
+                buffer.write(this->process);
+                buffer.write(this->process_id);
+                buffer.write(this->exit_reported);
+                buffer.write_vector(this->thread_ids);
+            }
+
+            void deserialize(utils::buffer_deserializer& buffer)
+            {
+                buffer.read(this->process);
+                buffer.read(this->process_id);
+                buffer.read(this->exit_reported);
+                buffer.read_vector(this->thread_ids);
+            }
+        };
+
+        std::vector<debuggee> debuggees{};
+        bool kill_on_close{};
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write_vector(this->debuggees);
+            buffer.write(this->kill_on_close);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read_vector(this->debuggees);
+            buffer.read(this->kill_on_close);
+        }
+    };
+
+    struct deferred_window_positions : ref_counted_object
+    {
+        std::vector<EMU_WINDOWPOS> positions{};
+        hwnd parent_handle{};
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write_vector(this->positions);
+            buffer.write(this->parent_handle);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read_vector(this->positions);
+            buffer.read(this->parent_handle);
         }
     };
 
@@ -310,6 +384,10 @@ namespace sogen
         emulator_pointer wnd_proc{};
         hmenu system_menu_handle{};
         bool host_surface_window{};
+        // What the last NtUserUpdateLayeredWindow asked for, so presenting the window again keeps its alpha.
+        bool layered_blend{};
+        bool layered_premultiplied_alpha{};
+        uint8_t layered_constant_alpha{255};
         bool message_only{};
         bool unicode_proc{};
         // Guest WINDOWPOS buffer behind WM_WINDOWPOSCHANGED messages posted for repositioning by another process.
@@ -325,25 +403,90 @@ namespace sogen
             return this->class_name == builtin_dialog_class_name;
         }
 
-        // The guest sizes its window via AdjustWindowRect, which inflates the client rect it wants to render
-        // into by the non-client frame. user32 always adds a 1px border for framed windows (SM_CXBORDER/
-        // SM_CYBORDER are hardcoded to 1) and our system metrics for the sizing frame and caption are zero, so
-        // the only inset is that 1px border. Mirror it so the client size we report (GetClientRect, the Vulkan
-        // surface extent, the presented surface) matches what the guest actually renders -- otherwise the
-        // layer (DXVK) renders its whole frame onto a 1px-larger surface and the upscaled image softens.
-        int32_t nonclient_border() const
+        RECT nonclient_insets() const
         {
-            return (this->style & (WS_BORDER | WS_DLGFRAME | WS_THICKFRAME)) != 0 ? 1 : 0;
+            int32_t border = 0;
+
+            const bool caption = (this->style & WS_CAPTION) == WS_CAPTION;
+            if ((this->style & WS_THICKFRAME) != 0)
+            {
+                border = caption ? 3 : 2;
+            }
+            else if (caption)
+            {
+                border = 1;
+            }
+            else if ((this->style & WS_DLGFRAME) != 0)
+            {
+                border = 3;
+            }
+            else if ((this->style & WS_BORDER) != 0)
+            {
+                border = 1;
+            }
+
+            if ((this->ex_style & WS_EX_CLIENTEDGE) != 0)
+            {
+                border += 2;
+            }
+
+            return {.left = border, .top = border, .right = border, .bottom = border};
+        }
+
+        int32_t client_x_offset() const
+        {
+            const auto outer_width = std::max(0, this->width);
+            return std::min<int>(outer_width, this->nonclient_insets().left);
+        }
+
+        int32_t client_y_offset() const
+        {
+            const auto outer_height = std::max(0, this->height);
+            return std::min<int>(outer_height, this->nonclient_insets().top);
+        }
+
+        int32_t client_x() const
+        {
+            return this->x + this->client_x_offset();
+        }
+
+        int32_t client_y() const
+        {
+            return this->y + this->client_y_offset();
         }
 
         int32_t client_width() const
         {
-            return std::max(0, this->width - 2 * this->nonclient_border());
+            const auto outer_width = std::max(0, this->width);
+            const auto insets = this->nonclient_insets();
+            const auto client_left = std::min<int>(outer_width, insets.left);
+            const auto client_right = std::max<int>(client_left, outer_width - insets.right);
+            return client_right - client_left;
         }
 
         int32_t client_height() const
         {
-            return std::max(0, this->height - 2 * this->nonclient_border());
+            const auto outer_height = std::max(0, this->height);
+            const auto insets = this->nonclient_insets();
+            const auto client_top = std::min<int>(outer_height, insets.top);
+            const auto client_bottom = std::max<int>(client_top, outer_height - insets.bottom);
+            return client_bottom - client_top;
+        }
+
+        void sync_guest_rects()
+        {
+            const RECT window_rect{.left = this->x, .top = this->y, .right = this->x + this->width, .bottom = this->y + this->height};
+            const RECT client_rect{
+                .left = this->client_x(),
+                .top = this->client_y(),
+                .right = this->client_x() + this->client_width(),
+                .bottom = this->client_y() + this->client_height(),
+            };
+
+            this->guest.access([&](USER_WINDOW& guest_win) {
+                guest_win.rcWindow = window_rect;
+                guest_win.rcClient = client_rect;
+            });
         }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -369,6 +512,9 @@ namespace sogen
             buffer.write(this->wnd_proc);
             buffer.write(this->system_menu_handle);
             buffer.write(this->host_surface_window);
+            buffer.write(this->layered_blend);
+            buffer.write(this->layered_premultiplied_alpha);
+            buffer.write(this->layered_constant_alpha);
             buffer.write(this->message_only);
             buffer.write(this->unicode_proc);
             buffer.write(this->foreign_window_pos);
@@ -397,6 +543,9 @@ namespace sogen
             buffer.read(this->wnd_proc);
             buffer.read(this->system_menu_handle);
             buffer.read(this->host_surface_window);
+            buffer.read(this->layered_blend);
+            buffer.read(this->layered_premultiplied_alpha);
+            buffer.read(this->layered_constant_alpha);
             buffer.read(this->message_only);
             buffer.read(this->unicode_proc);
             buffer.read(this->foreign_window_pos);
@@ -636,17 +785,21 @@ namespace sogen
     {
         std::u16string name{};
         uint64_t mapped_object{};
+        // Desktop names are scoped to a window station, so the same name in two stations is two desktops.
+        uint64_t window_station{};
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
             buffer.write(this->mapped_object);
+            buffer.write(this->window_station);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->name);
             buffer.read(this->mapped_object);
+            buffer.read(this->window_station);
         }
     };
 
@@ -814,6 +967,7 @@ namespace sogen
     struct file_entry
     {
         std::filesystem::path file_path{};
+        std::u16string short_name{};
         uint64_t file_size{};
         bool is_directory{};
         LARGE_INTEGER creation_time{};
@@ -823,6 +977,7 @@ namespace sogen
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->file_path);
+            buffer.write(this->short_name);
             buffer.write(this->file_size);
             buffer.write(this->is_directory);
             buffer.write(this->creation_time);
@@ -833,6 +988,7 @@ namespace sogen
         void deserialize(utils::buffer_deserializer& buffer)
         {
             buffer.read(this->file_path);
+            buffer.read(this->short_name);
             buffer.read(this->file_size);
             buffer.read(this->is_directory);
             buffer.read(this->creation_time);
@@ -859,20 +1015,26 @@ namespace sogen
         }
     };
 
+    struct directory_change_watch
+    {
+        uint32_t thread_id{};
+        uint64_t event{};
+        uint64_t io_status_block{};
+    };
+
     struct file : ref_counted_object
     {
-        utils::file_handle handle{};
+        guest_file handle{};
         std::u16string name{};
-        std::u16string open_mode{};
-        std::filesystem::path host_path{};
         std::optional<file_enumeration_state> enumeration_state{};
         ACCESS_MASK granted_access{};
         uint32_t file_mode{}; // FileModeInformation
         uint8_t drive_number{'c' - 'a' + 1};
+        std::vector<directory_change_watch> change_watches{};
 
         bool is_file() const
         {
-            return this->handle;
+            return static_cast<bool>(this->handle);
         }
 
         file duplicate_for_access(const ACCESS_MASK desired_access) const
@@ -880,8 +1042,6 @@ namespace sogen
             file copy{};
             copy.handle = this->handle.share();
             copy.name = this->name;
-            copy.open_mode = this->open_mode;
-            copy.host_path = this->host_path;
             copy.enumeration_state = this->enumeration_state;
             copy.granted_access = desired_access;
             copy.file_mode = this->file_mode;
@@ -897,54 +1057,23 @@ namespace sogen
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
-            buffer.write(this->open_mode);
-            buffer.write(this->host_path.u16string());
             buffer.write_optional(this->enumeration_state);
             buffer.write(this->granted_access);
             buffer.write(this->file_mode);
             buffer.write(this->drive_number);
-
-            const auto has_handle = static_cast<bool>(this->handle);
-            buffer.write(has_handle);
-
-            if (has_handle)
-            {
-                buffer.write(this->handle);
-            }
+            buffer.write(this->handle);
+            buffer.write_vector(this->change_watches);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->name);
-            buffer.read(this->open_mode);
-            this->host_path = buffer.read<std::u16string>();
             buffer.read_optional(this->enumeration_state);
             buffer.read(this->granted_access);
             buffer.read(this->file_mode);
             buffer.read(this->drive_number);
-
-            const auto has_handle = buffer.read<bool>();
-
-            this->handle = {};
-
-            if (has_handle)
-            {
-#if defined(OS_WINDOWS)
-                FILE* native_file = _wfopen(this->host_path.c_str(), reinterpret_cast<const wchar_t*>(this->open_mode.c_str()));
-#else
-                FILE* native_file = fopen(u16_to_u8(this->host_path.u16string()).c_str(), u16_to_u8(this->open_mode).c_str());
-#endif
-
-                if (native_file)
-                {
-                    this->handle = native_file;
-                    buffer.read(this->handle);
-                }
-                else
-                {
-                    throw std::runtime_error("Failed to reobtain file handle");
-                }
-            }
+            buffer.read(this->handle);
+            buffer.read_vector(this->change_watches);
         }
     };
 
@@ -958,48 +1087,20 @@ namespace sogen
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
-        // Shared backing for a pagefile-backed section: host-owned memory, allocated once (lazily, on
-        // first successful map or when the section is first shared with another process, sized to
-        // maximum_size) and reused by every view. Real Windows hands a distinct guest VA to every
-        // NtMapViewOfSection call while keeping the underlying pages shared -
-        // handle_NtMapViewOfSection aliases a fresh guest address onto this same memory per view instead
-        // of reusing one address, so independently-live C++-level mappings of the same section never
-        // collide. On POSIX hosts this is a real MAP_SHARED mapping (see shared_backing), which is also
-        // what lets a section duplicated into another sogen host process stay genuinely shared with it.
-        // This object's own lifetime (and therefore the backing's) is governed by ordinary shared_ptr
-        // refcounting: a reference is held by every open handle (section::object) and every
-        // currently-mapped view (process_context::section_views), matching real Windows' documented
-        // view/handle lifetime independence. Not serialized, like other host-aliased memory in this
-        // codebase (see memory_manager::allocate_host_memory) - content is best-effort-only across a
-        // serialize/deserialize round trip.
-        std::shared_ptr<shared_backing> backing{};
         // Holds a reference to the section's slot in the shared kernel arena while it is published in the
         // named-object registry; when the last reference in the whole process tree goes, the named shm
         // object backing the section is unlinked (see kernel_arena::release).
         kernel_state state{};
+        // Snapshot-only: lets handles that shared this object before a save share it again after a restore.
+        uint64_t identity{};
 
-        // Makes sure the section owns at least `size` bytes of backing, growing (and copying) an
-        // existing, too-small one. Growing detaches the section from any process it was already shared
-        // with, which only happens for sections whose real size was unknown when first backed.
-        shared_backing& ensure_backing(const size_t size)
-        {
-            if (!this->backing)
-            {
-                this->backing = shared_backing::create(size);
-            }
-            else if (this->backing->size() < size)
-            {
-                auto grown = shared_backing::create(size);
-                if (this->backing->size() != 0)
-                {
-                    std::memcpy(grown->data(), this->backing->data(), this->backing->size());
-                }
-                this->backing = std::move(grown);
-            }
-
-            return *this->backing;
-        }
-
+        // Shared backing for a pagefile-backed section: allocated once (lazily, on first map) and reused by
+        // every view, so all views of the section see the same memory and section offsets resolve correctly.
+        // 0 until allocated. Freed once the last section handle is closed and no mapped view remains.
+        uint64_t backing_address{};
+        uint32_t mapped_view_count{};
+        // Set instead of backing_address for a section whose views each get their own guest range (see section_views).
+        uint64_t view_storage_id{};
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
         bool is_image() const
@@ -1048,6 +1149,10 @@ namespace sogen
             buffer.write(this->maximum_size);
             buffer.write(this->section_page_protection);
             buffer.write(this->allocation_attributes);
+            buffer.write(this->backing_address);
+            buffer.write(this->mapped_view_count);
+            buffer.write(this->view_storage_id);
+            buffer.write(reinterpret_cast<uint64_t>(this));
             buffer.write_optional<winpe::pe_image_basic_info>(this->cached_image_info);
         }
 
@@ -1058,6 +1163,10 @@ namespace sogen
             buffer.read(this->maximum_size);
             buffer.read(this->section_page_protection);
             buffer.read(this->allocation_attributes);
+            buffer.read(this->backing_address);
+            buffer.read(this->mapped_view_count);
+            buffer.read(this->view_storage_id);
+            buffer.read(this->identity);
             buffer.read_optional(this->cached_image_info);
         }
     };
@@ -1089,21 +1198,19 @@ namespace sogen
             return copy;
         }
 
-        // Reconstructs an equivalent pagefile-backed section from a descriptor plus its backing - the
-        // shape both a freshly-spawned child's inherited-handle bootstrap (recreate_inherited_section,
-        // main.cpp) and a cross-process adopt_section request (execute_adopt_section,
-        // process_control_server.cpp) receive over their respective process boundaries. The backing is
-        // either a genuinely shared mapping of the sender's section or, on hosts without shared memory,
-        // a private snapshot of its content.
-        static section from_pagefile_backing(const uint64_t maximum_size, const uint32_t section_page_protection,
+        // Reconstructs an equivalent pagefile-backed section from a descriptor plus the section_view_manager
+        // storage holding its memory - the shape both a freshly-spawned child's inherited-handle bootstrap
+        // (recreate_inherited_section, main.cpp) and a cross-process adopt_section request
+        // (execute_adopt_section, process_control_server.cpp) receive over their process boundaries.
+        static section from_pagefile_storage(const uint64_t maximum_size, const uint32_t section_page_protection,
                                              const uint32_t allocation_attributes, const ACCESS_MASK granted_access,
-                                             std::shared_ptr<shared_backing> backing)
+                                             const uint64_t view_storage_id)
         {
             section s{};
             s.object->maximum_size = maximum_size;
             s.object->section_page_protection = section_page_protection;
             s.object->allocation_attributes = allocation_attributes;
-            s.object->backing = std::move(backing);
+            s.object->view_storage_id = view_storage_id;
             s.granted_access = granted_access;
             return s;
         }

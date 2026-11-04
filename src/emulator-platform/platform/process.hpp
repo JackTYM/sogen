@@ -558,7 +558,7 @@ namespace sogen
         PsAttributeMax
     };
 
-    using PS_CREATE_STATE = enum _PS_CREATE_STATE
+    enum PS_CREATE_STATE : uint32_t
     {
         PsCreateInitialState,
         PsCreateFailOnFileOpen,
@@ -567,7 +567,7 @@ namespace sogen
         PsCreateFailMachineMismatch,
         PsCreateFailExeName,
         PsCreateSuccess,
-        PsCreateMaximumStates
+        PsCreateMaximumStates,
     };
 
     template <typename Traits>
@@ -586,6 +586,21 @@ namespace sogen
 
             struct
             {
+                Traits::HANDLE FileHandle;
+            } FailSection;
+
+            struct
+            {
+                USHORT DllCharacteristics;
+            } ExeFormat;
+
+            struct
+            {
+                Traits::HANDLE IFEOKey;
+            } ExeName;
+
+            struct
+            {
                 ULONG OutputFlags;
                 Traits::HANDLE FileHandle;
                 Traits::HANDLE SectionHandle;
@@ -599,6 +614,8 @@ namespace sogen
             } SuccessState;
         };
     };
+
+    static_assert(sizeof(PS_CREATE_INFO<EmulatorTraits<Emu64>>) == 0x58);
 
     struct SYSTEM_PROCESSOR_INFORMATION64
     {
@@ -615,7 +632,8 @@ namespace sogen
         ULONGLONG Reserved[3];
     };
 
-#if !defined(OS_WINDOWS) || !defined(_WIN64)
+// The Windows SDK supplies XMM_SAVE_AREA32 only for x64 targets; on ARM64 it must be defined here.
+#if !defined(OS_WINDOWS) || !defined(_WIN64) || defined(_M_ARM64) || defined(__aarch64__)
 
 #if !defined(OS_WINDOWS)
     typedef struct _M128A
@@ -647,11 +665,14 @@ namespace sogen
 
 #endif
 
+// The ARM64 Windows SDK already defines NEON128 (as a union of the same size).
+#if !defined(OS_WINDOWS) || !(defined(_M_ARM64) || defined(__aarch64__))
     using NEON128 = struct _NEON128
     {
         ULONGLONG Low;
         LONGLONG High;
     };
+#endif
 
     typedef struct
 #if !defined(__MINGW64__)
@@ -753,6 +774,20 @@ namespace sogen
     } CONTEXT_EX, *PCONTEXT_EX;
 
     template <typename Traits>
+    struct EMU_QUOTA_LIMITS
+    {
+        Traits::SIZE_T PagedPoolLimit;
+        Traits::SIZE_T NonPagedPoolLimit;
+        Traits::SIZE_T MinimumWorkingSetSize;
+        Traits::SIZE_T MaximumWorkingSetSize;
+        Traits::SIZE_T PagefileLimit;
+        std::int64_t TimeLimit;
+    };
+
+    static_assert(sizeof(EMU_QUOTA_LIMITS<EmulatorTraits<Emu32>>) == 0x20);
+    static_assert(sizeof(EMU_QUOTA_LIMITS<EmulatorTraits<Emu64>>) == 0x30);
+
+    template <typename Traits>
     struct EMU_EXCEPTION_RECORD
     {
         DWORD ExceptionCode;
@@ -813,6 +848,26 @@ namespace sogen
         EMULATOR_CAST(EmulatorTraits<Emu64>::PVOID, KAFFINITY) ActiveProcessorsAffinityMask;
         char NumberOfProcessors;
     } SYSTEM_BASIC_INFORMATION64, *PSYSTEM_BASIC_INFORMATION64;
+
+    // The memory counters at the start of SYSTEM_PERFORMANCE_INFORMATION; the rest of it changes between Windows versions.
+    struct SYSTEM_PERFORMANCE_MEMORY_INFORMATION64
+    {
+        LONGLONG IdleProcessTime;
+        LONGLONG IoReadTransferCount;
+        LONGLONG IoWriteTransferCount;
+        LONGLONG IoOtherTransferCount;
+        ULONG IoReadOperationCount;
+        ULONG IoWriteOperationCount;
+        ULONG IoOtherOperationCount;
+        ULONG AvailablePages;
+        ULONG CommittedPages;
+        ULONG CommitLimit;
+        ULONG PeakCommitment;
+    };
+
+    static_assert(offsetof(SYSTEM_PERFORMANCE_MEMORY_INFORMATION64, AvailablePages) == 44);
+    static_assert(offsetof(SYSTEM_PERFORMANCE_MEMORY_INFORMATION64, PeakCommitment) == 56);
+    static_assert(sizeof(SYSTEM_PERFORMANCE_MEMORY_INFORMATION64) == 64);
 
     typedef struct _SYSTEM_CODEINTEGRITY_INFORMATION
     {
@@ -963,6 +1018,9 @@ namespace sogen
     };
 
 #ifndef OS_WINDOWS
+#define ACL_REVISION            2
+#define ACCESS_ALLOWED_ACE_TYPE 0
+
     struct ACL
     {
         BYTE AclRevision;
@@ -1326,7 +1384,7 @@ namespace sogen
     template <typename Traits>
     struct SYSTEM_MEMORY_USAGE
     {
-        typename Traits::PVOID Name;
+        Traits::PVOID Name;
         USHORT Valid;
         USHORT Standby;
         USHORT Modified;
@@ -1337,7 +1395,7 @@ namespace sogen
     struct SYSTEM_MEMORY_USAGE_INFORMATION
     {
         ULONG Reserved;
-        typename Traits::PVOID EndOfData;
+        Traits::PVOID EndOfData;
         SYSTEM_MEMORY_USAGE<Traits> MemoryUsage[1];
     };
 
@@ -1393,8 +1451,19 @@ namespace sogen
         // Followed by SYSTEM_THREAD_INFORMATION<Traits> Threads[NumberOfThreads]
     };
 
+    template <typename Traits>
+    struct SYSTEM_PAGEFILE_INFORMATION
+    {
+        ULONG NextEntryOffset;
+        ULONG TotalSize;
+        ULONG TotalInUse;
+        ULONG PeakUsage;
+        UNICODE_STRING<Traits> PageFileName;
+    };
+
     static_assert(sizeof(SYSTEM_THREAD_INFORMATION<EmulatorTraits<Emu64>>) == 0x50);
     static_assert(sizeof(SYSTEM_PROCESS_INFORMATION<EmulatorTraits<Emu64>>) == 0x100);
+    static_assert(sizeof(SYSTEM_PAGEFILE_INFORMATION<EmulatorTraits<Emu64>>) == 0x20);
 
     struct PROCESS_PRIORITY_CLASS
     {

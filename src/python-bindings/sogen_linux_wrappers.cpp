@@ -397,7 +397,7 @@ namespace sogen::py
         auto envp = parse_linux_environment(get_kwarg_object(kwargs, "environment"));
         auto linux_emu = std::make_unique<linux_emulator>(create_x86_64_emulator(get_backend_type(kwargs)),
                                                           get_kwarg<std::filesystem::path>(kwargs, "emulation_root", {}));
-        linux_emu->process.current_working_directory = linux_file_system::normalize_guest_path_string(
+        linux_emu->process.current_working_directory = posix_file_system::normalize_guest_path_string(
             get_kwarg<std::filesystem::path>(kwargs, "working_directory", std::filesystem::path{"/"}).string());
         apply_linux_path_mappings(*linux_emu, get_kwarg_object(kwargs, "path_mappings"), false);
         apply_linux_path_mappings(*linux_emu, get_kwarg_object(kwargs, "read_only_path_mappings"), true);
@@ -709,6 +709,10 @@ namespace sogen::py
 
     void linux_symbol_hook_registry::refresh_index()
     {
+        // Runs from the module load callback, which the emulator raises while start() holds the GIL released.
+        // Rebuilding the index destroys and creates hook_handle objects, and each one owns an nb::object.
+        nb::gil_scoped_acquire gil{};
+
         for (auto& [_, entry] : this->entries)
         {
             entry.hooks.clear();
@@ -1176,10 +1180,17 @@ namespace sogen::py
     hook_handle linux_hook_registry::memory_violation(nb::object callback)
     {
         auto* emulator = this->emu;
-        const auto observer_id = emulator->add_memory_violation_observer(
-            [cb = std::move(callback)](uint64_t address, size_t size, memory_operation operation, memory_violation_type type) {
+        auto callback_holder = std::shared_ptr<nb::object>{
+            new nb::object(std::move(callback)),
+            [](nb::object* cb) {
                 nb::gil_scoped_acquire gil{};
-                const auto result = cb(address, size, operation, type);
+                delete cb;
+            },
+        };
+        const auto observer_id = emulator->add_memory_violation_observer(
+            [cb = std::move(callback_holder)](uint64_t address, size_t size, memory_operation operation, memory_violation_type type) {
+                nb::gil_scoped_acquire gil{};
+                const auto result = (*cb)(address, size, operation, type);
                 return coerce_memory_violation_continuation(result);
             });
 
@@ -1261,7 +1272,7 @@ namespace sogen::py
         return {this->emu->process, *this->emu, nb::cast(this, nb::rv_policy::reference_internal)};
     }
 
-    linux_memory_manager& sogen_linux_emulator::memory() const
+    posix_memory_manager& sogen_linux_emulator::memory() const
     {
         return this->emu->memory;
     }

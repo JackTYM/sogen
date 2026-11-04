@@ -43,6 +43,10 @@ namespace sogen
         switch (nt_protection)
         {
         case PAGE_NOACCESS:
+            if (ext == memory_permission_ext::guard)
+            {
+                return std::nullopt;
+            }
             common = memory_permission::none;
             break;
         case PAGE_READONLY:
@@ -128,6 +132,18 @@ namespace sogen
         default:
             return protection;
         }
+    }
+
+    inline uint32_t map_emulator_to_nt_protection(const nt_memory_permission permission)
+    {
+        const auto protection = map_emulator_to_nt_protection(permission.common);
+        return permission.is_guarded() ? protection | PAGE_GUARD : protection;
+    }
+
+    inline uint32_t map_emulator_to_nt_allocation_protection(const nt_memory_permission permission, const memory_region_kind kind)
+    {
+        const auto protection = map_emulator_to_nt_allocation_protection(permission.common, kind);
+        return permission.is_guarded() ? protection | PAGE_GUARD : protection;
     }
 
 } // namespace sogen

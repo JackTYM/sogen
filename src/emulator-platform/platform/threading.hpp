@@ -107,12 +107,6 @@ namespace sogen
         ULONG BytesToRead;                           // Number of bytes to read.
     } THREAD_TEB_INFORMATION, *PTHREAD_TEB_INFORMATION;
 
-    struct THREAD_CYCLE_TIME_INFORMATION
-    {
-        ULONGLONG AccumulatedCycles;
-        ULONGLONG CurrentCycleCount;
-    };
-
     // A 32-bit caller (e.g. wow64.dll's own exception-preparation code, which queries
     // ThreadTebInformation as 32-bit guest code) passes this smaller layout - TebInformation is a
     // 32-bit pointer here, making the struct 12 bytes instead of THREAD_TEB_INFORMATION's 16.

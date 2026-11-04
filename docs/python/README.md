@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://github.com/momo5502/sogen"><img src="https://momo5502.com/sogen/banner.png" height="220" alt="Sogen" /></a>
+  <a href="https://github.com/momo5502/sogen"><img src="https://momo5502.com/sogen/sogen.svg" height="200" alt="Sogen" /></a>
 </p>
 
 Sogen exposes Python bindings for Windows and Linux userspace emulation. The Python API is meant for scripting runs, building small analysis helpers, and quickly iterating on callbacks; Windows bindings also expose hooks for deeper analysis.
@@ -17,6 +17,8 @@ Project links:
 - Ready-made emulation root: https://sogen.dev/root.zip
 
 ## What you need
+
+ARM64 executables use the same API with an ARM64 emulation root; see `examples/python/arm64_application.py`.
 
 The Python package still needs an **emulation root** at runtime. Download ready-made root here:
 
@@ -87,7 +89,9 @@ import sogen
 app = sogen.windows.create_application(
     "c:/test-sample.exe",
     emulation_root="./root",
-    path_mappings={"c:/a.txt": Path("./a.txt")},
+    root_mode="ro",
+    mounts=[(Path("./a.txt"), "c:/a.txt", "rw")],
+    network="live",
     port_mappings={28970: 28980},
 )
 
@@ -95,6 +99,17 @@ app.callbacks.on_stdout = lambda text: print(text, end="")
 app.start()
 print("exit status:", app.process.exit_status)
 ```
+
+`root_mode` sets the access mode of the drives in the emulation root. Each entry in `mounts` is
+`(host_path, guest_path)` or `(host_path, guest_path, mode)`. The host path can be a file or a directory. The mode is
+`"ro"` or `"rw"`, and both settings default to `"ro"`. A guest write to a `"ro"` path fails with
+`STATUS_ACCESS_DENIED`, and the host files do not change. `path_mappings={guest_path: host_path}` is the same as
+`mounts` with the default mode.
+
+Positional arguments after the application are joined into the process command line. An argument that is empty or
+contains a space, a tab or a quote is quoted, and its own quotes are escaped.
+`command_line="..."` sets the whole command line verbatim instead, program name included, as `CreateProcess` would
+receive it. When `command_line` is given, positional arguments are ignored.
 
 Linux applications also accept guest cwd, filesystem mapping, and TCP port mapping kwargs:
 
@@ -130,6 +145,10 @@ are proxied to the configured host loopback port, while unmapped ports keep the
 synthetic Linux socket behavior.
 
 Path and port mappings explicitly opt into host filesystem and network access. They are convenience bridges for tests and controlled analysis workflows, not a malware sandbox boundary.
+
+Windows emulators accept `network="offline"` (default) or `network="live"`. Other strings raise `ValueError`, and non-string values raise `TypeError`. In offline mode, guest sockets use an in-process loopback that cannot reach the host network, DNS queries resolve to no addresses, and the Steam bridge is disabled. `port_mappings` apply only in live mode. A `dns_resolver` callback that returns `None` falls back to the resolver of the selected mode, which resolves to no addresses in offline mode.
+
+`app.callbacks.on_socket_activity` receives `(action, address)` when the guest calls `connect`, `bind`, or `sendto`. The action is one of `"connect"`, `"bind"`, or `"sendto"`, and the address is a string like `"127.0.0.1:28970"` with the port as the guest sees it.
 
 ## Choosing backend
 
@@ -538,6 +557,15 @@ emu.deserialize_state(state)
 assert emu.read_memory(base, 4) == b"ABCD"
 assert emu.read_register(sogen.Register.rax) == 0x1234
 ```
+
+`read_register` and `write_register` move 64-bit integers. The Windows emulator
+also provides `read_register_bytes(register, size)` and
+`write_register_bytes(register, data)`, which move raw little-endian bytes and so
+reach the 128-bit XMM registers on x86-64 and `sogen.arm64.Register.v0` to `v31`
+on ARM64. A value shorter than the register is zero-extended, bytes past the
+register's width read as zero, and both accept at most 64 bytes.
+`sogen.Register.fs_base` and `gs_base` name the segment bases; on 64-bit Windows,
+`gs_base` is the current thread's TEB.
 
 Linux serialized state uses version tag `linux-emulator-state-v1` and includes
 backend CPU state, executed instruction count, stop diagnostics, mapped memory

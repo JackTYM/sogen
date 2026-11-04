@@ -59,6 +59,7 @@ namespace sogen
                     win_emu.process.create_thread(win_emu.memory, factory.start_routine, factory.start_parameter, stack_size, create_flags);
                 factory.worker_threads.push_back(thread_handle);
                 factory.starting_worker_threads.push_back(thread_handle);
+                win_emu.wake_idle_vcpu();
             }
 
             bool is_waiting_on(const emulator_thread& thread, const handle io_completion_handle)
@@ -145,7 +146,7 @@ namespace sogen
                     continue;
                 }
 
-                io_completion_wait::materialize_signaled_wait_packets(process, factory.io_completion_handle);
+                io_completion_wait::materialize_signaled_wait_packets(win_emu, factory.io_completion_handle);
 
                 const auto* completion = process.io_completions.get(factory.io_completion_handle);
                 if (completion && !completion->queue.empty())
@@ -282,6 +283,7 @@ namespace sogen
 
             worker_factory factory{};
             factory.name = name;
+            factory.inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
 
             handle retained_io_completion_handle{};
             if (!io_completion_wait::retain_handle_reference(c.proc, c.vcpu.active_thread, io_completion_handle,
@@ -370,6 +372,28 @@ namespace sogen
 
             switch (info_class)
             {
+            case WorkerFactoryStackInformation: {
+                struct stack_information
+                {
+                    uint64_t reserve;
+                    uint64_t commit;
+                };
+
+                if (worker_factory_information_length != sizeof(stack_information))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                stack_information information{};
+                if (!c.emu.try_read_memory(worker_factory_information, &information, sizeof(information)))
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                factory->stack_reserve = information.reserve;
+                factory->stack_commit = information.commit;
+                return STATUS_SUCCESS;
+            }
+
             case WorkerFactoryTimeout:
             case WorkerFactoryRetryTimeout:
             case WorkerFactoryIdleTimeout: {
@@ -485,17 +509,6 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            case WorkerFactoryStackInformation: {
-                if (worker_factory_information_length != 2 * sizeof(uint64_t))
-                {
-                    return STATUS_INFO_LENGTH_MISMATCH;
-                }
-
-                factory->stack_reserve = value_u64.read();
-                factory->stack_commit = emulator_object<uint64_t>{c.emu, worker_factory_information + sizeof(uint64_t)}.read();
-                return STATUS_SUCCESS;
-            }
-
             default: {
                 if (worker_factory_information_length == 0)
                 {
@@ -558,6 +571,8 @@ namespace sogen
                     --factory->pending_release_count;
                     return STATUS_INVALID_HANDLE;
                 }
+
+                c.win_emu.wake_idle_vcpu();
             }
 
             worker_factory_support::ensure_minimum_workers(c.win_emu, *factory);
@@ -604,7 +619,7 @@ namespace sogen
             }
 
             const auto removed =
-                io_completion_wait::dequeue_io_completion_entries(c.proc, factory->io_completion_handle, mini_packets, count);
+                io_completion_wait::dequeue_io_completion_entries(c.win_emu, factory->io_completion_handle, mini_packets, count);
             packets_returned.write_if_valid(removed);
             if (removed > 0)
             {

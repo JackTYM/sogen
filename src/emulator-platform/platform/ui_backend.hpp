@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace sogen
 {
@@ -49,6 +50,27 @@ namespace sogen
         int stride{};
         ui_surface_format format{ui_surface_format::bgra8};
         const void* pixels{};
+
+        // What UpdateLayeredWindow's BLENDFUNCTION asked for. A layered surface is blended by the host compositor;
+        // premultiplied_alpha mirrors AC_SRC_ALPHA, which decides whether the source pixels carry their own alpha
+        // or the window shows at constant_alpha alone.
+        bool layered{};
+        bool premultiplied_alpha{};
+        uint8_t constant_alpha{255};
+    };
+
+    struct ui_extent
+    {
+        uint32_t width{};
+        uint32_t height{};
+    };
+
+    struct ui_rect
+    {
+        int32_t left{};
+        int32_t top{};
+        int32_t right{};
+        int32_t bottom{};
     };
 
     struct ui_event
@@ -57,6 +79,26 @@ namespace sogen
         uint32_t message{};
         uint64_t wParam{};
         uint64_t lParam{};
+
+        // Set on WM_MOUSEMOVE while the host reports relative motion: the host cursor does not move, so the
+        // emulator moves the guest cursor by this delta instead of taking the position from lParam.
+        std::optional<std::pair<int32_t, int32_t>> relative_motion{};
+
+        // Pointer events injected by the guest name the screen position the cursor moves to when they are delivered,
+        // which can be after low-level hooks held them back.
+        std::optional<std::pair<int32_t, int32_t>> cursor_target{};
+
+        // Input the guest injected with SendInput. Low-level hooks can hold it back, so the details that depend on the
+        // key state (system keys, the previous-state and context bits, held buttons) are resolved when the hooks and the
+        // window see it. Key-downs also post the character they produce, since the guest's TranslateMessage does not
+        // translate; VK_PACKET keys carry theirs in injected_character.
+        bool injected{};
+        uint64_t extra_info{};
+        char16_t injected_character{};
+
+        // A host window move carries the position SDL reported. WM_MOVE's lParam is 16-bit, but the window model and
+        // GetWindowRect keep the full int32 coordinates, which a virtual desktop needs.
+        std::optional<std::pair<int32_t, int32_t>> host_position{};
     };
 
     class ui_backend
@@ -68,6 +110,11 @@ namespace sogen
 
         virtual void set_event_sink(event_sink sink) = 0;
         virtual void pump_events() = 0;
+
+        // Called when the user asks the host to save the process, with input the guest never receives.
+        virtual void set_snapshot_request_sink(const std::function<void()>& /*sink*/)
+        {
+        }
 
         virtual void reset()
         {
@@ -121,6 +168,32 @@ namespace sogen
         {
         }
 
+        // These two wait for the UI thread, which takes the emulator's kernel lock to deliver input. Callers must not
+        // hold it.
+        virtual std::vector<std::string> vulkan_instance_extensions()
+        {
+            return {};
+        }
+
+        virtual uint64_t create_vulkan_surface(const hwnd /*window*/, const uint64_t /*instance*/)
+        {
+            return 0;
+        }
+
+        // The extent a Vulkan swapchain on the window should have, for backends whose surface does not follow the
+        // guest window's size by itself. std::nullopt keeps the extent the driver reports.
+        virtual std::optional<ui_extent> vulkan_surface_extent(const hwnd /*window*/)
+        {
+            return std::nullopt;
+        }
+
+        // The vkGetInstanceProcAddr the GPU bridge should use, when the backend loads its own Vulkan driver.
+        // Null means the platform's default Vulkan loader.
+        virtual void* vulkan_get_instance_proc_addr()
+        {
+            return nullptr;
+        }
+
         // Warp the host cursor so it tracks a guest SetCursorPos. Without this, the next host mouse-motion
         // event reports the (unchanged) host position and overwrites the recentered guest cursor, making
         // relative-mouse deltas (in-game look) jump. screen_x/y are emulated-desktop screen coordinates.
@@ -132,6 +205,13 @@ namespace sogen
         // SetCursor(NULL)) and recenter every frame; without honoring this the host cursor stays visible
         // and flickers as the guest warps it back to the center.
         virtual void set_cursor_visibility(const bool /*visible*/)
+        {
+        }
+
+        // Confine the host cursor to a guest ClipCursor rectangle (emulated screen coordinates), or release it.
+        // With relative set, the host reports raw motion instead, which a hidden cursor needs: mouse-look keeps
+        // receiving deltas at the edge of the clip rectangle, as raw input does on Windows.
+        virtual void set_cursor_clip(const hwnd /*window*/, const std::optional<ui_rect>& /*screen_rect*/, const bool /*relative*/)
         {
         }
     };

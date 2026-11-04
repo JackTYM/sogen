@@ -51,8 +51,8 @@ namespace sogen
             kusd.DismountCount = 0x00000006;
             kusd.ComPlusPackage = 0x00000001;
             kusd.LastSystemRITEventTickCount = 0x01ec1fd3;
-            kusd.NumberOfPhysicalPages = 0x00bf0958;
-            kusd.FullNumberOfPhysicalPages = 0x0000000000bf0958;
+            kusd.NumberOfPhysicalPages = simulated_physical_page_count;
+            kusd.FullNumberOfPhysicalPages = simulated_physical_page_count;
             kusd.TickCount.TickCount.LowPart = 0x001f7f05;
             kusd.TickCount.TickCountQuad = 0x00000000001f7f05;
             kusd.Cookie = 0;
@@ -78,10 +78,8 @@ namespace sogen
             // CpuSetContext -> RtlWow64GetCurrentCpuArea, the user-mode WOW64 exception-escalation
             // path) tests XState.EnabledFeatures against a fixed mask (0x40000000000009FC, covering
             // AVX/MPX/AVX-512/CET-class feature bits) to decide whether the WOW64 CPU area needs an
-            // extended (XSTATE) context region on top of the plain legacy x86 CONTEXT. sogen's own
-            // WOW64 gate-crossing machinery (fex_x86_64_emulator.cpp's enter_wow64_64bit_from_
-            // wow64svc_thunk/enter_wow64_32bit_from_run_simulated_code) only ever populates the
-            // plain legacy CONTEXT fields of that CPU area, never an extended region - claiming any
+            // extended (XSTATE) context region on top of the plain legacy x86 CONTEXT. sogen only ever
+            // populates the plain legacy CONTEXT fields of that CPU area, never an extended region - claiming any
             // of those masked bits here makes real ntdll's RtlCopyContext (reached only via this
             // rare exception-escalation path, not the ordinary syscall-return path every other WOW64
             // syscall uses) detect a genuine size mismatch and fail with STATUS_BUFFER_OVERFLOW.
@@ -133,6 +131,34 @@ namespace sogen
         }
     }
 
+    void apply_arm64_processor(KUSER_SHARED_DATA64& kusd, const uint64_t isar0, const uint64_t isar1)
+    {
+        const auto field = [](const uint64_t value, const unsigned shift) { return (value >> shift) & 0xF; };
+
+        kusd.ImageNumberLow = IMAGE_FILE_MACHINE_ARM64;
+        kusd.ImageNumberHigh = IMAGE_FILE_MACHINE_ARM64;
+        kusd.NativeProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM64;
+        kusd.XState = {};
+
+        auto& features = kusd.ProcessorFeatures.arr;
+        std::ranges::fill(features, std::remove_cvref_t<decltype(features[0])>{});
+        for (const auto feature : {PF_COMPARE_EXCHANGE_DOUBLE, PF_NX_ENABLED, PF_ARM_VFP_32_REGISTERS_AVAILABLE,
+                                   PF_ARM_NEON_INSTRUCTIONS_AVAILABLE, PF_FASTFAIL_AVAILABLE, PF_ARM_DIVIDE_INSTRUCTION_AVAILABLE,
+                                   PF_ARM_64BIT_LOADSTORE_ATOMIC, PF_ARM_FMAC_INSTRUCTIONS_AVAILABLE, PF_ARM_V8_INSTRUCTIONS_AVAILABLE})
+        {
+            features[feature] = 1;
+        }
+
+        // ID_AA64ISAR0_EL1: AES [7:4], SHA1 [11:8], SHA2 [15:12], CRC32 [19:16], Atomic [23:20], DP [47:44].
+        // ID_AA64ISAR1_EL1: JSCVT [15:12], LRCPC [23:20].
+        features[PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE] = field(isar0, 4) && field(isar0, 8) && field(isar0, 12);
+        features[PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE] = field(isar0, 16) != 0;
+        features[PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE] = field(isar0, 20) >= 2;
+        features[PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE] = field(isar0, 44) != 0;
+        features[PF_ARM_V83_JSCVT_INSTRUCTIONS_AVAILABLE] = field(isar1, 12) != 0;
+        features[PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE] = field(isar1, 20) != 0;
+    }
+
     namespace utils
     {
         static void serialize(buffer_serializer& buffer, const KUSER_SHARED_DATA64& kusd)
@@ -147,9 +173,10 @@ namespace sogen
         }
     }
 
-    kusd_mmio::kusd_mmio(memory_manager& memory, utils::clock& clock)
+    kusd_mmio::kusd_mmio(memory_manager& memory, utils::clock& clock, const bool intercept)
         : memory_(&memory),
-          clock_(&clock)
+          clock_(&clock),
+          intercept_(intercept)
     {
     }
 
@@ -158,15 +185,39 @@ namespace sogen
         this->deregister_mmio();
     }
 
-    kusd_mmio::kusd_mmio(utils::buffer_deserializer& buffer)
-        : kusd_mmio(buffer.read<memory_manager_wrapper>(), buffer.read<clock_wrapper>())
-    {
-    }
-
     void kusd_mmio::setup(const windows_version_manager& version, const fake_environment_config& fake_env, const bool is_wow64_process)
     {
         setup_kusd(this->kusd_, version, fake_env, is_wow64_process);
         this->register_mmio();
+    }
+
+    void kusd_mmio::refresh()
+    {
+        if (this->intercept_ || !this->registered_)
+        {
+            return;
+        }
+
+        const std::scoped_lock lock(this->mutex_);
+        this->update();
+        this->write_page();
+    }
+
+    void kusd_mmio::write_page()
+    {
+        // Guests read KSYSTEM_TIME without locking: High1Time, then LowPart, retrying until High2Time matches. That
+        // only works if High2Time is written before LowPart and High1Time after it, but copying the page writes
+        // LowPart first. Writing the new High2Time values ahead of the copy restores the order.
+        const auto write_high2_time = [this](const size_t offset, const volatile KSYSTEM_TIME& time) {
+            const LONG high2_time = time.High2Time;
+            this->memory_->write_memory(KUSD_ADDRESS + offset + offsetof(KSYSTEM_TIME, High2Time), &high2_time, sizeof(high2_time));
+        };
+
+        write_high2_time(offsetof(KUSER_SHARED_DATA64, InterruptTime), this->kusd_.InterruptTime);
+        write_high2_time(offsetof(KUSER_SHARED_DATA64, SystemTime), this->kusd_.SystemTime);
+        write_high2_time(offsetof(KUSER_SHARED_DATA64, TickCount), this->kusd_.TickCount.TickCount);
+
+        this->memory_->write_memory(KUSD_ADDRESS, &this->kusd_, KUSD_SIZE);
     }
 
     void kusd_mmio::serialize(utils::buffer_serializer& buffer) const
@@ -237,15 +288,34 @@ namespace sogen
         }
 
         this->registered_ = true;
+        this->memory_->register_fixed_guest_range(KUSD_ADDRESS, KUSD_BUFFER_SIZE);
 
-        this->memory_->allocate_mmio(
-            KUSD_ADDRESS, KUSD_BUFFER_SIZE,
-            [this](const uint64_t addr, void* data, const size_t size) {
-                this->read(addr, data, size); //
-            },
-            [](const uint64_t, const void*, const size_t) {
-                // Writing not supported!
-            });
+        if (this->intercept_)
+        {
+            const bool mapped = this->memory_->allocate_mmio(
+                KUSD_ADDRESS, KUSD_BUFFER_SIZE,
+                [this](const uint64_t addr, void* data, const size_t size) {
+                    this->read(addr, data, size); //
+                },
+                [](const uint64_t, const void*, const size_t) {
+                    // Writing not supported!
+                });
+            if (!mapped)
+            {
+                throw std::runtime_error("Failed to map KUSER_SHARED_DATA");
+            }
+            return;
+        }
+
+        // Classified as MMIO like the trapping variant, so the guest can't release it and snapshots leave it to
+        // this object to recreate.
+        if (!this->memory_->allocate_memory(KUSD_ADDRESS, KUSD_BUFFER_SIZE, memory_permission::read, false, memory_region_kind::mmio))
+        {
+            throw std::runtime_error("Failed to map KUSER_SHARED_DATA");
+        }
+        const std::scoped_lock lock(this->mutex_);
+        this->update();
+        this->write_page();
     }
 
     void kusd_mmio::deregister_mmio()

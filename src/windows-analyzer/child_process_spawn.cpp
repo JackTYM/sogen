@@ -24,10 +24,6 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
-
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
 #endif
 
 namespace sogen
@@ -345,11 +341,19 @@ namespace sogen
                 argv.push_back(config.registry_path.string());
             }
 
-            for (const auto& [source, target] : config.path_mappings)
+            for (const auto& registry_file : config.registry_files)
             {
-                argv.emplace_back("-p");
-                argv.push_back(source.string());
-                argv.push_back(target.string());
+                argv.emplace_back("--reg-file");
+                argv.push_back(registry_file.string());
+            }
+
+            argv.emplace_back("--root-mode");
+            argv.emplace_back(to_string(config.root_mode));
+
+            for (const auto& mount : config.mounts)
+            {
+                argv.emplace_back("--mount");
+                argv.push_back(render_mount_spec(mount));
             }
 
             argv.emplace_back("--vcpus");
@@ -359,7 +363,7 @@ namespace sogen
             {
                 static const std::map<backend_type, std::string> backend_names{
                     {backend_type::unicorn, "unicorn"}, {backend_type::icicle, "icicle"}, {backend_type::whp, "whp"},
-                    {backend_type::kvm, "kvm"},         {backend_type::fex, "fex"},
+                    {backend_type::kvm, "kvm"},         {backend_type::fex, "fex"},       {backend_type::hvf, "hvf"},
                 };
                 argv.emplace_back("--backend");
                 argv.push_back(backend_names.at(*config.backend));
@@ -399,6 +403,16 @@ namespace sogen
             if (config.disable_instruction_precision)
             {
                 argv.emplace_back("--no-inst-precision");
+            }
+            argv.emplace_back("--network");
+            argv.emplace_back(network::to_string(config.network));
+            if (config.spoof_gpu_features)
+            {
+                argv.emplace_back("--spoof-gpu-features");
+            }
+            if (config.elevated)
+            {
+                argv.emplace_back("--elevated");
             }
             if (config.offline)
             {
@@ -1017,31 +1031,6 @@ namespace sogen
 #endif
     }
 
-    std::filesystem::path resolve_own_executable_path()
-    {
-#if defined(__APPLE__)
-        uint32_t size = 0;
-        _NSGetExecutablePath(nullptr, &size);
-
-        std::string buffer(size, '\0');
-        if (_NSGetExecutablePath(buffer.data(), &size) != 0)
-        {
-            throw std::runtime_error("Failed to resolve own executable path");
-        }
-
-        while (!buffer.empty() && buffer.back() == '\0')
-        {
-            buffer.pop_back();
-        }
-
-        return std::filesystem::canonical(buffer);
-#elif defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-        return std::filesystem::canonical("/proc/self/exe");
-#else
-        throw std::runtime_error("Child process spawning is not supported on this platform");
-#endif
-    }
-
     child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
                                               std::vector<inherited_pipe_handle> inherited_pipes,
                                               std::vector<inherited_section_handle> inherited_sections,
@@ -1312,10 +1301,9 @@ namespace sogen
         boot_process spawn_boot_process(const child_process_spawn_config& config, windows_emulator& win_emu, const windows_path& image,
                                         const std::string_view name)
         {
-            const auto host_image = win_emu.file_sys.translate(image);
-            if (!std::filesystem::exists(host_image))
+            if (!win_emu.file_sys.stat(image))
             {
-                throw std::runtime_error(std::string(name) + " is missing from the emulation root (" + host_image.string() +
+                throw std::runtime_error(std::string(name) + " is missing from the emulation root (" + image.string() +
                                          "); the target was not started");
             }
 
@@ -1326,8 +1314,8 @@ namespace sogen
             application_settings settings{
                 .application = image,
                 .working_directory = windows_path{"c:/windows/system32"},
-                .process_id = guest_pid,
                 .local_system = true,
+                .process_id = guest_pid,
             };
 
             auto outcome = spawn_child_process(config, std::move(settings), {}, {}, {}, arena->backing());

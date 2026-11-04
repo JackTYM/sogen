@@ -1,16 +1,17 @@
 #include "std_include.hpp"
 #include "io_device.hpp"
+#include "io_completion_wait.hpp"
 #include "windows_emulator.hpp"
 #include "devices/afd_endpoint.hpp"
 #include "devices/mount_point_manager.hpp"
 #include "devices/security_support_provider.hpp"
+#include "devices/cryptography.hpp"
 #include "devices/named_pipe.hpp"
 #include "devices/network_store_interface.hpp"
 #include "devices/gpu_bridge.hpp"
 #include "devices/steam_bridge.hpp"
 #include "devices/console.hpp"
 #include <iostream>
-#include <random>
 
 namespace sogen
 {
@@ -48,36 +49,50 @@ namespace sogen
             }
         };
 
-        // bcryptprimitives seeds each process's user-mode RNG (ProcessPrng, RtlGenRandom, ...) from these KsecDD
-        // ioctls on \Device\CNG. Identical seeds make every process generate the same "unguessable" tokens,
-        // which Chromium treats as forged IPC when two renderers report the same V8 context or frame token.
-        constexpr ULONG IOCTL_KSEC_RNG = 0x390004;
-        constexpr ULONG IOCTL_KSEC_RNG_REKEY = 0x390008;
-
-        struct cng_device : stateless_device
+        // \Device\DeviceApi\CMApi, which cfgmgr32 asks for device lists and properties. Device ID lists come back
+        // empty, i.e. no device matches the filter. Succeeding without writing the reply made
+        // CM_Get_Device_ID_List_Size fail, so SetupDiGetClassDevs returned INVALID_HANDLE_VALUE, on which Unreal
+        // Engine 4 enumerates monitors forever. Other requests keep succeeding without data.
+        struct device_api_device : stateless_device
         {
-            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
+            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
             {
-                std::vector<std::byte> output(context.output_buffer ? context.output_buffer_length : 0);
-                if (context.io_control_code == IOCTL_KSEC_RNG || context.io_control_code == IOCTL_KSEC_RNG_REKEY)
+                constexpr ULONG ioctl_get_device_id_list = 0x470803;
+                if (c.io_control_code != ioctl_get_device_id_list)
                 {
-                    std::random_device entropy{};
-                    for (auto& byte : output)
-                    {
-                        byte = static_cast<std::byte>(entropy());
-                    }
+                    return STATUS_SUCCESS;
                 }
 
-                if (!output.empty())
+                // cfgmgr32 reads the request's status and the list size from this header and the list right after it,
+                // but sizes its buffer as 20 bytes plus the list, and asks for the size with a 20-byte buffer.
+                struct device_id_list_header
                 {
-                    win_emu.emu().write_memory(context.output_buffer, output.data(), output.size());
+                    uint32_t reserved1;
+                    NTSTATUS status;
+                    uint32_t list_bytes;
+                    uint32_t reserved2;
+                };
+
+                static_assert(sizeof(device_id_list_header) == 16);
+
+                constexpr ULONG minimum_reply = 20;
+                constexpr char16_t empty_list = u'\0';
+                if (!c.output_buffer || c.output_buffer_length < minimum_reply)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                if (context.io_status_block)
+                const bool fits = c.output_buffer_length >= minimum_reply + sizeof(empty_list);
+                const device_id_list_header header{
+                    .reserved1 = 0,
+                    .status = fits ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL,
+                    .list_bytes = sizeof(empty_list),
+                    .reserved2 = 0,
+                };
+                win_emu.memory.write_memory(c.output_buffer, &header, sizeof(header));
+                if (fits)
                 {
-                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
-                    block.Information = output.size();
-                    context.io_status_block.write(block);
+                    win_emu.memory.write_memory(c.output_buffer + sizeof(header), &empty_list, sizeof(empty_list));
                 }
 
                 return STATUS_SUCCESS;
@@ -111,9 +126,9 @@ namespace sogen
             return std::make_unique<dummy_device>();
         }
 
-        std::unique_ptr<io_device> create_cng_device(const device_creation_context&)
+        std::unique_ptr<io_device> create_device_api_device(const device_creation_context&)
         {
-            return std::make_unique<cng_device>();
+            return std::make_unique<device_api_device>();
         }
 
         std::unique_ptr<io_device> create_transport_stub_device(const device_creation_context&)
@@ -139,28 +154,25 @@ namespace sogen
 
         static const std::map<std::u16string_view, device_factory> registry = {
             // Dummy
-            {u"CNG"sv, create_cng_device},
             {u"RasAcd"sv, create_dummy_device},
             {u"PcwDrv"sv, create_dummy_device},
-            {u"DeviceApi\\CMApi"sv, create_dummy_device},
+            {u"DeviceApi\\CMApi"sv, create_device_api_device},
             {u"DeviceApi\\CMNotify"sv, create_dummy_device},
             {u"ConDrv\\Server"sv, create_dummy_device},
             {u"MMCSS\\MmThread"sv, create_dummy_device},
             {u"DeviceApi\\Dev\\Query"sv, create_unsupported_io_device},
             // Generic
             {u"Console"sv, create_console_device},
-            // Multimedia Class Scheduler. avrt!AvSetMmThreadCharacteristics opens this to raise the audio
-            // render worker's scheduling priority; the emulator has no priority classes, so accepting the open
-            // and succeeding its ioctls is enough for the worker to proceed.
-            {u"MMCSS\\MmThread"sv, create_dummy_device},
             {u"Nsi"sv, create_network_store_interface},
             {u"MountPointManager"sv, create_mount_point_manager},
             {u"KsecDD"sv, create_security_support_provider},
+            {u"CNG"sv, create_cryptography_device},
             {u"NamedPipe"sv, create_named_pipe_device},
             {u"SogenGpu"sv, create_gpu_bridge},
             {u"SogenSteam"sv, create_steam_bridge},
             // AFD
             {u"Afd\\Endpoint"sv, create_afd_endpoint},
+            {u"Afd\\Mio"sv, create_afd_mio_endpoint},
             {u"Afd\\AsyncConnectHlp"sv, create_afd_async_connect_hlp},
             // Transport
             {u"Tcp"sv, create_transport_stub_device},
@@ -169,6 +181,12 @@ namespace sogen
             {u"RawIp"sv, create_transport_stub_device},
         };
         return registry;
+    }
+
+    bool is_device_supported(std::u16string_view device)
+    {
+        const auto& registry = get_device_registry();
+        return registry.contains(device);
     }
 
     bool needs_32_bit_devices(const windows_emulator& win_emu)
@@ -198,91 +216,193 @@ namespace sogen
         return this->vcpu->thread();
     }
 
-    void io_device::post_completion(windows_emulator& win_emu, const io_device_context& c, const NTSTATUS status,
-                                    const uint64_t information, const bool completed_synchronously) const
+    NTSTATUS io_device::execute_ioctl(windows_emulator& win_emu, const io_device_context& c)
     {
-        if (completed_synchronously && NT_SUCCESS(status) &&
-            (this->get_completion_notification_modes() & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS))
+        auto request = this->prepare_io_context(c);
+        if (request.io_status_block)
         {
-            return;
+            request.io_status_block.write({});
         }
 
-        const auto association = this->get_completion_port();
-        if (!association)
-        {
-            return;
-        }
-
-        if (auto* completion = win_emu.process.io_completions.get(association->port))
-        {
-            io_completion_message message{};
-            message.key_context = association->key;
-            message.apc_context = c.apc_context;
-            message.io_status_block.Status = status;
-            message.io_status_block.Information = information;
-            completion->enqueue(message);
-        }
-    }
-
-    NTSTATUS io_device::execute_ioctl(windows_emulator& win_emu, const io_device_context& c, const bool completes_pending_request)
-    {
-        if (c.io_status_block)
-        {
-            c.io_status_block.write({});
-        }
-
-        const auto result = this->io_control(win_emu, c);
-        write_io_status(c.io_status_block, result);
+        const auto result = this->io_control(win_emu, request);
+        write_io_status(request, result);
 
         // A synchronously-completing IOCTL must signal the optional completion event the caller passed, so a
         // thread that issues the request and then waits on the event is released. Asynchronous devices return
         // STATUS_PENDING and signal the event themselves once the delayed operation completes.
-        if (result != STATUS_PENDING && c.event.bits)
+        if (result != STATUS_PENDING && request.event.bits)
         {
-            if (auto* e = win_emu.process.events.get(c.event); e)
+            if (auto* e = win_emu.process.events.get(request.event); e)
             {
                 e->set_signaled(true);
+                win_emu.wake_idle_vcpu();
             }
         }
 
-        const auto information = c.io_status_block ? c.io_status_block.read().Information : 0;
-
-        // WoW64 hands a pending request a transient 64-bit IO_STATUS_BLOCK, so the caller's own 32-bit block
-        // (its OVERLAPPED, passed as ApcContext when no APC routine is used) is never updated by the write
-        // above; the real kernel writes the 32-bit block directly when the request completes asynchronously.
-        if (completes_pending_request && result != STATUS_PENDING && win_emu.process.is_wow64_process && c.apc_context && !c.apc_routine)
+        // Windows queues no completion packet for a request without an APC context (no OVERLAPPED). mswsock issues
+        // its internal AFD calls that way on sockets bound to a thread pool TP_IO; a packet for each of them corrupts
+        // the pool's task list (fast fail 3 in TppWorkerFindTask).
+        constexpr ULONG file_skip_completion_port_on_success = 0x1;
+        if (result != STATUS_PENDING && NT_SUCCESS(result) && request.apc_context &&
+            !(request.completion_notification_flags & file_skip_completion_port_on_success))
         {
-            const auto status32 = static_cast<uint32_t>(result);
-            const auto information32 = static_cast<uint32_t>(information);
-            win_emu.emu().write_memory(c.apc_context, &status32, sizeof(status32));
-            win_emu.emu().write_memory(c.apc_context + sizeof(status32), &information32, sizeof(information32));
-        }
-
-        // A handle associated with an I/O completion port (NtSetInformationFile's FileCompletionInformation,
-        // i.e. CreateIoCompletionPort on an already-open handle) posts a completion packet for every finished
-        // request on real Windows, even one that completed synchronously - callers built around
-        // GetQueuedCompletionStatus never poll the event or the synchronous return value. Requests without an
-        // APC context (no OVERLAPPED, e.g. mswsock's internal synchronous AFD calls) and requests that fail
-        // synchronously post nothing; a thread pool TP_IO would otherwise receive completions it never started.
-        if (result != STATUS_PENDING && c.apc_context != 0 && (completes_pending_request || !NT_ERROR(result)))
-        {
-            this->post_completion(win_emu, c, result, information, !completes_pending_request);
+            queue_io_completion(win_emu, request);
         }
 
         return result;
     }
 
+    void io_device::queue_io_completion(windows_emulator& win_emu, const io_device_context& context)
+    {
+        if (!context.completion_port.bits || !context.io_status_block || context.suppresses_completion_packet())
+        {
+            return;
+        }
+
+        auto* completion = win_emu.process.io_completions.get(context.completion_port);
+        if (!completion)
+        {
+            return;
+        }
+
+        io_completion_message message{};
+        message.key_context = context.completion_key;
+        message.apc_context = context.apc_context;
+        message.io_status_block = context.io_status_block.read();
+        completion->enqueue(message);
+        win_emu.wake_idle_vcpu();
+    }
+
     NTSTATUS io_device_container::io_control(windows_emulator& win_emu, const io_device_context& context)
     {
         this->assert_validity();
-        win_emu.callbacks.on_ioctrl(*this->device_, this->device_name_, context.io_control_code);
-        return this->device_->io_control(win_emu, context);
+        win_emu.callbacks.on_ioctrl(*this->file_->device, this->device_name_, context.io_control_code);
+        return this->file_->device->io_control(win_emu, context);
+    }
+
+    io_device_context io_device_container::prepare_io_context(const io_device_context& context) const
+    {
+        auto request = context;
+        if (this->file_->completion_association)
+        {
+            request.completion_port = this->file_->completion_association->completion_port;
+            request.completion_key = this->file_->completion_association->key;
+        }
+        request.completion_notification_flags = this->file_->completion_notification_flags;
+        request.granted_access = this->granted_access;
+        if (request.vcpu && request.vcpu->active_thread)
+        {
+            request.issuing_thread_id = request.thread().id;
+        }
+        return request;
+    }
+
+    bool io_device_container::cancel_io(windows_emulator& win_emu, const uint64_t io_status_block,
+                                        const std::optional<uint32_t> issuing_thread_id)
+    {
+        this->assert_validity();
+        return this->file_->device->cancel_io(win_emu, io_status_block, issuing_thread_id);
+    }
+
+    bool io_device_container::has_pending_io(const uint32_t issuing_thread_id) const
+    {
+        this->assert_validity();
+        return this->file_->device->has_pending_io(issuing_thread_id);
+    }
+
+    NTSTATUS io_device_container::set_completion_association(process_context& process, const emulator_thread* active_thread,
+                                                             const handle completion_port, const uint64_t key)
+    {
+        this->assert_validity();
+        if (this->file_->completion_association)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        const auto resolved_port = process.resolve_object_pseudo_handle(completion_port, active_thread);
+        if (resolved_port.value.type != handle_types::io_completion || !process.io_completions.get(resolved_port))
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        handle retained_port{};
+        if (!io_completion_wait::retain_handle_reference(process, active_thread, resolved_port, retained_port))
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        this->file_->completion_association = device_completion_association{.completion_port = retained_port, .key = key};
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS io_device_container::replace_completion_association(process_context& process, const emulator_thread* active_thread,
+                                                                 const handle completion_port, const uint64_t key)
+    {
+        this->assert_validity();
+        if (this->file_->completion_association)
+        {
+            io_completion_wait::release_handle_reference(process, this->file_->completion_association->completion_port);
+            this->file_->completion_association.reset();
+        }
+
+        if (!completion_port.bits)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        return this->set_completion_association(process, active_thread, completion_port, key);
+    }
+
+    void io_device_container::set_completion_notification_flags(const ULONG flags)
+    {
+        this->assert_validity();
+        // SetFileCompletionNotificationModes cannot clear a mode once it has been set.
+        this->file_->completion_notification_flags |= flags;
+    }
+
+    void io_device_container::release_references(process_context& process)
+    {
+        this->assert_validity();
+        if (!this->is_last_file_reference())
+        {
+            return;
+        }
+        this->file_->device->release_references(process);
+        if (this->file_->completion_association)
+        {
+            io_completion_wait::release_handle_reference(process, this->file_->completion_association->completion_port);
+            this->file_->completion_association.reset();
+        }
     }
 
     void io_device_container::work(windows_emulator& win_emu)
     {
         this->assert_validity();
-        this->device_->work(win_emu);
+        this->file_->device->work(win_emu);
+    }
+
+    void io_device_container::restore_after_state_restore(windows_emulator& win_emu)
+    {
+        this->assert_validity();
+        this->file_->device->restore_after_state_restore(win_emu);
+    }
+
+    bool io_device_container::supports_serialization() const
+    {
+        this->assert_validity();
+        return this->file_->device->supports_serialization();
+    }
+
+    void io_device_container::prepare_serialization(windows_emulator& win_emu)
+    {
+        this->assert_validity();
+        this->file_->device->prepare_serialization(win_emu);
+    }
+
+    bool io_device_container::suspends_at_frame_end() const
+    {
+        this->assert_validity();
+        return this->file_->device->suspends_at_frame_end();
     }
 
     void io_device_container::serialize_object(utils::buffer_serializer& buffer) const
@@ -291,16 +411,37 @@ namespace sogen
 
         buffer.write(this->is_32_bit_);
         buffer.write_string(this->device_name_);
-        this->device_->serialize(buffer);
+        buffer.write(this->granted_access);
+        buffer.write_shared(this->file_, [&](const file_state& file) {
+            buffer.write_optional(file.completion_association);
+            buffer.write(file.completion_notification_flags);
+            file.device->serialize(buffer);
+        });
     }
 
     void io_device_container::deserialize_object(utils::buffer_deserializer& buffer)
     {
         buffer.read(this->is_32_bit_);
         buffer.read_string(this->device_name_);
+        buffer.read(this->granted_access);
+        buffer.read_shared(this->file_, [&](file_state& file) {
+            buffer.read_optional(file.completion_association);
+            buffer.read(file.completion_notification_flags);
+            file.device = create_device(this->device_name_, {.is_32_bit = this->is_32_bit_});
+            file.device->deserialize(buffer);
+        });
+    }
 
-        this->setup();
-        this->device_->deserialize(buffer);
+    io_device_container io_device_container::duplicate(const ACCESS_MASK access, const bool inheritable) const
+    {
+        this->assert_validity();
+        io_device_container result;
+        result.is_32_bit_ = this->is_32_bit_;
+        result.device_name_ = this->device_name_;
+        result.file_ = this->file_;
+        result.granted_access = access;
+        result.inherit = inheritable;
+        return result;
     }
 
 } // namespace sogen

@@ -1,0 +1,158 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <optional>
+#include <utility>
+#include <vector>
+
+#include <memory_permission.hpp>
+#include <memory_region.hpp>
+#include <memory_interface.hpp>
+#include <address_utils.hpp>
+#include <serialization.hpp>
+
+namespace sogen
+{
+    struct memory_layout
+    {
+        uint64_t allocation_granularity{};
+        uint64_t min_mmap_address{};
+        uint64_t max_mmap_end{};
+        uint64_t default_mmap_base{};
+    };
+
+    enum class memory_region_kind : uint8_t;
+
+    struct posix_memory_region_info : basic_memory_region<memory_permission>
+    {
+        uint64_t allocation_base{};
+        size_t allocation_length{};
+        bool is_reserved{};
+        bool is_committed{};
+        memory_permission initial_permissions{};
+        memory_region_kind kind{};
+
+        posix_memory_region_info();
+    };
+
+    struct posix_memory_stats
+    {
+        uint64_t region_count{};
+        uint64_t mapped_bytes{};
+        uint64_t executable_bytes{};
+    };
+
+    class posix_memory_manager : public memory_interface
+    {
+      public:
+        posix_memory_manager(memory_interface& memory, const memory_layout& layout)
+            : memory_(&memory),
+              layout_(layout),
+              mmap_base_(layout.default_mmap_base)
+        {
+        }
+
+        struct mapped_region
+        {
+            size_t length{};
+            memory_permission permissions{};
+        };
+
+        using mapped_region_map = std::map<uint64_t, mapped_region>;
+        using reserved_range_map = std::map<uint64_t, uint64_t>;
+
+        // memory_interface
+        void read_memory(uint64_t address, void* data, size_t size) const override;
+        bool try_read_memory(uint64_t address, void* data, size_t size) const override;
+        void write_memory(uint64_t address, const void* data, size_t size) override;
+        bool try_write_memory(uint64_t address, const void* data, size_t size) override;
+
+        // Allocate and map a region
+        bool allocate_memory(uint64_t address, size_t size, memory_permission permissions);
+        uint64_t allocate_memory(size_t size, memory_permission permissions, uint64_t start = 0);
+
+        // Change protection on mapped memory
+        bool protect_memory(uint64_t address, size_t size, memory_permission permissions);
+
+        // Unmap a region
+        bool release_memory(uint64_t address, size_t size);
+
+        // Map a page-aligned region over whatever is mapped there. Invalid arguments are rejected before anything is
+        // released; a backend that then fails to map throws with the range already unmapped.
+        bool replace_memory(uint64_t address, size_t size, memory_permission permissions);
+
+        // Unmap everything and drop every reservation, as a fresh address space
+        void unmap_all_memory();
+
+        // Find a free region of the given size
+        uint64_t find_free_allocation_base(size_t size, uint64_t start = 0) const;
+
+        // Check if a region overlaps any existing mapping
+        bool overlaps_mapped_region(uint64_t address, size_t size) const;
+
+        // Keep a range out of automatic placement without mapping it; explicit allocations inside it still succeed
+        bool reserve_memory(uint64_t address, size_t size);
+
+        const mapped_region_map& get_mapped_regions() const
+        {
+            return this->mapped_regions_;
+        }
+
+        std::vector<posix_memory_region_info> get_mapped_region_infos() const;
+        std::optional<posix_memory_region_info> get_region_info(uint64_t address) const;
+        bool is_writable_range(uint64_t address, size_t size) const;
+        posix_memory_stats compute_memory_stats() const;
+
+        using memory_allocate_callback = std::function<void(uint64_t address, size_t size, memory_permission permissions, bool committed)>;
+        using memory_protect_callback = std::function<void(uint64_t address, size_t size, memory_permission permissions)>;
+        using memory_release_callback = std::function<void(uint64_t address, size_t size)>;
+
+        uint64_t add_memory_allocate_callback(memory_allocate_callback callback);
+        uint64_t add_memory_protect_callback(memory_protect_callback callback);
+        uint64_t add_memory_release_callback(memory_release_callback callback);
+        void remove_memory_callback(uint64_t id);
+
+        uint64_t get_mmap_base() const
+        {
+            return this->mmap_base_;
+        }
+
+        void set_mmap_base(uint64_t address)
+        {
+            this->mmap_base_ = address;
+        }
+
+        // Replaces this address space with a copy of another one, as fork does.
+        void copy_address_space(const posix_memory_manager& source);
+
+        void serialize_memory_state(utils::buffer_serializer& buffer) const;
+        void deserialize_memory_state(utils::buffer_deserializer& buffer);
+
+      private:
+        memory_interface* memory_{};
+        memory_layout layout_{};
+        mapped_region_map mapped_regions_{};
+        reserved_range_map reserved_ranges_{};
+        uint64_t mmap_base_{};
+        uint64_t next_memory_callback_id_{1};
+        std::vector<std::pair<uint64_t, memory_allocate_callback>> memory_allocate_callbacks_{};
+        std::vector<std::pair<uint64_t, memory_protect_callback>> memory_protect_callbacks_{};
+        std::vector<std::pair<uint64_t, memory_release_callback>> memory_release_callbacks_{};
+
+        std::optional<uint64_t> find_overlap_end(uint64_t address, size_t size) const;
+
+        void notify_memory_allocate(uint64_t address, size_t size, memory_permission permissions, bool committed);
+        void notify_memory_protect(uint64_t address, size_t size, memory_permission permissions);
+        void notify_memory_release(uint64_t address, size_t size);
+
+        void map_memory(uint64_t address, size_t size, memory_permission permissions) override;
+        void unmap_memory(uint64_t address, size_t size) override;
+        void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) override;
+        void map_mmio(uint64_t address, size_t size, std::function<void(uint64_t, void*, size_t)> read_cb,
+                      std::function<void(uint64_t, const void*, size_t)> write_cb) override;
+    };
+
+} // namespace sogen

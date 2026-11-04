@@ -16,6 +16,8 @@ EXPORTS
     vkBindImageMemory
     vkBindImageMemory2
     vkCmdBeginRenderPass
+    vkCmdBeginRenderPass2
+    vkCmdBeginTransformFeedbackEXT
     vkCmdBeginRendering
     vkCmdBindDescriptorSets
     vkCmdBindDescriptorSets2KHR
@@ -25,28 +27,43 @@ EXPORTS
     vkCmdBeginDebugUtilsLabelEXT
     vkCmdBindVertexBuffers
     vkCmdBindVertexBuffers2
+    vkCmdBindTransformFeedbackBuffersEXT
     vkCmdBlitImage2
+    vkCmdBlitImage
     vkCmdBlitImage2KHR
     vkCmdClearAttachments
     vkCmdClearColorImage
     vkCmdClearDepthStencilImage
     vkCmdBeginQuery
+    vkCmdBeginQueryIndexedEXT
     vkCmdCopyBuffer
     vkCmdCopyBuffer2
+    vkCmdCopyQueryPoolResults
     vkCmdCopyBufferToImage
     vkCmdCopyBufferToImage2
     vkCmdCopyImage
     vkCmdCopyImage2
     vkCmdCopyImageToBuffer
     vkCmdCopyImageToBuffer2
+    vkCmdDispatchBase
     vkCmdResolveImage
     vkCmdResolveImage2
+    vkCmdSetDeviceMask
     vkCmdUpdateBuffer
     vkCmdDispatch
     vkCmdDispatchIndirect
     vkCmdDraw
     vkCmdDrawIndexed
+    vkCmdDrawIndexedIndirect
+    vkCmdDrawIndexedIndirectCount
+    vkCmdDrawIndexedIndirectCountKHR
+    vkCmdDrawIndirect
+    vkCmdDrawIndirectCount
+    vkCmdDrawIndirectCountKHR
+    vkCmdDrawIndirectByteCountEXT
     vkCmdEndQuery
+    vkCmdEndQueryIndexedEXT
+    vkCmdEndTransformFeedbackEXT
     vkCmdResetEvent
     vkCmdResetEvent2
     vkCmdResetQueryPool
@@ -55,8 +72,13 @@ EXPORTS
     vkCmdWaitEvents
     vkCmdWaitEvents2
     vkCmdWriteTimestamp
+    vkCmdWriteTimestamp2
+    vkCmdWriteTimestamp2KHR
     vkCmdEndDebugUtilsLabelEXT
     vkCmdEndRenderPass
+    vkCmdEndRenderPass2
+    vkCmdNextSubpass
+    vkCmdNextSubpass2
     vkCmdEndRendering
     vkCmdExecuteCommands
     vkCmdFillBuffer
@@ -65,6 +87,7 @@ EXPORTS
     vkCmdPipelineBarrier2
     vkCmdPushConstants
     vkCmdPushConstants2KHR
+    vkCmdSetAlphaToCoverageEnableEXT
     vkCmdSetBlendConstants
     vkCmdSetCullMode
     vkCmdSetDepthBias
@@ -76,10 +99,13 @@ EXPORTS
     vkCmdSetDepthTestEnable
     vkCmdSetDepthWriteEnable
     vkCmdSetFrontFace
+    vkCmdSetLineRasterizationModeEXT
     vkCmdSetLineWidth
     vkCmdSetPrimitiveRestartEnable
     vkCmdSetPrimitiveTopology
+    vkCmdSetRasterizationSamplesEXT
     vkCmdSetRasterizerDiscardEnable
+    vkCmdSetSampleMaskEXT
     vkCmdSetScissor
     vkCmdSetScissorWithCount
     vkCmdSetStencilCompareMask
@@ -93,6 +119,7 @@ EXPORTS
     vkCreateBufferView
     vkCreateCommandPool
     vkCreateComputePipelines
+    vkCreatePrivateDataSlot
     vkCreateQueryPool
     vkCreateDebugUtilsMessengerEXT
     vkCreateDescriptorPool
@@ -107,8 +134,11 @@ EXPORTS
     vkCreateImageView
     vkCreateInstance
     vkCreatePipelineLayout
+    vkCreatePipelineCache
     vkCreateRenderPass
+    vkCreateRenderPass2
     vkCreateSampler
+    vkCreateSamplerYcbcrConversion
     vkCreateSemaphore
     vkCreateShaderModule
     vkCreateSwapchainKHR
@@ -116,6 +146,7 @@ EXPORTS
     vkDestroyBuffer
     vkDestroyBufferView
     vkDestroyCommandPool
+    vkDestroyPrivateDataSlot
     vkDestroyQueryPool
     vkDestroyDebugUtilsMessengerEXT
     vkDestroyDescriptorPool
@@ -129,9 +160,11 @@ EXPORTS
     vkDestroyImageView
     vkDestroyInstance
     vkDestroyPipeline
+    vkDestroyPipelineCache
     vkDestroyPipelineLayout
     vkDestroyRenderPass
     vkDestroySampler
+    vkDestroySamplerYcbcrConversion
     vkDestroySemaphore
     vkDestroyShaderModule
     vkDestroySurfaceKHR
@@ -139,35 +172,63 @@ EXPORTS
     vkDeviceWaitIdle
     vkEndCommandBuffer
     vkEnumerateDeviceExtensionProperties
+    vkEnumerateDeviceLayerProperties
+    vkEnumeratePhysicalDeviceGroups
     vkFlushMappedMemoryRanges
+    vkGetBufferOpaqueCaptureAddress
+    vkGetDeviceGroupPeerMemoryFeatures
+    vkGetDeviceMemoryOpaqueCaptureAddress
+    vkGetDeviceQueue2
+    vkGetPhysicalDeviceExternalBufferProperties
+    vkGetPhysicalDeviceExternalFenceProperties
+    vkGetPhysicalDeviceToolProperties
+    vkGetPrivateData
+    vkGetRenderAreaGranularity
     vkInvalidateMappedMemoryRanges
     vkEnumerateInstanceExtensionProperties
     vkEnumerateInstanceLayerProperties
     vkEnumerateInstanceVersion
     vkEnumeratePhysicalDevices
     vkFreeCommandBuffers
+    vkFreeDescriptorSets
     vkFreeMemory
     vkGetBufferDeviceAddress
     vkGetBufferMemoryRequirements
     vkGetBufferMemoryRequirements2
+    vkGetDeviceProcAddr
+    vkGetDeviceQueue
     vkGetDeviceBufferMemoryRequirements
     vkGetDeviceImageMemoryRequirements
     vkGetDeviceImageSubresourceLayoutKHR
-    vkGetDeviceProcAddr
-    vkGetDeviceQueue
+    vkGetDeviceImageSparseMemoryRequirements
+    vkGetDeviceMemoryCommitment
+    vkGetDescriptorSetLayoutSupport
+    vkGetDescriptorSetLayoutSupportKHR
     vkGetEventStatus
     vkGetFenceStatus
     vkGetImageMemoryRequirements
     vkGetImageMemoryRequirements2
+    vkGetImageSparseMemoryRequirements
+    vkGetImageSparseMemoryRequirements2
+    vkGetImageSparseMemoryRequirements2KHR
     vkGetImageSubresourceLayout
     vkGetImageSubresourceLayout2KHR
     vkGetInstanceProcAddr
     vkGetMemoryWin32HandleKHR
+    vkGetPipelineCacheData
     vkGetQueryPoolResults
     vkGetSemaphoreCounterValue
+    vkGetShaderModuleCreateInfoIdentifierEXT
+    vkGetShaderModuleIdentifierEXT
     vkGetPhysicalDeviceExternalSemaphoreProperties
     vkGetPhysicalDeviceFeatures
     vkGetPhysicalDeviceFeatures2
+    vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR
+    vkGetPhysicalDeviceFragmentShadingRatesKHR
+    vkGetPhysicalDeviceCalibrateableTimeDomainsKHR
+    vkGetPhysicalDeviceCalibrateableTimeDomainsEXT
+    vkGetCalibratedTimestampsKHR
+    vkGetCalibratedTimestampsEXT
     vkGetPhysicalDeviceFormatProperties
     vkGetPhysicalDeviceFormatProperties2
     vkGetPhysicalDeviceImageFormatProperties
@@ -190,7 +251,12 @@ EXPORTS
     vkGetPhysicalDeviceWin32PresentationSupportKHR
     vkGetSwapchainImagesKHR
     vkMapMemory
+    vkMergePipelineCaches
+    vkQueueBeginDebugUtilsLabelEXT
+    vkQueueEndDebugUtilsLabelEXT
+    vkQueueInsertDebugUtilsLabelEXT
     vkQueuePresentKHR
+    vkQueueBindSparse
     vkQueueSubmit
     vkQueueSubmit2
     vkQueueWaitIdle
@@ -201,9 +267,13 @@ EXPORTS
     vkResetEvent
     vkResetQueryPool
     vkResetFences
+    vkSetDebugUtilsObjectNameEXT
+    vkSetDebugUtilsObjectTagEXT
     vkSetEvent
+    vkSetPrivateData
     vkSignalSemaphore
     vkSubmitDebugUtilsMessageEXT
+    vkTrimCommandPool
     vkUnmapMemory
     vkUpdateDescriptorSets
     vkUpdateDescriptorSetWithTemplate

@@ -1,249 +1,168 @@
 # FEX backend — development notes
 
 The FEX-Emu emulator backend (`sogen::fex`). A standalone backend that mirrors the structure of the
-other backends, selected at runtime via `EMULATOR_FEX=1`. Its functional target is **macOS on Apple
-Silicon** — [FEX](https://fex-emu.com) only JITs x86/x86-64 to ARM64.
+other backends, selected at runtime via `EMULATOR_FEX=1`. Its functional targets are **macOS on Apple
+Silicon** and **Android on AArch64** — [FEX](https://fex-emu.com) only JITs x86/x86-64 to ARM64.
 
 ## Status
 
-**Working on macOS/Apple Silicon — the only functional target.** On Darwin the backend builds,
-links, and runs: it passes the full regression suite (`test-sample.exe`, `hello.exe`,
-`busybox.exe`) matching the Unicorn backend's behavior byte-for-byte, and has been validated
-against ~40 pre-existing sample executables (process/thread introspection, synchronization
-primitives, sections, security tokens, the registry, pipes, sockets, timers, file/directory I/O,
-GUI dialogs, DXGK harnesses, and 32-bit WoW64 binaries) with every remaining discrepancy traced
-to a backend-agnostic gap (an unimplemented syscall, or a missing staged system-DLL export) rather
-than a difference between this backend and the existing one.
+Working on Darwin/Apple Silicon: `test-sample.exe` runs to completion, matching the Unicorn
+backend's behavior. Android/AArch64 is now a functional target and currently requires a 4KB host
+page. Other AArch64 Linux hosts have build coverage only and are not expected to run.
 
-**ARM64 Linux is build-tested only.** The Linux path compiles in CI but has never been run and is
-not expected to work: it installs no fault signal handlers, has no MMIO emulation (the
-KUSER_SHARED_DATA decode-and-emulate path is `__APPLE__`-gated), and passes FEXCore an empty
-default-constructed `HostFeatures` instead of real hardware detection (a `TODO` in
-`fex_x86_64_emulator.cpp`). Android is excluded outright by the CMake gate.
+## Security / address-space model
 
-**32-bit WoW64 processes are supported** (see "WoW64 support" below): a real 32-bit guest process
-runs against a second, lazily-created 32-bit FEXCore Context, with state marshaled across the
-bitness-switch trampoline on every crossing.
+**FEX shares the guest and host address space — there is no isolation between them.** Unlike
+Unicorn/Icicle (a fully software-simulated guest address space, sandboxed from the host process by
+construction) or KVM/WHP (real hardware virtualization, a genuinely separate guest physical address
+space), FEX is an in-process JIT: it translates x86/x86-64 to ARM64 and executes the result directly
+inside this process, treating guest virtual addresses as host virtual addresses (a 1:1 mapping,
+`guest VA == host VA`, except for a WoW64 process's low 4GiB, see below). Concretely:
 
-### Performance
+- `map_memory()` is a real `mmap(MAP_FIXED)` at the guest address; `read_memory()`/`write_memory()`
+  are a direct host `memcpy` once the range is known to be mapped — there is no page-table or bounds
+  check standing between a guest access and this process's own memory.
+- A guest out-of-bounds read or write can therefore land directly in this process's own memory —
+  including sogen's own runtime state — in a way that is structurally impossible under
+  Unicorn/Icicle. This is an inherent property of how FEX-Emu is designed to work (it is built as a
+  transparent Linux binfmt-style translation layer, the same category as `qemu-user`/`box64`, where
+  "guest pointer is a host pointer" is exactly what makes syscall passthrough and native-speed
+  execution possible), not a gap specific to this port. See
+  [`FEX-Emu/FEX`'s own `docs/ProgrammingConcerns.md`](https://github.com/FEX-Emu/FEX/blob/main/docs/ProgrammingConcerns.md)
+  and `docs/allocator_usage.md`, which state this plainly from FEX's own side.
+- This backend's own address-space protections (`host_reserved` region tracking in
+  `windows-emulator/memory_manager.cpp` and the Apple-only FEXCore internal arena) are mitigations,
+  not a sandbox: they keep ordinary guest
+  allocations from *landing on* addresses this backend or the host process needs, reducing collision
+  risk. They do not and cannot stop a guest from computing an arbitrary pointer into any other valid
+  host-mapped memory — there is no hard fault boundary for that, by design.
+- Practically, this means FEX is not an appropriate backend for running guest code you do not trust
+  at all to stay within its own memory — the same class of workload Unicorn/Icicle's sandboxed model
+  is suited for.
+- `deps/CMakeLists.txt` explicitly disables FEX's own internal allocator
+  (`-DENABLE_FEX_ALLOCATOR=OFF`, `-DENABLE_JEMALLOC_GLIBC_ALLOC=OFF`) — guest allocation is owned by
+  sogen's memory manager. On Apple, the backend separately installs FEXCore allocator hooks that
+  steer FEXCore's own anonymous internal mappings into a dedicated 4GiB host-reserved arena, keeping
+  them out of guest allocation ranges. This is still only a collision mitigation, not isolation.
+- A WoW64 process's low 4GiB is backed by a separate 4GiB host window, and FEX rebases every guest
+  access below 4GiB into it, since the host may already use that range (Android's ART heap) or cannot
+  map it at all (Darwin's `__PAGEZERO`). Host memory aliased below 4GiB is mapped a second time inside
+  the window instead of appearing at its own address.
+
+## Architecture
+
+- `fex_x86_64_emulator.hpp`/`.cpp` — factory `sogen::fex::create_x86_64_emulator()` and the backend
+  itself; see the file's own top-of-file comment for the implementation-level version of the model
+  described above.
+- `fex_x86_64_common.hpp` — register classification (`classify_gpr` and friends) mapping
+  `x86_register` to FEXCore's `CPUState`.
+- Guest `syscall` instructions route back to sogen through a `FEXCore::HLE::SyscallHandler`, which
+  invokes the registered syscall instruction-hook — the same mechanism the Windows emulation layer
+  uses for every backend.
+- Single-address execution hooks (`hook_memory_execution(address, ...)`, the debugger's breakpoints)
+  plant a real `0xCC` at the address and step over the original instruction with the trap flag once
+  the hook ran; reads of guest memory see the original byte. `start(1)` single-steps one
+  instruction the same way. The other fine-grained hooks (`hook_memory_read/write`, range and global
+  execution hooks, `hook_basic_block`) are accepted for API compatibility but never fire, exactly
+  like the KVM backend: guest code runs natively, so there is no per-access instrumentation point.
+- `--vcpus N` runs N vCPUs, each driving its own FEXCore thread of the one shared Context on its own
+  host thread. Host faults are routed to the vCPU running on the faulting thread; the machine-wide
+  tables (regions, host claims, page shadow, hooks) are guarded by one lock that is never held while
+  taking FEXCore's code invalidation mutex. Code changes invalidate every vCPU's cached translations.
+- Guest stores into translated code are detected on macOS the way FEXCore's default SMC mode
+  (MTrack) expects of its frontend: writable pages FEX reports compiling code from are
+  write-protected, and the first write to one invalidates its code and lifts the protection.
+- `deps/FEX` is pinned to a personal fork (`github.com/JackTYM/FEX`), not upstream FEX-Emu directly —
+  carries a 10-submodule removal (376MB trim) and a couple of small Darwin-portability/opdispatch
+  patches; see the fork's own commit history for the exact list. **Pinning to a fork means these
+  patches don't automatically track upstream FEX-Emu security fixes** — periodically rebasing onto a
+  newer upstream release is a maintenance cost worth weighing.
+
+## Build & test
+
+No special setup needed, unlike the KVM backend (which requires a Docker-on-Windows workaround to
+build or run at all): from an ARM64 Clang host (Apple Silicon macOS or ARM64 Linux), the ordinary
+`cmake --preset=release` picks this backend up automatically once `deps/FEX` is checked out (see the
+root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requires a 4KB host page.
+
+## Performance
 
 On a pure compute-bound workload (a tight ALU loop with no syscalls beyond timestamping), this
 backend measured roughly **129x less wall-clock time** than the Unicorn backend on the same host
 (~3.4s vs. ~439s for 2 billion loop iterations) — JIT-compiled native ARM64 code running directly on
 the CPU, versus per-block interpretation. A mixed, syscall-heavy smoke-test workload showed a
-smaller but still substantial ~27-30x gap. Expect the larger multiplier to dominate for CPU-bound
-guest workloads (game logic, physics, scripting) and the smaller one where I/O/syscall dispatch is a
-significant fraction of runtime.
+smaller but still substantial ~27-30x gap.
 
-### Known limitations
+FEXCore's TSO/SMC emulation costs can be traded away for experiments through environment variables,
+each left at FEXCore's own default unless set: `EMULATOR_FEX_VECTOR_TSO`, `EMULATOR_FEX_MEMCPY_TSO`,
+`EMULATOR_FEX_NO_TSO`, `EMULATOR_FEX_SMC_NONE`, `EMULATOR_FEX_STRICT_SPLIT_LOCKS` and
+`EMULATOR_FEX_LRCPC2`. `EMULATOR_FEX_BLOCK_JIT_NAMING` makes FEXCore write `/tmp/perf-<pid>.map`
+with an entry per translated block, and `EMULATOR_FEX_DUMPIR=<dir>` dumps each block's IR.
 
-- **`comctl32.dll`-linked apps** (e.g. a bundled calculator sample) fail identically on both this
-  backend and Unicorn due to a staged `comctl32.dll` build that doesn't export the ordinals the
-  sample binaries were linked against. This is a staged-asset version mismatch, not a code bug, and
-  is not fixable without staging a different `comctl32.dll`.
-- **A plain guest store to read-only memory aborts the emulator instead of raising an exception.**
-  The fault-classification decoder (`decode_arm64_store`) only recognizes the STLR family, so a
-  plain (non-atomic) STR to memory that *is* mapped read-only gets misclassified as a read and
-  routed through fault-recovery paths that both fail — the result is an unhandled host signal that
-  aborts the whole emulator process, not a `STATUS_ACCESS_VIOLATION` delivered to the guest. This
-  affects any guest that deliberately writes to read-only memory and catches the resulting
-  exception (packers/DRM protections do this routinely). A plain store to *unmapped* memory does
-  reach the guest as an exception, but with the read/write flag (`ExceptionInformation[0]`)
-  wrongly reporting a read. See `decode_arm64_store`'s comment for why the decode table cannot
-  simply be broadened.
-- **`wow64cpu.dll`'s turbo-table fast-path is bypassed.** The reverse (32→64) gate crossing does
-  execute real `wow64cpu.dll` 64-bit dispatch code: after marshaling state, it resumes at the real
-  `TurboDispatchJumpAddressEnd`, whose genuine code path (through `Wow64SystemServiceEx` in
-  `wow64.dll`) services every 32-bit syscall. What is *not* executed is only the turbo-thunk
-  fast-path at `TurboDispatchJumpAddressStart` (`jmp [r15+rcx*8]` through the per-service jump
-  table) — the crossing always forces the generic dispatch continuation instead of selecting a
-  specialized turbo thunk.
+## Known limitations
 
-## What is in place
+- **A read-modify-write to a `PAGE_NOACCESS` page is reported to the guest as a read.** Faults are
+  classified by the ESR WnR bit, and for an instruction that both reads and writes, Arm reports the
+  read that faults first. So `lock xadd`, `xchg`, `lock cmpxchg` or a plain `add [mem], reg` on a
+  no-access page raises `STATUS_ACCESS_VIOLATION` with `ExceptionInformation[0]` = 0, where Windows
+  reports a write. Stores, including stores to read-only memory, are write faults. When no ESR
+  describing a data abort is available, the `STLR`-only `decode_arm64_store` is still the fallback.
+- **`sync_host_page_apple`'s permission union can strip `PROT_EXEC` or over-grant write access near
+  PE section boundaries.** Guest permissions are tracked per-4KB shadow slot but applied per-16KB
+  Apple host page (four slots share one host page); when slots sharing a host page disagree, the
+  code unions them, so a read-only slot next to a writable one stays writable. A PE's `.text` (RX)
+  immediately followed by `.data` (RW) landing in the same host page can lose exec permission on the
+  tail of the code page — a real execution fault, not just an over-permissive read-only page.
+- **Only a few guard and no-access 4KB pages inside a mixed host page fault, and no reserved
+  ones.** On macOS a guard or `PAGE_NOACCESS` 4KB page that shares a 16KB host page with
+  accessible memory is caught with the debug registers of the host thread running the guest: as
+  many watchpoints as `hw.optional.watchpoint` reports, filled with the host pages nearest below
+  the guest stack pointer first. Every other such page, and every reserved page beside committed
+  memory, is accessible as before. `clflush`/`clwb` on a watched page do not fault, because Arm
+  cache maintenance does not trigger watchpoints. Watchpoints stay off when a startup probe does
+  not see a watched 4KB page fault, or when a debugger is attached at startup; a debugger
+  attached later receives the hits itself. While they are armed, each JIT write-protect toggle
+  costs about 15 ns more, which slows compile-heavy phases slightly.
+- **The MMIO fault path isn't fully async-signal-safe.** `handle_mmio_fault` calls the registered
+  MMIO callback directly from inside the real signal handler, rather than through this file's own
+  `pending_fault_dispatch_` mechanism (built for exactly this class of hazard, and already used for
+  `memory_violation_hooks_`/`interrupt_hooks_`). The one production registrant, `kusd_mmio::read`,
+  takes a mutex also used by `kusd_mmio::access()` from normal call context. Every vCPU runs on its own
+  host thread, so a fault taken while that thread holds the mutex in normal call context would
+  self-deadlock.
+- **A smaller, same-bug-class gap remains:** `commit_memory` guards against committing into
+  `section_kind`/`host_reserved` regions but has no equivalent guard for a guest probing directly into
+  other backends' reserved ranges.
 
-- Full `x86_64_emulator` interface implementation (registers, memory, hooks, serialize).
-- `x86_register` ↔ `FEXCore::Core::CPUState` mapping (`fex_x86_64_common.hpp`).
-- A `FEXCore::HLE::SyscallHandler` that routes guest `syscall` instructions to the registered
-  syscall instruction-hook (the path the Windows emulation layer uses to service NT syscalls).
-- Real `FEXCore::HostFeatures` detection via `sysctlbyname` on macOS (the Linux path currently
-  passes an empty default-constructed `HostFeatures` — a known `TODO`).
-- Fault delivery via plain POSIX `sigaction` on macOS (no Mach exception port needed): a per-guest-
-  page permission shadow table reconciling Apple Silicon's 16KB host page size against the guest's
-  4KB architectural page size, JIT guard-page write-protect race handling, MMIO decode-and-emulate,
-  misaligned load-acquire/store-release decode-and-emulate, synthetic-`#GP`-to-real-vector
-  remapping, and cooperative thread-stop via FEXCore's `InterruptFaultPage` mechanism.
-- Real JIT code-buffer overflow guard pages on macOS. Apple Silicon's `MAP_JIT` memory cannot have
-  its protection changed by an ordinary `mprotect()` after the fact (confirmed empirically: it always
-  fails `EACCES`, regardless of the per-thread W^X toggle state), so FEXCore's own end-of-buffer guard
-  page silently never took effect there. The sogen-side FEXCore-internal allocator arena now places
-  the real guard by construction instead: it makes only the buffer's leading portion (excluding one
-  trailing host page) the actual executable `MAP_JIT` mapping via the same real-`munmap`-then-hint-
-  `mmap` placement it already uses for `MAP_JIT` allocations, and simply never touches that trailing
-  page — which stays part of the arena's permanent `PROT_NONE` reservation and genuinely faults on any
-  access. This applies to both the main JIT code buffer and the per-compile temporary staging buffer.
-- GPU-bridge host-memory coherency (`mach_vm_remap` aliasing on macOS, `sys_dcache_flush`/`dc civac`
-  cache maintenance) for the paravirtualized-GPU memory-sharing path.
-- 32-bit WoW64 process support (a second, lazily-created 32-bit FEXCore Context/Thread per process,
-  gate-crossing state marshaling, a WoW64 guest-memory rebase — see below).
-- Build, backend-selection, and Python-binding wiring (auto-enabled on ARM64 Linux/macOS + Clang);
-  FEXCore built via ExternalProject and linked.
+## Fixes found during bring-up and review
 
-## WoW64 support
-
-FEXCore is fixed-bitness per `Context` — a single `Context` cannot execute both 64-bit and 32-bit
-code. A WoW64 process genuinely starts execution in real 64-bit ntdll code (the thread-init thunk),
-crosses into 32-bit code at the x86 "heaven's gate" bitness switch, and crosses back on every syscall
-return and kernel callback. This backend models that with **two FEXCore Contexts per WoW64 process**
-— a 64-bit one (handling the real 64-bit ntdll/wow64*.dll code) and a 32-bit one (handling the
-guest's own 32-bit image and its 32-bit ntdll) — switching which one is "active" at each gate
-crossing.
-
-### Gate-crossing interception
-
-The bitness-switch trampoline is intercepted via the same generic non-executable-range mechanism
-FEXCore already uses for synthetic page faults: the trampoline's guest address range is marked
-non-executable, so reaching it raises a controlled synthetic `#PF` before any of its bytes are ever
-JIT-compiled, which the backend catches and handles by marshaling state between the two Contexts
-directly (rather than letting either Context attempt to decode/execute the other bitness's code).
-
-State marshaling across a crossing needs to be careful about more than a naive whole-`CPUState` copy:
-each Context's `CPUState` also carries FEXCore-internal JIT bookkeeping (SRA-mapped GPRs, the call-ret
-shadow-stack pointer, the JIT lookup-cache pointer) interleaved with genuinely-architectural x86 state
-(GPRs, XMM, x87, EFLAGS, segment selectors). A correct crossing copies the architectural state and
-leaves each Context's own JIT bookkeeping alone.
-
-### 32-bit guest memory rebase
-
-Apple Silicon enforces a mandatory, unshrinkable 4GB `__PAGEZERO` for every 64-bit process, making
-the entire low 4GB of host address space permanently unmappable. This conflicts directly with this
-project's guest-VA-equals-host-VA memory model for a 32-bit guest, whose whole architectural address
-space lives in that exact range. The fix is a FEXCore-side, per-Context, runtime-conditional address
-rebase (a `CONFIG_WOW64GUESTREBASE` option and `Context::SetNeedsWow64GuestRebase` API in the
-`deps/FEX` submodule): when enabled on a Context, every real memory access — data or instruction
-fetch — computed at an address below 4GB is transparently rebased to a fixed offset above it, via a
-runtime IR `Select` rather than a compile-time-constant add (since a 64-bit-mode Context's addresses
-aren't confined to a fixed range the way a 32-bit-mode Context's are). This is a strict no-op for any
-Context that doesn't opt in, so it does not affect the existing 64-bit-only Linux/macOS path.
-
-### `wow64cpu.dll`'s real dispatch convention
-
-The real `TurboDispatchJumpAddressStart` mechanism inside `wow64cpu.dll` — the genuine syscall-return
-dispatch table a real WoW64 process uses — has a documented calling convention (an index derived
-from the high word of `EAX`, dispatched through a jump table `wow64cpu.dll` builds at init, against a
-CPU-area `CONTEXT` block holding the 32-bit register file). The reverse (32→64) gate crossing decodes
-this convention, marshals state, and resumes real 64-bit execution at `TurboDispatchJumpAddressEnd` —
-the generic dispatch continuation, whose genuine `wow64cpu.dll`/`wow64.dll` code
-(`Wow64SystemServiceEx`) then services the syscall. Only the turbo-thunk fast-path itself (the
-`jmp [r15+rcx*8]` jump-table dispatch into per-service turbo thunks) is never taken; the crossing
-always forces the generic path.
-
-## Architecture
-
-- `fex_x86_64_emulator.hpp` — factory `sogen::fex::create_x86_64_emulator()`.
-- `fex_x86_64_common.hpp` — header-only `x86_register` → `CPUState` field mapping (GPRs and their
-  sub-registers, rip, flags, xmm, mm, fs/gs base, segment selectors, mxcsr/fcw). No FEX includes, so
-  it can be reasoned about without the FEX toolchain.
-- `fex_x86_64_marshal.hpp` — the architectural-state marshaling helper used at WoW64 gate crossings
-  (factored out because it is shared by the two call sites that need it,
-  `enter_wow64_32bit_from_run_simulated_code` and `perform_bitness_switch`).
-- `fex_x86_64_emulator.cpp` — the backend, the syscall bridge, and the WoW64 gate-crossing/rebase
-  integration.
-
-### Guest model — the key difference from the other backends
-
-FEX is an **in-process** binary translator. It does not sandbox a separate guest address space:
-translated guest code runs inside the host process and **guest virtual addresses are host virtual
-addresses** (a 1:1 mapping, subject to the WoW64 rebase described above for 32-bit processes). This
-drives the whole design:
-
-- `map_memory()` is a real `mmap(MAP_FIXED)` at the guest address; `unmap_memory()`/
-  `apply_memory_protection()` are `munmap`/`mprotect`. A sorted region map tracks what is mapped, and
-  (on macOS) a per-4KB-page permission shadow table reconciles the 16KB host page granularity against
-  the guest's 4KB pages.
-- `read_memory()`/`write_memory()` are direct host `memcpy`s once the range is confirmed mapped (the
-  guest pointer is directly dereferenceable). Writes invalidate FEX's translation cache for the range
-  in the **currently-active** Context only. Unmaps additionally invalidate the inactive Context
-  (`invalidate_code_range(..., include_inactive_contexts=true)`, called only from `unmap_memory`),
-  since the Context active at unmap time does not necessarily match the Context whose cached
-  translations cover the unmapped range. Known limitation: 32-bit guest code that self-patches via a
-  syscall-serviced `write_memory` (e.g. `NtWriteVirtualMemory`) — which runs while the 64-bit engine
-  is active — can leave stale 32-bit JIT translations cached. This gap is deliberate: extending
-  inactive-Context invalidation to every write would repeatedly delink the live 32-bit Context's
-  blocks and risks livelocking it, given how frequent ordinary syscall-time writes are.
-- `map_host_memory()` aliases caller-owned memory into the guest with `mremap(MREMAP_FIXED)` on Linux
-  or `mach_vm_remap` on macOS (e.g. for the GPU bridge), and is *not* munmap'd on teardown.
-
-This makes FEX a close cousin of the KVM backend in *capability*: the guest runs natively, so there
-is **no per-access or per-instruction instrumentation point**. The fine-grained
-`hook_memory_read/write/execution/range_execution` and `hook_basic_block` hooks are registered for API
-compatibility but never fire, and `supports_global_memory_execution_hooks()` returns `false`. Only the
-`syscall` instruction hook is wired (via the syscall handler). Analyzer features that depend on the
-unfired hooks are unsupported under this backend, exactly as with KVM.
-
-### Syscall interception
-
-FEX delivers guest `syscall` instructions to a `FEXCore::HLE::SyscallHandler::HandleSyscall`. The
-backend's `fex_syscall_handler` forwards these to the registered syscall instruction-hook. The hook
-(the Windows emulation layer) reads and writes guest registers itself through the emulator and places
-the NT status in `RAX`; the handler returns that value so FEX preserves it.
-
-## Build
-
-FEX is vendored as a git submodule (`deps/FEX`) and built **in-tree** from source — there is no manual
-toggle. The top-level CMake enables the backend automatically when all of these hold:
-
-- target is **ARM64 Linux** (not Android: the NDK's libc++ lacks `std::atomic_ref`, which FEX needs)
-  **or ARM64 macOS**,
-- the compiler is **Clang** (FEX rejects GCC/MSVC — Apple Clang qualifies), and
-- the `deps/FEX` submodule is checked out.
-
-Otherwise the backend is silently skipped, so all other builds are unaffected. FEX is **not** added
-via `add_subdirectory` — it assumes it is the top-level project (~60 uses of `CMAKE_SOURCE_DIR`) and
-would configure its whole loader/tools tree. Instead `deps/CMakeLists.txt` builds it standalone with
-`ExternalProject` (only the `FEXCore_shared` target → a self-contained `libFEXCore.{so,dylib}`) and
-exposes it as the imported `fexcore` target that `fex-emulator` links. Embedder-hostile FEX options
-(its custom allocator/jemalloc, LTO, telemetry, tools, tests) are disabled.
-
-```sh
-# On an arm64 Linux or macOS host with Clang:
-git submodule update --init --recursive deps/FEX
-cmake --preset=release   # FEX backend auto-enables
-cmake --build --preset=release --target fex-emulator
-```
-
-**Note for `deps/FEX` changes**: FEXCore is only rebuilt when its own `ExternalProject` target is
-invoked directly — a plain `cmake --build --preset=release` does *not* pick up `deps/FEX` source
-changes automatically. After editing anything under `deps/FEX`, rebuild it explicitly:
-
-```sh
-ninja -C build/release/deps/fex_external-prefix/src/fex_external-build FEXCore/Source/libFEXCore.dylib
-```
-
-No copy step is needed afterward — `fex-emulator`'s rpath points directly at that build directory
-(see "Build" above), so the freshly-rebuilt library is picked up in place.
-
-`backend-selection` links `fex-emulator`, defines `SOGEN_ENABLE_FEX`, adds `backend_type::fex`, and
-honors `EMULATOR_FEX=1`; the Python `Backend` enum gains `fex`.
-
-### Submodule fork
-
-`deps/FEX` is pinned to [github.com/JackTYM/FEX](https://github.com/JackTYM/FEX), a personal fork of
-upstream FEX-Emu (`github.com/FEX-Emu/FEX`), not upstream directly. The fork carries the
-Darwin/Apple Silicon portability and correctness patches this backend depends on: JIT/temp-buffer
-guard pages sized for Apple Silicon's 16KB host page granularity, `MAP_JIT` write-protect and
-build/link fixes, a per-`Context`/runtime-configurable WoW64 guest-rebase host offset, and an
-opdispatch fix (`InvalidOp` raising `#UD` instead of `#DE`) — see the fork's commit history for the
-full list.
-
-Pinning to a personal fork means these patches do not automatically track upstream FEX-Emu,
-including upstream security fixes. Picking up an upstream FEX-Emu update requires manually
-rebasing/merging this fork onto the corresponding upstream release and re-verifying the Darwin
-patches still apply.
-
-## Selecting the backend
-
-```sh
-EMULATOR_FEX=1 ./analyzer -e root c:/test-sample.exe
-```
-
-or, from Python, `sogen.Backend.fex`.
+- **Host-reserved-address-space tracking under Apple's `mmap(MAP_FIXED)` semantics.** Two real
+  memory-safety bugs: an MMIO-region-insertion path could violate the host-reserved overlap-tracking
+  invariant (undetected until a `mmap(MAP_FIXED)` failure crashed the analyzer), and a
+  decommit→recommit window could let a foreign host allocation land in a guest's still-reserved
+  range. Fixed by properly carving host-reserved holes and adding
+  `memory_interface::release_guest_address_range()` to distinguish decommit (keep the address
+  claimed) from release (actually free).
+- **Scheduler-quantum-race** (backend-agnostic, extracted to its own fix — see `windows_emulator.cpp`
+  `start()`'s quantum-timer watchdog): a non-atomic `switch_thread = true` / `cpu.stop()` pair could
+  be split across the scheduler's own consume step, misread as a fatal crash. This backend's
+  cooperative page-protect stop makes the race hot enough to hit reliably, which is how it was found.
+- **`InterruptFaultPage` unwind atomicity.** A raced interrupt-fault-page unwind (the mechanism this
+  backend uses to interrupt JIT-compiled code) could be misread as a fatal stop by `start()`'s run
+  loop under concurrent access; tagged and re-armed instead of terminating.
+- **`int 2Dh` (the Windows debug-service trap) resumed at the wrong address.** FEXCore only reports
+  RIP already past the trapping instruction for real `INT3`/`INT1` (`SetRIPToNext` in FEXCore's
+  `OpcodeDispatcher.cpp`); a generic `INT n` this backend can't dispatch directly (remapped from a
+  synthetic `#GP` back to its own vector) already reports the instruction's own start address. A
+  shared-code fixup that unconditionally corrected for the INT3 case broke this one. Fixed by
+  normalizing in this backend, conditioned on FEXCore's `TrapNo == X86_TRAPNO_BP` (verified to be set
+  in exactly one place in all of FEXCore — the real `0xCC` case) — which let the shared-code
+  workaround be deleted outright rather than patched further.
+- **Missing GPR sub-register widths.** `classify_gpr` had no cases for `r8b`-`r15b`/`r8w`-`r15w`/
+  `r8d`-`r15d` (only the full 64-bit and the original 8 registers at every width) — silently
+  zero-filled on read, silently dropped on write. Common in real x86-64 code (e.g. `mov r9d, eax`).
+- **`setup_gdt` discarded an allocation failure.** The GDT then sat at a fixed address, and on Apple low
+  addresses and a range of typical host allocations are unusable/collision-prone (see the address-space
+  model above), so a collision there was real, not theoretical, and failed silently instead of raising a
+  diagnosable error. The GDT is now allocated through the memory manager, which confirms the address
+  against the host.

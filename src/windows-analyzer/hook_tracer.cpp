@@ -525,7 +525,7 @@ namespace sogen
 
     uint64_t hook_tracer::read_register(const x86_register reg, const size_t pointer_size) const
     {
-        const auto value = this->win_emu_.active_cpu().reg(reg);
+        const auto value = this->win_emu_.active_x64_cpu().reg(reg);
         return pointer_size == 4 ? (value & 0xFFFFFFFF) : value;
     }
 

@@ -1,7 +1,5 @@
 #include "dns_lookup.hpp"
 
-#include <cstdio>
-
 #include <utils/finally.hpp>
 
 namespace sogen
@@ -9,6 +7,53 @@ namespace sogen
 
     namespace network
     {
+        namespace
+        {
+#ifdef OS_EMSCRIPTEN
+            struct http_dns_lookup final : dns_lookup
+            {
+                std::vector<address> resolve_host(const std::string_view hostname, const std::optional<int> family) override
+                {
+                    if (hostname.empty() || (family && *family != AF_UNSPEC && *family != AF_INET && *family != AF_INET6))
+                    {
+                        return {};
+                    }
+
+                    // fetch() resolves the Host authority; the guest only needs a synthetic address to connect.
+                    address resolved{};
+                    if (family && *family == AF_INET6)
+                    {
+                        in6_addr placeholder{};
+                        if (inet_pton(AF_INET6, "2001:db8::1", &placeholder) != 1)
+                        {
+                            return {};
+                        }
+                        resolved.set_ipv6(placeholder);
+                    }
+                    else
+                    {
+                        in_addr placeholder{};
+                        if (inet_pton(AF_INET, "198.18.0.1", &placeholder) != 1)
+                        {
+                            return {};
+                        }
+                        resolved.set_ipv4(placeholder);
+                    }
+
+                    return {resolved};
+                }
+            };
+#endif
+
+            struct null_dns_lookup final : dns_lookup
+            {
+                std::vector<address> resolve_host(const std::string_view /*hostname*/, const std::optional<int> /*family*/) override
+                {
+                    return {};
+                }
+            };
+        }
+
         dns_lookup::dns_lookup()
         {
             initialize_wsa();
@@ -27,13 +72,6 @@ namespace sogen
             const auto status = getaddrinfo(hostname_string.c_str(), nullptr, &hints, &result);
             if (status != 0)
             {
-#ifdef _WIN32
-                std::fprintf(stderr, "dns_lookup::resolve_host failed: host=%s family=%d status=%d wsa_error=%d message=%s\n",
-                             hostname_string.c_str(), family.value_or(AF_UNSPEC), status, WSAGetLastError(), gai_strerrorA(status));
-#else
-                std::fprintf(stderr, "dns_lookup::resolve_host failed: host=%s family=%d status=%d message=%s\n", hostname_string.c_str(),
-                             family.value_or(AF_UNSPEC), status, gai_strerror(status));
-#endif
                 return {};
             }
 
@@ -53,6 +91,20 @@ namespace sogen
             }
 
             return results;
+        }
+
+        std::unique_ptr<dns_lookup> create_dns_lookup(const network_mode mode)
+        {
+            if (mode == network_mode::live)
+            {
+#ifdef OS_EMSCRIPTEN
+                return std::make_unique<http_dns_lookup>();
+#else
+                return std::make_unique<dns_lookup>();
+#endif
+            }
+
+            return std::make_unique<null_dns_lookup>();
         }
     }
 

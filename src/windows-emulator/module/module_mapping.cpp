@@ -66,6 +66,49 @@ namespace sogen
             return deterministic_relocation_arena_base + slot * deterministic_relocation_slot_size;
         }
 
+        memory_permission get_section_permissions(const IMAGE_SECTION_HEADER& section, const PEMachineType machine)
+        {
+            auto permissions = memory_permission::none;
+
+            // ARM64EC images can mark the hybrid x64 entry/bootstrap
+            // range as CNT_CODE without setting MEM_EXECUTE.  Windows
+            // applies the CHPE code map when it creates the image VAD;
+            // Sogen's x64 backend needs the same treatment for file-backed
+            // mappings, otherwise a hybrid image entry remains
+            // non-executable and is never reached.
+            if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) ||
+                (machine == PEMachineType::ARM64EC && (section.Characteristics & IMAGE_SCN_CNT_CODE)))
+            {
+                permissions |= memory_permission::exec;
+            }
+
+            if (section.Characteristics & IMAGE_SCN_MEM_READ)
+            {
+                permissions |= memory_permission::read;
+            }
+
+            if (section.Characteristics & IMAGE_SCN_MEM_WRITE)
+            {
+                permissions |= memory_permission::write;
+            }
+
+            return permissions;
+        }
+
+        template <typename T>
+        void validate_image_machine(const PENTHeaders_t<T>& headers)
+        {
+            const auto machine = headers.FileHeader.Machine;
+            const bool supported = sizeof(T) == sizeof(uint32_t) ? machine == PEMachineType::I386
+                                                                 : machine == PEMachineType::AMD64 || machine == PEMachineType::ARM64 ||
+                                                                       machine == PEMachineType::ARM64EC;
+            if (!supported || headers.Signature != PENTHeaders_t<T>::k_Signature ||
+                headers.OptionalHeader.Magic != PEOptionalHeader_t<T>::k_Magic)
+            {
+                throw std::runtime_error("Unsupported or inconsistent PE machine and optional header");
+            }
+        }
+
         bool must_map_module_below_4gb(const std::string& module_name, const PEMachineType machine, const uint64_t image_base)
         {
             if (machine != PEMachineType::AMD64)
@@ -92,6 +135,11 @@ namespace sogen
             return mem;
         }
 
+        bool image_range_fits(const uint64_t image_size, const uint64_t rva, const uint64_t count, const uint64_t stride)
+        {
+            return count == 0 || (rva < image_size && count <= (image_size - rva) / stride);
+        }
+
         template <typename T>
         void collect_exports(mapped_module& binary, const utils::safe_buffer_accessor<const std::byte> buffer,
                              const PEOptionalHeader_t<T>& optional_header)
@@ -107,6 +155,16 @@ namespace sogen
             const auto names_count = export_directory.NumberOfNames;
             const auto function_count = export_directory.NumberOfFunctions;
 
+            // An out-of-bounds array is not always an out-of-bounds read: a truncated one whose first
+            // entries still land inside the image yields exports invented from unrelated bytes.
+            const uint64_t image_size = buffer.get_buffer().size();
+            if (!image_range_fits(image_size, export_directory.AddressOfNames, names_count, sizeof(DWORD)) ||
+                !image_range_fits(image_size, export_directory.AddressOfNameOrdinals, names_count, sizeof(WORD)) ||
+                !image_range_fits(image_size, export_directory.AddressOfFunctions, function_count, sizeof(DWORD)))
+            {
+                return;
+            }
+
             const auto names = buffer.as<DWORD>(export_directory.AddressOfNames);
             const auto ordinals = buffer.as<WORD>(export_directory.AddressOfNameOrdinals);
             const auto functions = buffer.as<DWORD>(export_directory.AddressOfFunctions);
@@ -117,20 +175,23 @@ namespace sogen
             name_index_by_ordinal.reserve(names_count);
             for (DWORD i = 0; i < names_count; i++)
             {
-                name_index_by_ordinal[ordinals.get(i)] = i;
+                const auto ordinal = ordinals.get(i);
+                if (ordinal >= function_count)
+                {
+                    return;
+                }
+
+                name_index_by_ordinal[ordinal] = i;
             }
 
-            // Walk every ordinal slot (AddressOfFunctions), not just the named ones
-            // (AddressOfNames/AddressOfNameOrdinals) - many DLLs export functions by ordinal only, with no
-            // name-table entry at all. Without an address_names entry for those, the analyzer's
-            // nearest-preceding-symbol attribution (analysis.cpp's address_names upper_bound lookup)
-            // misattributed execution inside them to whichever named export happened to precede them.
+            // AddressOfNames covers only part of AddressOfFunctions: exports without a name-table entry
+            // are still real exports and need a symbol.
             for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
             {
                 const auto rva = functions.get(ordinal);
                 if (rva == 0)
                 {
-                    continue; // Empty slot in a sparse ordinal range - not a real export.
+                    continue; // Unused ordinal slot.
                 }
 
                 exported_symbol symbol{};
@@ -217,7 +278,7 @@ namespace sogen
                 }
 
                 using thunk_traits = thunk_data_traits<T>;
-                using thunk_type = typename thunk_traits::type;
+                using thunk_type = thunk_traits::type;
 
                 const auto module_index = binary.imported_modules.size();
                 binary.imported_modules.push_back(read_mapped_string(memory, binary.image_base + descriptor.Name));
@@ -250,8 +311,9 @@ namespace sogen
                     }
                     else
                     {
-                        const auto by_name_address =
-                            binary.image_base + original_thunk.u1.AddressOfData + offsetof(IMAGE_IMPORT_BY_NAME, Name);
+                        // BUG: ntdll ldr discards highpart. this handles intentionally malformed PEs.
+                        const auto rva_of_data = static_cast<uint32_t>(original_thunk.u1.AddressOfData);
+                        const auto by_name_address = binary.image_base + rva_of_data + offsetof(IMAGE_IMPORT_BY_NAME, Name);
                         sym.name = read_mapped_string(memory, by_name_address);
                     }
                 }
@@ -272,6 +334,15 @@ namespace sogen
 
             const auto names_count = export_directory.NumberOfNames;
             const auto function_count = export_directory.NumberOfFunctions;
+
+            const auto image_size = binary.size_of_image;
+            if (!image_range_fits(image_size, export_directory.AddressOfNames, names_count, sizeof(DWORD)) ||
+                !image_range_fits(image_size, export_directory.AddressOfNameOrdinals, names_count, sizeof(WORD)) ||
+                !image_range_fits(image_size, export_directory.AddressOfFunctions, function_count, sizeof(DWORD)))
+            {
+                return;
+            }
+
             binary.exports.reserve(function_count);
 
             std::unordered_map<WORD, DWORD> name_index_by_ordinal{};
@@ -280,18 +351,21 @@ namespace sogen
             {
                 const auto ordinal =
                     read_mapped_object<WORD>(memory, binary.image_base + export_directory.AddressOfNameOrdinals + i * sizeof(WORD));
+                if (ordinal >= function_count)
+                {
+                    return;
+                }
+
                 name_index_by_ordinal[ordinal] = i;
             }
 
-            // Walk every ordinal slot, not just the named ones - see the buffer-based collect_exports
-            // above for why (ordinal-only exports still need an address_names entry).
             for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
             {
                 const auto function_rva =
                     read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfFunctions + ordinal * sizeof(DWORD));
                 if (function_rva == 0)
                 {
-                    continue; // Empty slot in a sparse ordinal range - not a real export.
+                    continue; // Unused ordinal slot.
                 }
 
                 exported_symbol symbol{};
@@ -320,16 +394,25 @@ namespace sogen
             }
         }
 
-        // Applies one relocation block's fixups against a host-side mirror of the block's guest byte
-        // span, then commits the whole span with a single memory.write_memory call. A freshly-mapped
-        // module has not executed a single instruction yet at this point in the load sequence (this
-        // runs before protect_module_memory and before the module's entry point), so - unlike the
-        // general write_memory caller population, which can legitimately alias code (e.g. a syscall
-        // output buffer) - every one of these writes is provably invalidating a range that cannot yet
-        // hold a JIT translation. Reading, fixing up, and writing the whole block as one range still
-        // performs that (harmless-here) invalidation, but once per block instead of once per fixup,
-        // collapsing what can be thousands of individually-invalidating guest writes per module down
-        // to one per relocation block (typically ~one page's worth of fixups).
+        // A process launch never parses the image's own export table, so Windows starts an EXE whose export
+        // data-directory points at junk. Reading one off the end of the image must not fail the whole map.
+        template <typename T, typename Source>
+        void collect_exports_or_ignore(mapped_module& binary, const Source& source, const PEOptionalHeader_t<T>& optional_header)
+        {
+            try
+            {
+                collect_exports(binary, source, optional_header);
+            }
+            catch (...)
+            {
+                binary.exports.clear();
+                binary.address_names.clear();
+            }
+        }
+
+        // Fixups are applied to a host-side mirror of the block's guest byte span and committed with a
+        // single write_memory. Every guest write triggers a JIT translation invalidation, so doing this
+        // per fixup costs thousands of invalidations per module instead of one per block.
         void apply_relocation_block(memory_manager& memory, const uint64_t image_base, const IMAGE_BASE_RELOCATION& relocation,
                                     const std::span<const uint16_t> entries, const uint64_t delta)
         {
@@ -377,8 +460,7 @@ namespace sogen
             }
 
             const auto span_size = static_cast<size_t>(max_end - min_offset);
-            std::vector<std::byte> block_buffer(span_size);
-            memory.read_memory(image_base + min_offset, block_buffer.data(), span_size);
+            auto block_buffer = memory.read_memory(image_base + min_offset, span_size);
 
             const utils::safe_buffer_accessor<std::byte> block{block_buffer};
 
@@ -447,7 +529,6 @@ namespace sogen
 
                 relocation_offset += relocation.SizeOfBlock;
 
-                // Read every entry descriptor for this block in one guest read instead of one per entry.
                 entries.resize(entry_count);
                 if (entry_count > 0)
                 {
@@ -456,6 +537,14 @@ namespace sogen
 
                 apply_relocation_block(memory, binary.image_base, relocation, entries, delta);
             }
+        }
+
+        // Windows maps an image whose sections are aligned below the page size as a single EXECUTE_WRITECOPY
+        // region, ignoring the section characteristics.
+        template <typename T>
+        bool is_mapped_as_one_region(const PEOptionalHeader_t<T>& optional_header)
+        {
+            return optional_header.SectionAlignment < page_align_up(1);
         }
 
         template <typename T>
@@ -469,7 +558,11 @@ namespace sogen
             {
                 const auto section = sections.get(i);
                 const auto target_ptr = binary.image_base + section.VirtualAddress;
-                const auto size_of_section = page_align_up(section.Misc.VirtualSize, nt_headers.OptionalHeader.SectionAlignment);
+                // Like the kernel, only the pages a section uses are committed. With a section alignment above the page
+                // size (the 64KB-aligned SysWOW64 DLLs), the rest of its slot stays reserved, which debuggers rely on to
+                // tell sections apart in VirtualQuery results.
+                const auto virtual_size = section.Misc.VirtualSize ? section.Misc.VirtualSize : section.SizeOfRawData;
+                const auto size_of_section = page_align_up(virtual_size);
                 const auto section_size = static_cast<size_t>(size_of_section);
 
                 if (section_size == 0)
@@ -477,34 +570,28 @@ namespace sogen
                     continue;
                 }
 
-                if (!memory.commit_image_memory(target_ptr, section_size, memory_permission::read_write))
+                const auto mapped_as_one_region = is_mapped_as_one_region(nt_headers.OptionalHeader);
+                const auto size_of_data = static_cast<size_t>(std::min<uint64_t>(size_of_section, section.SizeOfRawData));
+                // A sub-page section's page-rounded size can legitimately run past SizeOfImage; nothing is committed or
+                // protected per section there, so only the data written must fit.
+                const auto size_in_image = mapped_as_one_region ? size_of_data : section_size;
+                if (section.VirtualAddress + size_in_image > binary.size_of_image)
+                {
+                    return false;
+                }
+
+                if (!mapped_as_one_region && !memory.commit_image_memory(target_ptr, section_size, memory_permission::read_write))
                 {
                     return false;
                 }
 
                 if (section.SizeOfRawData > 0)
                 {
-                    const auto size_of_data = static_cast<size_t>(std::min<uint64_t>(size_of_section, section.SizeOfRawData));
                     const auto* source_ptr = buffer.get_pointer_for_range(section.PointerToRawData, size_of_data);
                     memory.write_memory(target_ptr, source_ptr, size_of_data);
                 }
 
-                auto permissions = memory_permission::none;
-
-                if (section.Characteristics & IMAGE_SCN_MEM_EXECUTE)
-                {
-                    permissions |= memory_permission::exec;
-                }
-
-                if (section.Characteristics & IMAGE_SCN_MEM_READ)
-                {
-                    permissions |= memory_permission::read;
-                }
-
-                if (section.Characteristics & IMAGE_SCN_MEM_WRITE)
-                {
-                    permissions |= memory_permission::write;
-                }
+                const auto permissions = get_section_permissions(section, nt_headers.FileHeader.Machine);
 
                 mapped_section section_info{};
                 section_info.region.start = target_ptr;
@@ -553,13 +640,20 @@ namespace sogen
             binary.address_names.clear();
 
             const auto image_size = static_cast<size_t>(binary.size_of_image);
+            if (optional_header.SizeOfHeaders > image_size)
+            {
+                return false;
+            }
+
             if (!memory.allocate_memory(binary.image_base, image_size, memory_permission::all, true, memory_region_kind::section_image))
             {
                 return false;
             }
 
+            const auto mapped_as_one_region = is_mapped_as_one_region(optional_header);
             const auto headers_size = static_cast<size_t>(page_align_up(optional_header.SizeOfHeaders));
-            if (!memory.commit_image_memory(binary.image_base, headers_size, memory_permission::read_write))
+            const auto initial_commit_size = mapped_as_one_region ? image_size : headers_size;
+            if (!memory.commit_image_memory(binary.image_base, initial_commit_size, memory_permission::read_write))
             {
                 memory.release_memory(binary.image_base, 0);
                 return false;
@@ -583,11 +677,14 @@ namespace sogen
                 memory.write_memory(image_base_address, &image_base, sizeof(image_base));
 
                 apply_relocations(binary, memory, optional_header, relocation_base);
-                collect_exports(binary, memory, optional_header);
+                collect_exports_or_ignore(binary, memory, optional_header);
                 collect_imports(binary, memory, optional_header);
 
                 // TODO: Make sure to match kernel allocation patterns to attain correct initial permissions!
-                if (!protect_module_memory(memory, binary, headers_size))
+                const auto protected_ok = mapped_as_one_region
+                                              ? memory.protect_memory(binary.image_base, image_size, memory_permission::all)
+                                              : protect_module_memory(memory, binary, headers_size);
+                if (!protected_ok)
                 {
                     throw std::runtime_error("Failed to protect mapped module memory");
                 }
@@ -642,26 +739,24 @@ namespace sogen
         const auto nt_headers = buffer.as<PENTHeaders_t<T>>(nt_headers_offset).get();
         const auto& optional_header = nt_headers.OptionalHeader;
 
-        if (nt_headers.FileHeader.Machine != PEMachineType::I386 && nt_headers.FileHeader.Machine != PEMachineType::AMD64)
-        {
-            throw std::runtime_error("Unsupported architecture!");
-        }
+        validate_image_machine(nt_headers);
 
         binary.image_base = optional_header.ImageBase;
         binary.image_base_file = optional_header.ImageBase;
         binary.size_of_image = page_align_up(optional_header.SizeOfImage); // TODO: Sanitize
 
         const bool force_wow64cpu_32bit_va = must_map_module_below_4gb(binary.name, nt_headers.FileHeader.Machine, binary.image_base);
+        constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
 
         if (force_wow64cpu_32bit_va)
         {
-            binary.image_base = memory.find_free_allocation_base(static_cast<size_t>(binary.size_of_image),
-                                                                 DEFAULT_ALLOCATION_ADDRESS_32BIT, ALLOCATION_GRANULARITY,
-                                                                 DEFAULT_ALLOCATION_ADDRESS_32BIT, DEFAULT_ALLOCATION_ADDRESS_64BIT - 1);
+            binary.image_base = memory.find_free_host_allocation_base(static_cast<size_t>(binary.size_of_image),
+                                                                      DEFAULT_ALLOCATION_ADDRESS_32BIT, below_4gb_ceiling);
         }
 
         // Store PE header fields
         binary.machine = static_cast<uint16_t>(nt_headers.FileHeader.Machine);
+        binary.characteristics = nt_headers.FileHeader.Characteristics;
         binary.dll_characteristics = optional_header.DllCharacteristics;
         binary.size_of_stack_reserve = optional_header.SizeOfStackReserve;
         binary.size_of_stack_commit = optional_header.SizeOfStackCommit;
@@ -683,73 +778,51 @@ namespace sogen
                                          " (size=" + std::to_string(binary.size_of_image) + ", non-relocatable)");
             }
 
-            // 32-bit (WOW64) modules must stay below 4 GB; native modules use the 64-bit arena. An
-            // unbounded search can pick a base above 4GB for a 32-bit module once the low arena fills,
-            // and guest/WOW64 pointer marshaling then truncates it to 32 bits, aliasing it onto
-            // whatever unrelated low allocation sits at the truncated address - so cap explicitly.
+            // The ceiling is explicit because an unbounded search can pick a base above 4 GB for a
+            // 32-bit module once the low arena fills; WOW64 pointer marshaling then truncates it to 32
+            // bits, aliasing the module onto whatever unrelated allocation sits at the truncated address.
             const bool needs_below_4gb = force_wow64cpu_32bit_va || is_32bit;
             const uint64_t fallback_start = needs_below_4gb ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
-            constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
             const uint64_t highest_address = needs_below_4gb ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
             const auto image_size = static_cast<size_t>(binary.size_of_image);
 
-            // The preferred base was taken, so relocate. find_free_host_allocation_base picks a base and
-            // confirms it is actually free at the host level, not merely per sogen's own bookkeeping. That
-            // matters on backends sharing the guest address space with the host process (FEX on Apple
-            // Silicon: guest VA == host VA), where a foreign host mapping (a lazily-loaded dylib, a thread
-            // stack, ASLR-placed anything) can occupy a VA sogen still believes is free - a single pick
-            // would then fail the map outright even though other addresses are available. The loop below
-            // re-picks past such a collision instead: a failed try_map_module_at_current_base has already
-            // recorded the intruding host range (via the fixed-address allocate_memory's windowed rescan),
-            // so the next pick steps past it. Bounded so a genuinely exhausted address space still
-            // terminates rather than spinning.
+            // The preferred base was taken, so relocate. On backends sharing the address space with the
+            // guest (FEX on Apple Silicon), a foreign host mapping can occupy a VA sogen still believes
+            // is free, and a single pick would fail the map outright even though other addresses are
+            // available. A failed try_map_module_at_current_base records the intruding host range via the
+            // fixed-address allocate_memory's windowed rescan, so re-picking steps past it; bounded so an
+            // exhausted address space terminates rather than spins.
             constexpr int max_host_relocation_retries = 8;
             bool mapped = false;
             int attempts_made = 0;
 
-            // See deterministic_relocation_candidate's own comment above: try the name-derived,
-            // process-independent candidate first, for exactly the case real Windows itself keeps
-            // stable (a native, relocatable module whose preferred base collided with something else in
-            // this specific process). Scoped to the native 64-bit arena only - the below-4GB path serves
-            // 32-bit/WOW64 modules, a different, denser address range this fix does not touch.
+            // See deterministic_relocation_candidate: a native module relocated away from its preferred
+            // base must land at the same base in every process, as real Windows' known-DLL rebasing does.
             if (relocation_base == 0 && !needs_below_4gb)
             {
                 binary.image_base = deterministic_relocation_candidate(binary.name);
-                if (try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
-                                                   binary.image_base))
-                {
-                    mapped = true;
-                }
+                mapped = try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
+                                                        binary.image_base);
             }
 
-            // The free-pick retry loop only makes sense when the caller left the target address up to
-            // us (relocation_base == 0) - if the caller specified a real target (mapping a view of an
-            // already-loaded image at that image's own base, so the view's internal absolute pointers
-            // stay correct), picking a different free host address instead would silently relocate the
-            // view away from where the caller actually needs it.
-            if (!mapped && relocation_base == 0)
+            // Also applies when the caller passed a relocation_base: that only expresses a preferred
+            // target (e.g. mapping another view of an already-loaded image at its current base), not a
+            // hard requirement - real Windows itself falls back to relocating such a view elsewhere and
+            // reports STATUS_IMAGE_NOT_AT_BASE rather than failing the map outright.
+            for (int attempt = 0; !mapped && attempt <= max_host_relocation_retries; ++attempt)
             {
-                for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
+                attempts_made = attempt + 1;
+                binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start, highest_address);
+                if (!binary.image_base)
                 {
-                    attempts_made = attempt + 1;
-                    binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start, highest_address);
-                    if (!binary.image_base)
-                    {
-                        break;
-                    }
-
-                    if (try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
-                                                       binary.image_base))
-                    {
-                        mapped = true;
-                        break;
-                    }
+                    break;
                 }
+
+                mapped = try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
+                                                        binary.image_base);
             }
 
-            if (!mapped && (!binary.image_base ||
-                            !try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
-                                                            relocation_base ? relocation_base : binary.image_base)))
+            if (!mapped)
             {
                 throw std::runtime_error("Memory range not allocatable for " + binary.module_path.string() +
                                          " (size=" + std::to_string(image_size) + ", last tried base=0x" +
@@ -764,24 +837,13 @@ namespace sogen
     }
 
     template <typename T>
-    mapped_module map_module_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path,
-                                       const uint64_t relocation_base)
-    {
-        const auto data = utils::io::read_file(file);
-        if (data.empty())
-        {
-            throw std::runtime_error("Bad file data: " + file.string());
-        }
-
-        return map_module_from_data<T>(memory, data, std::move(file), std::move(module_path), relocation_base);
-    }
-
-    template <typename T>
     mapped_module map_module_from_memory(memory_manager& memory, uint64_t base_address, uint64_t image_size, windows_path module_path)
     {
         mapped_module binary{};
         binary.name = u16_to_u8(module_path.leaf());
-        binary.path = module_path.to_portable_path();
+        // mapped_module::path is the module identity the load counts, the duplicate checks and the loaded-module
+        // comparisons key on, so it stays canonical and lower case even though the guest path keeps its spelling.
+        binary.path = std::filesystem::path{utils::string::to_lower(module_path.lexically_normal().to_portable_path().u16string())};
         binary.module_path = std::move(module_path);
         binary.image_base = base_address;
         binary.image_base_file = base_address;
@@ -794,13 +856,15 @@ namespace sogen
         {
             const auto dos_header = buffer.as<PEDosHeader_t>(0).get();
             const auto nt_headers_offset = dos_header.e_lfanew;
-            const auto nt_headers = buffer.as<PENTHeaders_t<std::uint64_t>>(nt_headers_offset).get();
+            const auto nt_headers = buffer.as<PENTHeaders_t<T>>(nt_headers_offset).get();
+            validate_image_machine(nt_headers);
             const auto& optional_header = nt_headers.OptionalHeader;
 
             binary.entry_point = binary.image_base + optional_header.AddressOfEntryPoint;
 
             // Store PE header fields
             binary.machine = static_cast<uint16_t>(nt_headers.FileHeader.Machine);
+            binary.characteristics = nt_headers.FileHeader.Characteristics;
             binary.dll_characteristics = optional_header.DllCharacteristics;
             binary.size_of_stack_reserve = optional_header.SizeOfStackReserve;
             binary.size_of_stack_commit = optional_header.SizeOfStackCommit;
@@ -818,19 +882,7 @@ namespace sogen
                 section_info.region.start = binary.image_base + section.VirtualAddress;
                 section_info.region.length = static_cast<size_t>(page_align_up(std::max(section.SizeOfRawData, section.Misc.VirtualSize)));
 
-                auto permissions = memory_permission::none;
-                if (section.Characteristics & IMAGE_SCN_MEM_EXECUTE)
-                {
-                    permissions |= memory_permission::exec;
-                }
-                if (section.Characteristics & IMAGE_SCN_MEM_READ)
-                {
-                    permissions |= memory_permission::read;
-                }
-                if (section.Characteristics & IMAGE_SCN_MEM_WRITE)
-                {
-                    permissions |= memory_permission::write;
-                }
+                const auto permissions = get_section_permissions(section, nt_headers.FileHeader.Machine);
 
                 section_info.region.permissions = permissions;
 
@@ -842,7 +894,7 @@ namespace sogen
                 binary.sections.push_back(std::move(section_info));
             }
 
-            collect_exports(binary, buffer, optional_header);
+            collect_exports_or_ignore(binary, buffer, optional_header);
         }
         catch (const std::exception&)
         {
@@ -881,10 +933,6 @@ namespace sogen
                                                                uint64_t relocation_base);
     template mapped_module map_module_from_data<std::uint64_t>(memory_manager& memory, const std::span<const std::byte> data,
                                                                std::filesystem::path file, windows_path module_path,
-                                                               uint64_t relocation_base);
-    template mapped_module map_module_from_file<std::uint32_t>(memory_manager& memory, std::filesystem::path file, windows_path module_path,
-                                                               uint64_t relocation_base);
-    template mapped_module map_module_from_file<std::uint64_t>(memory_manager& memory, std::filesystem::path file, windows_path module_path,
                                                                uint64_t relocation_base);
 
     template mapped_module map_module_from_memory<std::uint32_t>(memory_manager& memory, uint64_t base_address, uint64_t image_size,

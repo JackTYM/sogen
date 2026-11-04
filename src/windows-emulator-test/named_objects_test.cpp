@@ -148,20 +148,22 @@ namespace sogen::test
         created.allocation_attributes = SEC_COMMIT;
         ASSERT_TRUE(named_objects::is_shareable_named_section(created));
         ASSERT_EQ(named_objects::publish_section(a.process, created), STATUS_SUCCESS);
-        ASSERT_NE(created.backing, nullptr);
+        const auto created_memory = a.process.section_views.storage_memory(created.view_storage_id);
+        ASSERT_NE(created_memory, nullptr);
 
-        created.backing->data()[0x1234] = std::byte{0x42};
+        created_memory->data()[0x1234] = std::byte{0x42};
 
         section_object opened{};
         ASSERT_EQ(named_objects::open_section(b.process, u"Pages", opened), STATUS_SUCCESS);
-        ASSERT_NE(opened.backing, nullptr);
-        ASSERT_NE(opened.backing->data(), created.backing->data());
+        const auto opened_memory = b.process.section_views.storage_memory(opened.view_storage_id);
+        ASSERT_NE(opened_memory, nullptr);
+        ASSERT_NE(opened_memory->data(), created_memory->data());
         ASSERT_EQ(opened.maximum_size, 0x2000u);
         ASSERT_EQ(opened.section_page_protection, static_cast<uint32_t>(PAGE_READWRITE));
-        ASSERT_EQ(opened.backing->data()[0x1234], std::byte{0x42});
+        ASSERT_EQ(opened_memory->data()[0x1234], std::byte{0x42});
 
-        opened.backing->data()[0x10] = std::byte{0x7a};
-        ASSERT_EQ(created.backing->data()[0x10], std::byte{0x7a});
+        opened_memory->data()[0x10] = std::byte{0x7a};
+        ASSERT_EQ(created_memory->data()[0x10], std::byte{0x7a});
 
         section_object duplicate{};
         duplicate.name = u"Pages";
@@ -169,7 +171,9 @@ namespace sogen::test
         duplicate.section_page_protection = PAGE_READWRITE;
         duplicate.allocation_attributes = SEC_COMMIT;
         ASSERT_EQ(named_objects::publish_section(b.process, duplicate), STATUS_OBJECT_NAME_EXISTS);
-        ASSERT_EQ(duplicate.backing->data()[0x1234], std::byte{0x42});
+        const auto duplicate_memory = b.process.section_views.storage_memory(duplicate.view_storage_id);
+        ASSERT_NE(duplicate_memory, nullptr);
+        ASSERT_EQ(duplicate_memory->data()[0x1234], std::byte{0x42});
     }
 #endif
 }

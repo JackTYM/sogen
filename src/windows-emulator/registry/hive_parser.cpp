@@ -40,10 +40,12 @@ namespace sogen
             int32_t value_count;
             int32_t offsets;
             uint8_t dummyd[4];
-            int32_t class_name;
-            uint8_t dummye[20];
+            int32_t class_offset;
+            uint8_t dummye[4];
+            uint32_t max_class_length;
+            uint8_t dummyf[12];
             int16_t len;
-            int16_t class_len;
+            uint16_t class_length;
             char name[255];
         };
 
@@ -61,6 +63,16 @@ namespace sogen
         };
 
         // NOLINTEND(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+
+        hive_key make_hive_key(const key_block_t& block)
+        {
+            return {block.subkeys, block.value_count, block.offsets,
+                    hive_key_class{
+                        .offset = block.class_offset,
+                        .length = block.class_length,
+                        .max_sub_key_class_length = block.max_class_length,
+                    }};
+        }
 
         bool read_file_data_safe(std::ifstream& file, const uint64_t offset, void* buffer, const size_t size)
         {
@@ -140,54 +152,45 @@ namespace sogen
             return obj;
         }
 
-        // A single hive cell can only hold ~16344 bytes of payload. Larger values (e.g. the
-        // "ProductPolicy" REG_BINARY under CurrentControlSet\Control\ProductOptions) are split across a
-        // "db" cell (signature, segment count, offset to a segment-offset array) and a chain of data
-        // segment cells, each holding up to big_data_segment_size bytes of the real payload.
-        constexpr size_t big_data_segment_size = 16344;
+        // Values longer than CM_KEY_VALUE_BIG are stored as a "db" cell that lists segment cells of
+        // up to that many bytes each.
+        constexpr size_t big_data_segment_size = 0x3FD8;
 
-        std::vector<std::byte> read_big_data(std::ifstream& file, const uint64_t db_cell_offset, const size_t data_length)
+        struct big_data_block_t
         {
-            uint16_t segment_count{};
-            int32_t segment_list_offset{};
-            read_file_data(file, db_cell_offset + 2, &segment_count, sizeof(segment_count));
-            read_file_data(file, db_cell_offset + 4, &segment_list_offset, sizeof(segment_list_offset));
+            char signature[2]; // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+            uint16_t segment_count;
+            int32_t segment_list;
+        };
 
-            const auto segment_offsets_address = MAIN_ROOT_OFFSET + static_cast<uint64_t>(segment_list_offset) + 4;
+        std::vector<std::byte> read_value_data(std::ifstream& file, const int data_offset, const size_t data_length)
+        {
+            const auto data_address = MAIN_ROOT_OFFSET + data_offset;
+            if (data_length <= big_data_segment_size)
+            {
+                return read_file_data(file, data_address, data_length);
+            }
+
+            const auto big_data = read_file_object<big_data_block_t>(file, data_address);
+            if (big_data.signature[0] != 'd' || big_data.signature[1] != 'b')
+            {
+                return read_file_data(file, data_address, data_length);
+            }
 
             std::vector<std::byte> result{};
             result.reserve(data_length);
 
-            for (uint16_t i = 0; i < segment_count && result.size() < data_length; ++i)
+            const auto segment_list_address = MAIN_ROOT_OFFSET + big_data.segment_list + 4;
+            for (uint16_t i = 0; i < big_data.segment_count && result.size() < data_length; ++i)
             {
-                const auto segment_offset = read_file_object<int32_t>(file, segment_offsets_address, i);
-                const auto remaining = data_length - result.size();
-                const auto chunk_size = std::min(remaining, big_data_segment_size);
-
-                const auto segment = read_file_data(file, MAIN_ROOT_OFFSET + static_cast<uint64_t>(segment_offset) + 4, chunk_size);
+                const auto segment_offset = read_file_object<int32_t>(file, segment_list_address, i);
+                const auto segment_length = std::min(data_length - result.size(), big_data_segment_size);
+                const auto segment = read_file_data(file, MAIN_ROOT_OFFSET + segment_offset + 4, segment_length);
                 result.insert(result.end(), segment.begin(), segment.end());
             }
 
             result.resize(data_length);
             return result;
-        }
-
-        std::vector<std::byte> read_value_data(std::ifstream& file, const int data_offset, const size_t data_length)
-        {
-            const auto address = MAIN_ROOT_OFFSET + static_cast<uint64_t>(data_offset);
-
-            if (data_length > big_data_segment_size)
-            {
-                char signature[2]{}; // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
-                read_file_data(file, address, signature, sizeof(signature));
-
-                if (signature[0] == 'd' && signature[1] == 'b')
-                {
-                    return read_big_data(file, address, data_length);
-                }
-            }
-
-            return read_file_data(file, address, data_length);
         }
 
         hive_key parse_root_block(std::ifstream& file, const std::filesystem::path& file_path)
@@ -201,7 +204,7 @@ namespace sogen
 
                 const auto key_block = read_file_object<key_block_t>(file, MAIN_KEY_BLOCK_OFFSET);
 
-                return {key_block.subkeys, key_block.value_count, key_block.offsets, key_block.class_name, key_block.class_len};
+                return make_hive_key(key_block);
             }
             catch (const std::exception& e)
             {
@@ -212,13 +215,12 @@ namespace sogen
 
     std::vector<std::byte> hive_key::get_class_name(std::ifstream& file) const
     {
-        if (this->class_name_offset_ == -1 || this->class_name_length_ <= 0)
+        if (this->class_.offset < 0 || this->class_.length == 0)
         {
             return {};
         }
 
-        return read_file_data(file, MAIN_ROOT_OFFSET + static_cast<uint64_t>(this->class_name_offset_) + 4,
-                              static_cast<size_t>(this->class_name_length_));
+        return read_file_data(file, MAIN_ROOT_OFFSET + static_cast<uint64_t>(this->class_.offset) + 4, this->class_.length);
     }
 
     const hive_value* hive_key::get_value(std::ifstream& file, const std::string_view name)
@@ -276,9 +278,7 @@ namespace sogen
                 const auto subkey_name_len = subkey.len < 0 ? size_t{0} : std::min(static_cast<size_t>(subkey.len), sizeof(subkey.name));
                 std::string subkey_name(subkey.name, subkey_name_len);
 
-                const auto [it, inserted] =
-                    this->sub_keys_.emplace(std::move(subkey_name), hive_key{subkey.subkeys, subkey.value_count, subkey.offsets,
-                                                                             subkey.class_name, subkey.class_len});
+                const auto [it, inserted] = this->sub_keys_.emplace(std::move(subkey_name), make_hive_key(subkey));
                 if (inserted)
                 {
                     this->sub_keys_by_index_.emplace_back(it->first);
@@ -315,15 +315,13 @@ namespace sogen
             raw_value.parsed = false;
             raw_value.type = value.value_type;
             raw_value.name = value_name;
+            raw_value.data_length = static_cast<uint32_t>(value.size);
+            raw_value.data_offset = value.offset + 4;
+
             if (value.size & 1 << 31)
             {
                 raw_value.data_length = value.size & 0xffff;
                 raw_value.data_offset = offset + static_cast<int>(offsetof(value_block_t, offset));
-            }
-            else
-            {
-                raw_value.data_length = static_cast<size_t>(value.size);
-                raw_value.data_offset = value.offset + 4;
             }
 
             const auto [it, inserted] = this->values_.emplace(std::move(value_name), std::move(raw_value));

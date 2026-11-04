@@ -27,7 +27,7 @@ jobs:
     name: Fuzz IO device handlers
     runs-on: ubuntu-24.04
     env:
-      CLANG_VERSION: 21
+      CLANG_VERSION: 22
       DURATION: ${{ github.event.inputs.duration_seconds || '3600' }}
     steps:
       - name: Checkout Source
@@ -71,7 +71,7 @@ jobs:
       # host backend are compiled into the fuzzer instead of being silently skipped. The root CMakeLists
       # resolves the PATH interpreter, so this and pip agree.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

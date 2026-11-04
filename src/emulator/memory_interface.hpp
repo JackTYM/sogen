@@ -1,14 +1,16 @@
 #pragma once
+#include "interface.hpp"
+
 #include <array>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 
 #include "memory_permission.hpp"
-#include <platform/compiler.hpp>
 
 namespace sogen
 {
@@ -22,38 +24,24 @@ namespace sogen
         size_t size;
     };
 
-    // Thrown by map_memory (or reserve_guest_address_range) when a backend sharing the guest
-    // address space with the host process (FEX on Apple Silicon: guest VA == host VA) finds the
-    // target range genuinely occupied by a foreign host mapping at the moment it tries to claim it
-    // at the host OS level - a TOCTOU race against the caller's earlier free-space probe, which a
-    // backend detects by making the claim itself atomic (fail rather than silently overwrite).
-    // Callers placing guest memory at a caller-chosen address (a module's preferred image base, a
-    // relocation retry) should catch this and treat it exactly like an ordinary placement failure -
-    // pick a different address - rather than as a fatal error. Backends with an independent guest
-    // address space never throw this.
-    //
-    // EXPORT_SYMBOL is required, not decorative: backends (FEX) build as their own dynamically
-    // loaded shared library, compiled with -fvisibility=hidden by default. A hidden-visibility
-    // type's RTTI is private to the library that defines it, so a throw from within the FEX dylib
-    // would NOT be caught by a catch (const host_memory_collision&) compiled into the main
-    // executable/another library - the two sides would disagree on the type's identity and the
-    // exception would silently fall through to a broader catch (const std::exception&) instead.
-    struct EXPORT_SYMBOL host_memory_collision : std::runtime_error
+    // Thrown by a backend sharing the address space with the host when a range it has to claim was mapped by the host
+    // after the caller found it free. The caller can release the range and pick another address.
+    struct EMULATOR_INTERFACE host_memory_collision : std::runtime_error
     {
         host_memory_collision()
-            : std::runtime_error("Guest memory range is occupied by a foreign host mapping")
+            : std::runtime_error("Guest memory range is already mapped on the host")
         {
         }
     };
 
     class memory_manager;
-    class linux_memory_manager;
+    class posix_memory_manager;
 
-    class memory_interface
+    class EMULATOR_INTERFACE memory_interface
     {
       public:
         friend memory_manager;
-        friend linux_memory_manager;
+        friend posix_memory_manager;
 
         virtual ~memory_interface() = default;
 
@@ -67,14 +55,40 @@ namespace sogen
         virtual void map_memory(uint64_t address, size_t size, memory_permission permissions) = 0;
         virtual void unmap_memory(uint64_t address, size_t size) = 0;
 
-        virtual void map_host_memory(uint64_t /*address*/, size_t /*size*/, void* /*host_pointer*/, memory_permission /*permissions*/)
+        // Returns false if this backend cannot alias that particular host memory into the guest.
+        virtual bool map_host_memory(uint64_t /*address*/, size_t /*size*/, void* /*host_pointer*/, memory_permission /*permissions*/)
         {
             throw std::runtime_error("Host memory mapping is not supported by this backend");
+        }
+
+        virtual bool supports_host_memory_mapping() const
+        {
+            return false;
+        }
+
+        virtual bool host_memory_mapping_requires_identity() const
+        {
+            return false;
+        }
+
+        // Whether host memory can also appear in the guest at its own address, for memory the backend cannot map a
+        // second time elsewhere.
+        virtual bool host_memory_can_stay_in_place() const
+        {
+            return false;
         }
 
         virtual void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) = 0;
 
       public:
+        // For backends whose guest memory is host memory at fixed host addresses: the host address backing address,
+        // which is where host memory has to be placed to appear there in the guest. 0 for backends that can map host
+        // memory to any guest address.
+        virtual uint64_t host_placement_address(uint64_t /*address*/) const
+        {
+            return 0;
+        }
+
         virtual bool host_memory_aliasing_is_coherent() const
         {
             return true;
@@ -84,54 +98,69 @@ namespace sogen
         {
         }
 
-        // Ranges of the *host* process's own address space the guest address space must avoid, for
-        // backends that share one address space with the guest (guest VA == host VA) rather than
-        // sandboxing/translating it independently - e.g. the analyzer's own loaded image, dyld, and
-        // shared libraries. Queried once, early, before any guest memory is allocated, so the memory
-        // manager can pre-reserve these ranges. Backends with a fully independent guest address space
-        // (the default) have nothing to report. This is a best-effort snapshot taken at that one point
-        // in time - host allocations that happen afterwards are not covered.
+        // For backends that can notice accesses by protecting memory: tracks [address, address + size) until it is unmapped,
+        // for take_written_ranges and invalidate_cache_on_access. Returns false if this backend cannot.
+        virtual bool track_access(uint64_t /*address*/, size_t /*size*/)
+        {
+            return false;
+        }
+
+        // Calls f for each part of tracked memory in [address, address + size) written since tracking began or since the
+        // last call, and tracks writes to those parts again.
+        virtual void take_written_ranges(uint64_t /*address*/, size_t /*size*/,
+                                         const std::function<void(uint64_t written_address, size_t written_size)>& /*f*/)
+        {
+        }
+
+        // For tracked memory whose CPU cache lines may be stale, e.g. after a non-coherent device wrote it: the next access
+        // to each part of [address, address + size) first cleans and invalidates its cache lines.
+        virtual void invalidate_cache_on_access(uint64_t /*address*/, size_t /*size*/)
+        {
+        }
+
+        // Ranges of the host process's own address space (its image, dyld, shared libraries) that the
+        // guest must avoid, for backends where guest VA == host VA. Best-effort snapshot: host
+        // allocations made after the query are not covered. Backends with an independent guest
+        // address space have nothing to report.
         virtual std::vector<host_reserved_range> reserved_host_ranges() const
         {
             return {};
         }
 
-        // Windowed form of reserved_host_ranges(), for callers that only need to know whether ONE
-        // specific range has been claimed by a foreign host mapping (e.g. a fixed-address allocation
-        // checking its exact target), rather than re-enumerating the whole address space. Returns
-        // only the reserved sub-ranges intersecting [address, address + size). Default: fall back to
-        // the full query, so backends that don't specialize keep identical behavior.
+        // reserved_host_ranges() restricted to [address, address + size), for callers checking one
+        // specific target instead of re-enumerating the whole address space.
         virtual std::vector<host_reserved_range> reserved_host_ranges_in(uint64_t /*address*/, size_t /*size*/) const
         {
             return this->reserved_host_ranges();
         }
 
-        // Called by the memory manager whenever it claims a guest address range - both when reserved
-        // (MEM_RESERVE, not yet backed by any real mapping) and when committed - so backends sharing
-        // the host address space with the guest (see reserved_host_ranges) can claim the same range at
-        // the host OS level immediately. Without this, a reserved-but-uncommitted range is invisible to
-        // the host allocator, so nothing stops an unconstrained host allocation (e.g. a JIT code buffer)
-        // from landing there before the guest range is actually committed. No-op (returns true) for
-        // backends with an independent guest address space (the default).
-        //
-        // The caller has already confirmed [address, address + size) looks free via a host-level probe,
-        // but that confirm and this claim are necessarily two separate calls - a foreign host allocation
-        // (system malloc, another thread's stack, a driver's own allocation) can land in the gap between
-        // them. A backend must make the claim itself atomic (fail rather than silently overwrite an
-        // intervening foreign mapping) and return false on such a collision so the caller can re-pick a
-        // different address instead of corrupting whatever is there.
-        virtual bool reserve_guest_address_range(uint64_t /*address*/, size_t /*size*/)
+        // The end of the guest addresses the backend can map. Backends sharing the address space with the
+        // guest are bound by the host's user address space, which can be far smaller than Windows' (512 GB
+        // on Android kernels built with 39-bit virtual addresses).
+        virtual uint64_t guest_address_end() const
         {
-            return true;
+            return std::numeric_limits<uint64_t>::max();
         }
 
-        // Counterpart to reserve_guest_address_range: called by the memory manager once a guest range
-        // is genuinely released (freed) - not on a mere decommit, where the guest range stays reserved
-        // and the host-level claim must persist. The caller guarantees [address, address + size)
-        // contains no reserved guest ranges at call time (it passes the released range expanded to the
-        // surrounding unreserved gap), so the backend may drop any host-level claim wholly inside it.
-        // No-op for backends with an independent guest address space (the default).
-        virtual void release_guest_address_range(uint64_t /*address*/, size_t /*size*/)
+        // Called whenever the memory manager claims a guest range, including a bare MEM_RESERVE that is
+        // not backed by a real mapping yet. Backends sharing the address space with the guest (see
+        // reserved_host_ranges) must claim it at the host OS level here, otherwise an unconstrained
+        // host allocation (e.g. a JIT code buffer) can land inside a reserved-but-uncommitted range.
+        virtual void reserve_guest_address_range(uint64_t /*address*/, size_t /*size*/)
+        {
+        }
+
+        // A range every process maps at the same guest address, such as KUSER_SHARED_DATA. A snapshot may keep
+        // memory there, since restoring one maps the range like every other start does.
+        virtual void register_fixed_guest_range(uint64_t /*address*/, size_t /*size*/)
+        {
+        }
+
+        // Counterpart to reserve_guest_address_range, called once a guest range is genuinely freed -
+        // not on a decommit, where the range stays reserved and the host claim must persist. The
+        // caller expands the freed range to the surrounding unreserved gap, so the backend may drop
+        // any host claim wholly inside it.
+        virtual void release_guest_address_range(uint64_t /*address*/, uint64_t /*size*/)
         {
         }
 
@@ -139,6 +168,7 @@ namespace sogen
         T read_memory(const uint64_t address) const
         {
             static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable!");
+            // NOLINTNEXTLINE(bugprone-invalid-enum-default-initialization)
             T value{};
             this->read_memory(address, &value, sizeof(value));
             return value;

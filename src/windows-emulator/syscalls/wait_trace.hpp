@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../windows_emulator.hpp"
+#include "../syscall_utils.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -93,7 +94,7 @@ namespace sogen::syscalls
         return registry;
     }
 
-    inline void record_object_signal(const handle h, const uint32_t signaling_tid, const char* syscall_name)
+    inline void record_object_signal(const handle h, const syscall_context& c, const char* syscall_name)
     {
         if (!wait_trace_enabled())
         {
@@ -101,7 +102,7 @@ namespace sogen::syscalls
         }
 
         wait_signal_registry()[h.bits & 0xFFFFFFFFULL] = {
-            .signaling_tid = signaling_tid, .time = std::chrono::steady_clock::now(), .syscall_name = syscall_name};
+            .signaling_tid = c.thread().id, .time = std::chrono::steady_clock::now(), .syscall_name = syscall_name};
     }
 
     struct wait_start_record

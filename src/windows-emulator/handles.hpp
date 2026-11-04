@@ -36,9 +36,13 @@ namespace sogen
             private_namespace,
             process,
             accelerator_table,
-            cursor_icon,
+            managed_thread,
             job,
+            deferred_window_positions,
+            thread_state_change,
             window_station,
+            debug_object,
+            cursor_icon,
         };
     };
 
@@ -49,11 +53,8 @@ namespace sogen
 
     struct handle_value
     {
-        // The low 2 bits of a Windows HANDLE are reserved: the kernel ignores them and user-mode code
-        // is free to use them as tag bits, so real handles are always 4-aligned. Genuine Windows
-        // binaries rely on this - e.g. wow64.dll's generic NtClose thunk (whNtClose) does
-        // `and handle, ~1` before the 64-bit syscall - so emitted handles must keep the low 2 bits
-        // clear for those masks to be the no-ops they are on real Windows.
+        // NT handles are multiples of 4: the kernel ignores the low 2 bits and user mode tags them
+        // (rpcrt4 keeps private flags there), so an id starting at bit 0 would alias a neighbouring handle.
         uint64_t reserved : 2;
         uint64_t id : 21;
         uint64_t type : 7;
@@ -168,16 +169,22 @@ namespace sogen
         virtual ~ref_counted_object() = default;
 
         uint32_t ref_count{1};
+        bool inherit{};
+        bool protect_from_close{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->ref_count);
+            buffer.write(this->inherit);
+            buffer.write(this->protect_from_close);
             this->serialize_object(buffer);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
         {
             buffer.read(this->ref_count);
+            buffer.read(this->inherit);
+            buffer.read(this->protect_from_close);
             this->deserialize_object(buffer);
         }
 
@@ -202,15 +209,21 @@ namespace sogen
 
         // std::nullopt means DUPLICATE_SAME_ACCESS: the new handle should carry the source's own access.
         virtual std::optional<handle> duplicate(handle h, std::optional<ACCESS_MASK> desired_access) = 0;
+
+        virtual ref_counted_object* get_object(handle)
+        {
+            return nullptr;
+        }
     };
 
-    template <handle_types::type Type, typename T, uint32_t IndexShift = 0>
+    template <handle_types::type Type, typename T>
         requires(utils::Serializable<T> && std::is_base_of_v<ref_counted_object, T>)
     class handle_store : public generic_handle_store
     {
       public:
         using index_type = uint32_t;
         using value_map = std::map<index_type, T>;
+        using iterator = value_map::iterator;
 
         bool block_mutation(bool blocked)
         {
@@ -236,20 +249,17 @@ namespace sogen
             return this->store_and_get(std::move(value)).first;
         }
 
-        bool store_at(const handle target, T value)
+        bool store_at(const handle h, T value)
         {
             if (this->block_mutation_)
             {
                 throw std::runtime_error("Mutation of handle store is blocked!");
             }
-
-            if (target.value.type != Type || (target.value.id & ((1u << IndexShift) - 1)) != 0)
+            if (h.value.type != Type || h.value.is_pseudo || h.value.id == 0)
             {
                 return false;
             }
-
-            const index_type index = target.value.id >> IndexShift;
-            return this->store_.emplace(index, std::move(value)).second;
+            return this->store_.try_emplace(static_cast<index_type>(h.value.id), std::move(value)).second;
         }
 
         handle make_handle(const index_type index) const
@@ -258,7 +268,7 @@ namespace sogen
             h.bits = 0;
             h.value.is_pseudo = false;
             h.value.type = Type;
-            h.value.id = index << IndexShift;
+            h.value.id = index;
 
             return h;
         }
@@ -266,6 +276,11 @@ namespace sogen
         T* get_by_index(const uint32_t index)
         {
             return this->get(this->make_handle(index));
+        }
+
+        ref_counted_object* get_object(const handle h) override
+        {
+            return this->get(h);
         }
 
         T* get(const handle_value h)
@@ -316,7 +331,7 @@ namespace sogen
             }
         }
 
-        std::pair<typename value_map::iterator, bool> erase(const value_map::iterator& entry)
+        std::pair<iterator, bool> erase(const iterator& entry)
         {
             if (this->block_mutation_)
             {
@@ -436,7 +451,7 @@ namespace sogen
             return this->store_.begin();
         }
 
-        value_map::iterator end()
+        iterator end()
         {
             return this->store_.end();
         }
@@ -454,7 +469,7 @@ namespace sogen
                 return this->store_.end();
             }
 
-            return this->store_.find(static_cast<uint32_t>(h.id) >> IndexShift);
+            return this->store_.find(static_cast<uint32_t>(h.id));
         }
 
         uint32_t find_free_index()
@@ -502,6 +517,11 @@ namespace sogen
 
                 this->handles_.emplace(key, h);
             }
+        }
+
+        ref_counted_object* get_object(const handle h) override
+        {
+            return this->get(h);
         }
 
         T* get(const handle_value h)
@@ -640,17 +660,18 @@ namespace sogen
     constexpr auto BASE_NAMED_OBJECTS_DIRECTORY = make_pseudo_handle(0x2, handle_types::directory);
     constexpr auto RPC_CONTROL_DIRECTORY = make_pseudo_handle(0x3, handle_types::directory);
     constexpr auto KNOWN_DLLS32_DIRECTORY = make_pseudo_handle(0x4, handle_types::directory);
-    constexpr auto DRIVER_STORE_NODES_DIRECTORY = make_pseudo_handle(0x5, handle_types::directory);
+    constexpr auto DOS_DEVICES_DIRECTORY = make_pseudo_handle(0x5, handle_types::directory);
+    constexpr auto DRIVER_STORE_NODES_DIRECTORY = make_pseudo_handle(0x6, handle_types::directory);
 
     constexpr auto KNOWN_DLLS_SYMLINK = make_pseudo_handle(0x1, handle_types::symlink);
     constexpr auto KNOWN_DLLS32_SYMLINK = make_pseudo_handle(0x2, handle_types::symlink);
+    constexpr uint32_t DRIVE_SYMLINK_BASE = 0x100;
     constexpr auto SHARED_SECTION = make_pseudo_handle(0x1, handle_types::section);
     constexpr auto DBWIN_BUFFER = make_pseudo_handle(0x2, handle_types::section);
 
     constexpr auto DBWIN_DATA_READY = make_pseudo_handle(0x2, handle_types::event);
     constexpr auto DBWIN_BUFFER_READY = make_pseudo_handle(0x3, handle_types::event);
     constexpr auto SVCCTRL_START_EVENT = make_pseudo_handle(0x4, handle_types::event);
-    constexpr auto MAXIMUM_COMMIT_CONDITION = make_pseudo_handle(0x6, handle_types::event);
 
     constexpr auto CONSOLE_HANDLE = make_pseudo_handle(0x1, handle_types::file);
     constexpr auto STDOUT_HANDLE = make_pseudo_handle(0x2, handle_types::file);
@@ -658,6 +679,7 @@ namespace sogen
     constexpr auto NUL_HANDLE = make_pseudo_handle(0x4, handle_types::file);
 
     constexpr auto DUMMY_IMPERSONATION_TOKEN = make_pseudo_handle(0x1, handle_types::token);
+    constexpr auto ANONYMOUS_IMPERSONATION_TOKEN = make_pseudo_handle(0x2, handle_types::token);
 
     constexpr auto GUEST_PROCESS_HANDLE = make_handle(0x1, handle_types::process, false);
 

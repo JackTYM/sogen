@@ -7,13 +7,17 @@
 
 #include <functional>
 
+#include "process_manager.hpp"
 #include <utils/moved_marker.hpp>
+#include <platform/arm64_context.hpp>
 
 namespace sogen
 {
 
     struct completion_state;
     struct process_context;
+    struct vcpu_context;
+    struct windows_arch_abi;
 
     // Thrown by emulator_thread's constructor when a guest memory allocation it needs (stack, GS
     // segment/TEB, ...) fails - distinguishable from an ordinary std::runtime_error so a syscall
@@ -65,6 +69,48 @@ namespace sogen
         }
     };
 
+    struct user_thread_hook
+    {
+        uint64_t handle{};
+        uint64_t proc{};
+        bool ansi{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->handle);
+            buffer.write(this->proc);
+            buffer.write(this->ansi);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->handle);
+            buffer.read(this->proc);
+            buffer.read(this->ansi);
+        }
+    };
+
+    struct user_low_level_hook
+    {
+        uint64_t handle{};
+        int id{};
+        uint64_t proc{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->handle);
+            buffer.write(this->id);
+            buffer.write(this->proc);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->handle);
+            buffer.read(this->id);
+            buffer.read(this->proc);
+        }
+    };
+
     struct pending_apc
     {
         uint32_t flags{};
@@ -73,10 +119,9 @@ namespace sogen
         uint64_t apc_argument2{};
         uint64_t apc_argument3{};
 
-        // For a WoW64 I/O completion APC: the WoW64 layer's 64-bit I/O status block (apc_argument2) is a
-        // reused per-thread scratch buffer. A syscall issued between this APC being queued and dispatched
-        // overwrites it, so the completion routine would read a stale byte count. Re-stamp the 32-bit status
-        // block right before the APC runs to guarantee the correct result reaches the guest.
+        // For a WoW64 I/O completion APC: apc_argument2 is the caller's 32-bit I/O status block. The kernel writes
+        // it as it dispatches the completion APC, so whatever the caller left there while the request was pending
+        // is superseded; re-stamp it right before the APC runs.
         bool restamp_io_status_block{false};
         int32_t io_status{};
         uint32_t io_information{};
@@ -189,6 +234,27 @@ namespace sogen
         }
     };
 
+    struct pending_debug_event_wait
+    {
+        handle debug_object{};
+        emulator_pointer state_change{};
+        std::optional<std::chrono::steady_clock::time_point> timeout{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->debug_object);
+            buffer.write(this->state_change);
+            buffer.write_optional(this->timeout);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->debug_object);
+            buffer.read(this->state_change);
+            buffer.read_optional(this->timeout);
+        }
+    };
+
     enum class callback_id : uint32_t
     {
         Invalid = 0,
@@ -200,6 +266,12 @@ namespace sogen
         NtUserUpdateWindow,
         NtUserEnumDisplayMonitors,
         NtUserSetWindowPos,
+        NtUserGetComboBoxInfo,
+        NtUserEndDeferWindowPosEx,
+        NtUserGetMessage,
+        NtUserPeekMessage,
+        NtUserWaitMessage,
+        NtUserMsgWaitForMultipleObjectsEx,
         NtUserMoveWindow,
         NtUserSetFocus,
     };
@@ -230,6 +302,7 @@ namespace sogen
         uint16_t es{};
         uint16_t fs{};
         uint16_t gs{};
+        std::optional<arm64_context> arm64_registers{};
         std::unique_ptr<completion_state> state{};
 
         callback_frame();
@@ -243,8 +316,8 @@ namespace sogen
 
         ~callback_frame();
 
-        void save_registers(x86_64_cpu& emu);
-        void restore_registers(x86_64_cpu& emu) const;
+        void save_registers(guest_cpu& cpu);
+        void restore_registers(guest_cpu& cpu) const;
 
         void serialize(utils::buffer_serializer& buffer) const;
         void deserialize(utils::buffer_deserializer& buffer);
@@ -266,12 +339,56 @@ namespace sogen
 
     class emulator_process : public ref_counted_object
     {
-        void serialize_object(utils::buffer_serializer&) const override
+      public:
+        managed_process process{};
+        uint32_t id{};
+        bool is_wow64_process{};
+        uint64_t native_environment{};
+        uint64_t compatibility_environment{};
+
+      private:
+        void serialize_object(utils::buffer_serializer& buffer) const override
         {
+            buffer.write(this->process.value);
+            buffer.write(this->id);
+            buffer.write(this->is_wow64_process);
+            buffer.write(this->native_environment);
+            buffer.write(this->compatibility_environment);
         }
 
-        void deserialize_object(utils::buffer_deserializer&) override
+        void deserialize_object(utils::buffer_deserializer& buffer) override
         {
+            buffer.read(this->process.value);
+            buffer.read(this->id);
+            buffer.read(this->is_wow64_process);
+            buffer.read(this->native_environment);
+            buffer.read(this->compatibility_environment);
+        }
+    };
+
+    class managed_process_thread : public ref_counted_object
+    {
+      public:
+        managed_process process{};
+        uint32_t process_id{};
+        uint32_t thread_id{};
+        bool resume_observed{};
+
+      private:
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->process.value);
+            buffer.write(this->process_id);
+            buffer.write(this->thread_id);
+            buffer.write(this->resume_observed);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->process.value);
+            buffer.read(this->process_id);
+            buffer.read(this->thread_id);
+            buffer.read(this->resume_observed);
         }
     };
 
@@ -320,14 +437,27 @@ namespace sogen
         uint32_t id{};
 
         uint64_t current_ip{0};
+        handle impersonation_token{};
         uint64_t previous_ip{0};
 
         std::u16string name{};
+        ULONG io_priority{2};
 
         std::optional<NTSTATUS> exit_status{};
         std::vector<handle> await_objects{};
         bool await_any{false};
         bool waiting_for_alert{false};
+        // Set while a vCPU moves this thread's registers in or out with the kernel lock released. The thread must not
+        // be scheduled, deleted or have its registers accessed until the transfer is done.
+        bool registers_in_transit{false};
+        // Counts syscalls on other vCPUs waiting in wait_for_thread_registers for this thread. The thread must not be
+        // loaded onto a vCPU or deleted while it is non-zero.
+        uint32_t pending_register_accesses{0};
+        // The vCPU that loaded this thread last. The thread is still loaded while it is that vCPU's active thread.
+        vcpu_context* last_vcpu{};
+        // The address of a syscall that was retriggered and runs again when the thread continues, so that it is
+        // reported once.
+        std::optional<uint64_t> retriggered_syscall_ip{};
         bool alerted{false};
         uint32_t create_flags{0};
         uint32_t suspended{0};
@@ -336,6 +466,9 @@ namespace sogen
         std::optional<DWORD> await_msg_mask{};
         std::optional<pending_io_completion_wait> await_io_completion{};
         std::optional<alpc::pending_wait> await_alpc{};
+        std::optional<pending_debug_event_wait> await_debug_event{};
+        std::optional<emulator_pointer> await_file_io{};
+        uint64_t ended_waits{};
 
         // When set, the thread is parked until this host-side predicate returns true. Used by the GPU
         // bridge to wait on a Vulkan semaphore cooperatively (other guest threads run while the GPU works)
@@ -377,13 +510,26 @@ namespace sogen
         std::optional<emulator_allocator> wow64_context_segment; // For WOW64 context (CONTEXT64) allocation
         std::optional<emulator_object<WOW64_CPURESERVED>>
             wow64_cpu_reserved; // Persistent WOW64 thread context for ThreadWow64Context queries
+        std::optional<emulator_object<USER_CLIENTTHREADINFO>> client_thread_info;
+        hwnd active_window{};
+        hwnd focus_window{};
 
         std::vector<std::byte> last_registers{};
 
         bool debugger_hide{false};
 
+        // Threads are not scheduled by processor, so this only answers SetThreadIdealProcessor.
+        uint32_t ideal_processor{};
+
         std::vector<callback_frame> callback_stack;
         std::optional<uint64_t> callback_return_rax{};
+        std::optional<user_thread_hook> cbt_hook{};
+        std::optional<user_thread_hook> get_message_hook{};
+        std::vector<user_low_level_hook> low_level_hooks{};
+
+        std::optional<uint64_t> message_wait_return_register{};
+        std::optional<std::chrono::steady_clock::time_point> message_wait_deadline{};
+        std::vector<uint64_t> running_low_level_inputs{};
 
         std::map<user_timer_key, user_timer> user_timers{};
         uint64_t next_user_timer_id{1};
@@ -391,11 +537,15 @@ namespace sogen
         DWORD current_message_time{};
         // INPUT_MESSAGE_DEVICE_TYPE of the message last retrieved from the queue (GetCurrentInputMessageSource).
         uint32_t current_input_device{};
+        DWORD current_message_position{};
         std::array<uint32_t, 32> message_queue_status_bit_counts{};
         uint32_t message_queue_status_bits{};
         uint32_t queue_status_changed_bits{};
 
         void mark_as_ready(NTSTATUS status);
+        void remember_message_wait(cpu_interface& emu, const windows_arch_abi& abi);
+        void restart_message_wait(cpu_interface& emu, const windows_arch_abi& abi);
+        bool has_hooked_message(windows_emulator& win_emu);
 
         bool is_await_time_over(utils::clock& clock) const
         {
@@ -406,6 +556,14 @@ namespace sogen
         bool has_pending_alertable_apc() const
         {
             return this->apc_alertable && !this->pending_apcs.empty();
+        }
+
+        void record_current_message(const msg& message)
+        {
+            this->current_message_time = message.time;
+            const auto x = static_cast<uint16_t>(message.pt.x);
+            const auto y = static_cast<uint16_t>(message.pt.y);
+            this->current_message_position = static_cast<DWORD>(x) | (static_cast<DWORD>(y) << 16);
         }
 
         user_timer* find_user_timer(hwnd hwnd, uint64_t timer_id);
@@ -421,6 +579,12 @@ namespace sogen
         void post_message(windows_emulator& win_emu, msg msg, bool try_coalesce = false);
         void post_translated_message(windows_emulator& win_emu, msg msg);
         void remove_window_messages(hwnd window);
+        void set_active_window(hwnd window);
+        void set_focus_window(hwnd window);
+        void forget_window(hwnd window);
+        void mark_queue_status_changed(uint32_t bits);
+        void clear_queue_status_changed(uint32_t bits);
+        void publish_client_thread_info() const;
 
         bool is_terminated() const;
 
@@ -433,39 +597,25 @@ namespace sogen
 
         bool is_thread_ready(windows_emulator& win_emu);
 
-        void save(x86_64_cpu& emu)
+        void save(cpu_interface& emu)
         {
             this->last_registers = emu.save_registers();
         }
 
-        void restore(x86_64_cpu& emu) const
+        void restore(cpu_interface& emu, const uint64_t gdt_base) const
         {
-            // Must run before restore_registers: on a vCPU handling this thread for the very first
-            // time, restore_registers can lazily create the FEX engine (including, for a WoW64
-            // thread, the 32-bit engine via create_thread32), which needs this vCPU's own GDT base
-            // already loaded (see fex_vcpu::create_thread32's doc comment) - refresh_execution_context
-            // is what actually calls load_gdt for this vCPU. Reversed, a fresh vCPU's first WoW64
-            // thread would create its 32-bit engine's segment table pointing at GDT base 0.
-            this->refresh_execution_context(emu);
+            this->load_registers(emu);
+            this->refresh_execution_context(emu, gdt_base);
+        }
+
+        void load_registers(cpu_interface& emu) const
+        {
             emu.restore_registers(this->last_registers);
         }
 
-        void setup_if_necessary(x86_64_cpu& emu, const process_context& context)
-        {
-            if (!this->setup_done)
-            {
-                this->setup_done = true;
-                this->setup_registers(emu, context);
-            }
+        void refresh_execution_context(cpu_interface& cpu, uint64_t gdt_base) const;
 
-            if (this->pending_status.has_value())
-            {
-                const auto status = *this->pending_status;
-                this->pending_status = {};
-
-                emu.reg<uint64_t>(x86_register::rax, static_cast<uint64_t>(status));
-            }
-        }
+        void setup_if_necessary(cpu_interface& emu, const process_context& context);
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
@@ -484,9 +634,11 @@ namespace sogen
             buffer.write(this->setup_done);
             buffer.write(this->id);
             buffer.write(this->current_ip);
+            buffer.write(this->impersonation_token);
             buffer.write(this->previous_ip);
 
             buffer.write_string(this->name);
+            buffer.write(this->io_priority);
 
             buffer.write_optional(this->exit_status);
             buffer.write_vector(this->await_objects);
@@ -497,10 +649,14 @@ namespace sogen
 
             buffer.write(this->create_flags);
             buffer.write(this->suspended);
+            buffer.write(this->ideal_processor);
             buffer.write_optional(this->await_time);
             buffer.write_optional(this->await_msg);
             buffer.write_optional(this->await_msg_mask);
             buffer.write_optional(this->await_io_completion);
+            buffer.write_optional(this->await_debug_event);
+            buffer.write_optional(this->await_file_io);
+            buffer.write(this->ended_waits);
 
             buffer.write(this->apc_alertable);
             buffer.write_vector(this->pending_apcs);
@@ -518,6 +674,9 @@ namespace sogen
             buffer.write_optional(this->teb32);
             buffer.write_optional(this->wow64_context_segment);
             buffer.write_optional(this->wow64_cpu_reserved);
+            buffer.write_optional(this->client_thread_info);
+            buffer.write(this->active_window);
+            buffer.write(this->focus_window);
 
             buffer.write_vector(this->last_registers);
 
@@ -525,12 +684,19 @@ namespace sogen
 
             buffer.write_vector(this->callback_stack);
             buffer.write_optional(this->callback_return_rax);
+            buffer.write_optional(this->cbt_hook);
+            buffer.write_optional(this->get_message_hook);
+            buffer.write_vector(this->low_level_hooks);
+            buffer.write_optional(this->message_wait_return_register);
+            buffer.write_optional(this->message_wait_deadline);
+            buffer.write_vector(this->running_low_level_inputs);
 
             buffer.write_map(this->user_timers);
             buffer.write(this->next_user_timer_id);
             buffer.write_vector(this->message_queue);
             buffer.write(this->current_message_time);
             buffer.write(this->current_input_device);
+            buffer.write(this->current_message_position);
             buffer.write(this->message_queue_status_bit_counts);
             buffer.write(this->message_queue_status_bits);
             buffer.write(this->queue_status_changed_bits);
@@ -555,9 +721,11 @@ namespace sogen
             buffer.read(this->setup_done);
             buffer.read(this->id);
             buffer.read(this->current_ip);
+            buffer.read(this->impersonation_token);
             buffer.read(this->previous_ip);
 
             buffer.read_string(this->name);
+            buffer.read(this->io_priority);
 
             buffer.read_optional(this->exit_status);
             buffer.read_vector(this->await_objects);
@@ -568,10 +736,14 @@ namespace sogen
 
             buffer.read(this->create_flags);
             buffer.read(this->suspended);
+            buffer.read(this->ideal_processor);
             buffer.read_optional(this->await_time);
             buffer.read_optional(this->await_msg, [this] { return pending_msg{*this->memory_ptr}; });
             buffer.read_optional(this->await_msg_mask);
             buffer.read_optional(this->await_io_completion, [] { return pending_io_completion_wait{}; });
+            buffer.read_optional(this->await_debug_event, [] { return pending_debug_event_wait{}; });
+            buffer.read_optional(this->await_file_io);
+            buffer.read(this->ended_waits);
 
             buffer.read(this->apc_alertable);
             buffer.read_vector(this->pending_apcs);
@@ -589,6 +761,9 @@ namespace sogen
             buffer.read_optional(this->teb32, [this] { return emulator_object<TEB32>(*this->memory_ptr); });
             buffer.read_optional(this->wow64_context_segment, [this] { return emulator_allocator(*this->memory_ptr); });
             buffer.read_optional(this->wow64_cpu_reserved, [this] { return emulator_object<WOW64_CPURESERVED>(*this->memory_ptr); });
+            buffer.read_optional(this->client_thread_info, [this] { return emulator_object<USER_CLIENTTHREADINFO>(*this->memory_ptr); });
+            buffer.read(this->active_window);
+            buffer.read(this->focus_window);
 
             buffer.read_vector(this->last_registers);
 
@@ -596,12 +771,19 @@ namespace sogen
 
             buffer.read_vector(this->callback_stack);
             buffer.read_optional(this->callback_return_rax);
+            buffer.read_optional(this->cbt_hook);
+            buffer.read_optional(this->get_message_hook);
+            buffer.read_vector(this->low_level_hooks);
+            buffer.read_optional(this->message_wait_return_register);
+            buffer.read_optional(this->message_wait_deadline);
+            buffer.read_vector(this->running_low_level_inputs);
 
             buffer.read_map(this->user_timers);
             buffer.read(this->next_user_timer_id);
             buffer.read_vector(this->message_queue);
             buffer.read(this->current_message_time);
             buffer.read(this->current_input_device);
+            buffer.read(this->current_message_position);
             buffer.read(this->message_queue_status_bit_counts);
             buffer.read(this->message_queue_status_bits);
             buffer.read(this->queue_status_changed_bits);
@@ -612,16 +794,18 @@ namespace sogen
             this->marker.mark_as_moved();
         }
 
-        static bool deleter(emulator_thread& t)
-        {
-            return ref_counted_object::deleter(t) && t.is_terminated();
-        }
+        // A thread loaded on unloading_vcpu counts as unloaded, since that vCPU is about to unload it. The scheduler's
+        // deletion and the handle deleter share this, so that the scheduler never erases a thread the deleter keeps.
+        bool can_be_deleted(const vcpu_context* unloading_vcpu = nullptr) const;
+        static bool deleter(emulator_thread& t);
 
       private:
         bool can_coalesce_message(const msg& msg) const;
+        std::optional<msg> peek_queued_message(process_context& process, hwnd hwnd_filter, UINT filter_min, UINT filter_max,
+                                               bool remove);
 
-        void setup_registers(x86_64_cpu& emu, const process_context& context) const;
-        void refresh_execution_context(x86_64_cpu& emu) const;
+        void setup_registers(cpu_interface& emu, const process_context& context) const;
+        void setup_wow64_registers(x86_64_cpu& emu, const process_context& context) const;
 
         void release()
         {

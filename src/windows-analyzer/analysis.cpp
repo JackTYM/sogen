@@ -28,7 +28,6 @@ namespace sogen
     namespace
     {
         constexpr size_t MAX_INSTRUCTION_BYTES = 15;
-        constexpr uint64_t SYSCALL_INSTRUCTION_SIZE = 2;
 
         // Execution hooks fire lock-free on whichever vCPU hit them; without dispatch_on_cpu,
         // current_thread() would resolve to vCPU 0, which can be idle under --vcpus > 1.
@@ -1573,7 +1572,7 @@ namespace sogen
 
         void trace_ebwv_holder_watchdog_dispatch_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto continuation = emu.reg<uint32_t>(x86_register::ecx);
             uint32_t stored_hresult = 0;
             const bool ok = emu.try_read_memory(continuation + 0x18, &stored_hresult, sizeof(stored_hresult));
@@ -1583,7 +1582,7 @@ namespace sogen
 
         void trace_ebwv_holder_submit_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
             uint32_t holder = 0;
             uint32_t task = 0;
@@ -1598,7 +1597,7 @@ namespace sogen
 
         void trace_ebwv_holder_submit_check1_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[holder-submit-trace] tid=%u check1 (0x1011e255) returned 0x%x (failed=%d)\n", tid, eax,
                                  static_cast<int32_t>(eax) < 0 ? 1 : 0);
@@ -1606,7 +1605,7 @@ namespace sogen
 
         void trace_ebwv_holder_submit_check2_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[holder-submit-trace] tid=%u check2 (0x1002d9a7) returned 0x%x (failed=%d)\n", tid, eax,
                                  static_cast<int32_t>(eax) < 0 ? 1 : 0);
@@ -1614,7 +1613,7 @@ namespace sogen
 
         void trace_ebwv_holder_submit_write1_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto holder = emu.reg<uint32_t>(x86_register::eax);
             const auto value = emu.reg<uint32_t>(x86_register::edi);
             c.win_emu->log.error("[holder-submit-trace] tid=%u WRITE1: holder=0x%x holder[0xc0] <- 0x%x (from check1)\n", tid, holder,
@@ -1623,7 +1622,7 @@ namespace sogen
 
         void trace_ebwv_holder_submit_write2_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto holder = emu.reg<uint32_t>(x86_register::ebx);
             const auto value = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[holder-submit-trace] tid=%u WRITE2: holder=0x%x holder[0xc0] <- 0x%x (from check2)\n", tid, holder,
@@ -1632,14 +1631,14 @@ namespace sogen
 
         void trace_ebwv_holder_check2_cache_result_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto al = emu.reg<uint8_t>(x86_register::al);
             c.win_emu->log.error("[holder-submit-trace] tid=%u check2's own cache-lookup helper (0x2292b0) returned al=%d\n", tid, al);
         }
 
         void trace_ebwv_holder_check2_getlasterror_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[holder-submit-trace] tid=%u check2 fell back to GetLastError()=%u (0x%x)\n", tid, eax, eax);
         }
@@ -1690,7 +1689,7 @@ namespace sogen
 
         void trace_ebwv_prop58_setter_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -1710,7 +1709,7 @@ namespace sogen
 
         void trace_ebwv_prop58_getter_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -1875,7 +1874,7 @@ namespace sogen
 
         void trace_ebwv_connect_named_pipe_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
 
             std::array<uint32_t, 2> args{};
@@ -1906,7 +1905,7 @@ namespace sogen
 
         void trace_ebwv_dcomp_device2_invoke_call_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto resolved_fn = emu.reg<uint32_t>(x86_register::ecx);
             const auto rendering_device = emu.reg<uint32_t>(x86_register::ebx);
             const auto iid_ptr = emu.reg<uint32_t>(x86_register::edi);
@@ -1919,7 +1918,7 @@ namespace sogen
 
         void trace_ebwv_dcomp_device2_invoke_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto hresult = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[dcomp-device2-trace] tid=%u DCompositionCreateDevice2 returned HRESULT=0x%x\n", tid, hresult);
         }
@@ -1931,7 +1930,7 @@ namespace sogen
 
         void trace_ebwv_dcomp_gate1_args_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
             const auto other_ptr = emu.reg<uint32_t>(x86_register::edi);
 
@@ -1947,7 +1946,7 @@ namespace sogen
 
         void trace_ebwv_dcomp_gate23_args_hit(const analysis_context& c, const uint32_t tid, const int gate_index)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ebx);
             const auto other_ptr = emu.reg<uint32_t>(x86_register::edi);
 
@@ -1961,7 +1960,7 @@ namespace sogen
         void trace_ebwv_dcomp_gate_result_hit(const analysis_context& c, const uint32_t tid, const int gate_index,
                                               const uint32_t field_offset)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto newobj = emu.reg<uint32_t>(x86_register::ecx);
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
 
@@ -1983,7 +1982,7 @@ namespace sogen
 
         void trace_ebwv_dcomp_gate1_up1_retry_status_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto holder = emu.reg<uint32_t>(x86_register::ecx);
             const auto status = emu.reg<uint32_t>(x86_register::edi);
 
@@ -2003,7 +2002,7 @@ namespace sogen
 
         void trace_ebwv_gate1_lazy_helper_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
             uint32_t return_addr = 0;
             const bool read_ok = emu.try_read_memory(esp, &return_addr, sizeof(return_addr));
@@ -2022,7 +2021,7 @@ namespace sogen
 
         void trace_ebwv_gate1_lazy_helper_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto al_result = emu.reg<uint8_t>(x86_register::al);
             c.win_emu->log.error("[gate1-lazy-helper-trace] tid=%u RETURNED from the lazy-init/cache-lookup helper, al(result)=%u\n", tid,
                                  al_result);
@@ -2031,7 +2030,7 @@ namespace sogen
 
         void trace_ebwv_gate1_accessor_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
             uint32_t cached_state = 0;
@@ -2044,7 +2043,7 @@ namespace sogen
 
         void trace_ebwv_gate1_accessor_dcomp_invoke_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto resolved_fn = emu.reg<uint32_t>(x86_register::ecx);
             const auto arg0_rendering_device = emu.reg<uint32_t>(x86_register::ebx);
             const auto arg1_riid = emu.reg<uint32_t>(x86_register::edi);
@@ -2057,14 +2056,14 @@ namespace sogen
 
         void trace_ebwv_gate1_accessor_dcomp_invoke_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto hresult = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[gate1-accessor-trace] tid=%u DCompositionCreateDevice2 returned HRESULT=0x%x\n", tid, hresult);
         }
 
         void trace_ebwv_gate1_accessor_result_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto holder = emu.reg<uint32_t>(x86_register::edi);
             const auto hresult = emu.reg<uint32_t>(x86_register::eax);
 
@@ -2079,7 +2078,7 @@ namespace sogen
 
         void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
 
@@ -2252,7 +2251,7 @@ namespace sogen
 
         void trace_tpp_worker_wait_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto status = emu.reg<uint32_t>(x86_register::eax);
             const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
 
@@ -2270,7 +2269,7 @@ namespace sogen
 
         void trace_tpp_worker_key_check_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
             const auto* mod_name = c.win_emu->mod_manager.find_name(esi);
@@ -2284,7 +2283,7 @@ namespace sogen
 
         void trace_tpp_worker_ebx_loaded_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
@@ -2308,7 +2307,7 @@ namespace sogen
 
         void trace_tpp_worker_generic_call_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
@@ -2327,7 +2326,7 @@ namespace sogen
 
         void trace_tpp_worker_no_local_work_helper_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
 
             c.win_emu->log.error("[tpp-worker-trace] tid=%u NO_LOCAL_WORK_HELPER_RETURN eax=0x%x -> %s\n", tid, eax,
@@ -2341,7 +2340,7 @@ namespace sogen
 
         void trace_tpp_wait_callback_loaded_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
 
@@ -2356,7 +2355,7 @@ namespace sogen
 
         void trace_tp_wait_gate_test_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
             const auto cl = static_cast<uint8_t>(ecx & 0xff);
@@ -2368,7 +2367,7 @@ namespace sogen
 
         void trace_tp_wait_gate_rearm_taken_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
 
             c.win_emu->log.error("[tp-wait-gate-trace] tid=%u REARM_TAKEN tp_wait_object=0x%x (re-arming via TpSetWaitEx-equivalent "
@@ -2378,7 +2377,7 @@ namespace sogen
 
         void trace_tp_alloc_wait_zero_check_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
             if (esi == 0)
@@ -2398,7 +2397,7 @@ namespace sogen
 
         void trace_tpsetwaitex_entry_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
 
             c.win_emu->log.error("[tp-wait-gate-trace] tid=%u TPSETWAITEX_ENTRY tp_wait_object=0x%x\n", tid, edi);
@@ -2406,7 +2405,7 @@ namespace sogen
 
         void trace_tpsetwaitex_finalize_clear_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
             uint8_t gate_byte_before = 0;
@@ -2420,7 +2419,7 @@ namespace sogen
 
         void trace_tp_wait_legacy_bridge_callback_loaded_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
             const auto* mod_name = c.win_emu->mod_manager.find_name(esi);
@@ -2464,7 +2463,7 @@ namespace sogen
         // closure's real, dynamically-resolved invoke target is visible without a second pass.
         void dump_bind_state_words(const analysis_context& c, const uint32_t tid, const uint32_t closure)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
 
             std::array<uint32_t, 8> bind_state_words{};
             const bool bind_state_read_ok = closure != 0 && emu.try_read_memory(closure, bind_state_words.data(), sizeof(bind_state_words));
@@ -2483,7 +2482,7 @@ namespace sogen
 
         void trace_ebwv_post_task_call_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
@@ -2516,7 +2515,7 @@ namespace sogen
         // firings #328 found included) rather than only the one specific environment-creation call site.
         void trace_ebwv_post_task_virtual_call_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
 
@@ -2533,7 +2532,7 @@ namespace sogen
 
         void trace_ebwv_signaler_delegate_dispatch_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
@@ -2549,7 +2548,7 @@ namespace sogen
 
         void trace_ebwv_env_arg_validate_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
@@ -2563,7 +2562,7 @@ namespace sogen
 
         void trace_ebwv_env_completion_invoke_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
@@ -2580,7 +2579,7 @@ namespace sogen
 
         void trace_ebwv_env_getoverlappedresult_call_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
             uint32_t handle = 0;
@@ -2597,7 +2596,7 @@ namespace sogen
 
         void trace_ebwv_env_getoverlappedresult_return_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
             const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
 
@@ -2625,7 +2624,7 @@ namespace sogen
 
         void trace_ebwv_env_outcome_invoke_arg_hit(const analysis_context& c, const uint32_t tid)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -2814,7 +2813,7 @@ namespace sogen
             };
         }
 
-        std::string get_instruction_string(const disassembler& d, x86_64_cpu& emu, const uint64_t address)
+        std::string get_instruction_string(const disassembler& d, guest_cpu& emu, const uint64_t address)
         {
             std::array<uint8_t, MAX_INSTRUCTION_BYTES> instruction_bytes{};
             const auto result = emu.try_read_memory(address, instruction_bytes.data(), instruction_bytes.size());
@@ -2823,8 +2822,7 @@ namespace sogen
                 return {};
             }
 
-            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
-            const auto instructions = d.disassemble(emu, reg_cs, instruction_bytes, 1, address);
+            const auto instructions = d.disassemble(emu, instruction_bytes, 1, address);
             if (instructions.empty())
             {
                 return {};
@@ -2839,10 +2837,21 @@ namespace sogen
             return (address >> 0x10) == 0;
         }
 
+        uint64_t get_traced_argument(windows_emulator& win_emu, const size_t index)
+        {
+            auto& cpu = win_emu.active_cpu();
+            if (auto* x64 = dynamic_cast<x86_64_cpu*>(&cpu))
+            {
+                return get_function_argument(*x64, index);
+            }
+
+            return win_emu.abi().function_argument(cpu, index);
+        }
+
         template <typename CharType = char>
         std::string read_arg_as_string(windows_emulator& win_emu, const size_t index)
         {
-            const auto var_ptr = get_function_argument(win_emu.emu(), index);
+            const auto var_ptr = get_traced_argument(win_emu, index);
             if (!var_ptr || is_int_resource(var_ptr))
             {
                 return {};
@@ -2868,7 +2877,7 @@ namespace sogen
 
         std::string read_module_name(windows_emulator& win_emu, const size_t index)
         {
-            const auto var_ptr = get_function_argument(win_emu.emu(), index);
+            const auto var_ptr = get_traced_argument(win_emu, index);
             if (!var_ptr)
             {
                 return {};
@@ -2915,10 +2924,18 @@ namespace sogen
             }
             else if (function == "WinVerifyTrust")
             {
-                auto& emu = c.win_emu->emu();
-                emu.reg(x86_register::rip, emu.read_stack(0));
-                emu.reg(x86_register::rsp, emu.reg(x86_register::rsp) + 8);
-                emu.reg(x86_register::rax, 0);
+                auto& cpu = c.win_emu->active_cpu();
+                const auto& abi = c.win_emu->abi();
+                if (auto* arm64 = dynamic_cast<arm64_cpu*>(&cpu))
+                {
+                    abi.instruction_pointer(cpu, arm64->reg(arm64_register::lr));
+                }
+                else
+                {
+                    abi.instruction_pointer(cpu, cpu.read_stack(0));
+                    abi.stack_pointer(cpu, abi.stack_pointer(cpu) + 8);
+                }
+                abi.return_value(cpu, 0);
             }
             else if (function == "lstrcmp" || function == "lstrcmpi")
             {
@@ -2932,11 +2949,11 @@ namespace sogen
         void handle_suspicious_activity(const analysis_context& c, const std::string_view details)
         {
             std::string decoded_instruction{};
-            const auto rip = c.win_emu->emu().read_instruction_pointer();
+            const auto rip = c.win_emu->active_cpu().read_instruction_pointer();
 
             if (details == "Illegal instruction")
             {
-                decoded_instruction = get_instruction_string(c.d, c.win_emu->emu(), rip);
+                decoded_instruction = get_instruction_string(c.d, c.win_emu->active_cpu(), rip);
             }
 
             c.emit_observation<suspicious_activity_event>([&](auto& event) {
@@ -3044,6 +3061,17 @@ namespace sogen
                                          g_thread_activity_target_tid, u16_to_u8(pipe->name).c_str());
                     trace_all_existing_worker_factory_threads(c);
                 }
+            }
+        }
+
+        void handle_socket_activity(const analysis_context& c, const network::socket_activity activity, const network::address& address)
+        {
+            if (!c.settings->skip_generic_activity)
+            {
+                c.emit_observation<socket_activity_event>([&](auto& event) {
+                    event.action = std::string(network::to_string(activity));
+                    event.address = address.to_string();
+                });
             }
         }
 
@@ -3430,7 +3458,7 @@ namespace sogen
                                        static_cast<unsigned long long>(address), mod.name.c_str());
 
                     hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto rsp = emu.read_stack_pointer();
 
                         uint64_t return_address{};
@@ -3468,7 +3496,7 @@ namespace sogen
                                        static_cast<unsigned long long>(address));
 
                     hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto rsp = emu.read_stack_pointer();
 
                         uint64_t return_address{};
@@ -3506,7 +3534,7 @@ namespace sogen
                                        static_cast<unsigned long long>(address));
 
                     hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto rsp = emu.read_stack_pointer();
 
                         uint64_t return_address{};
@@ -3541,7 +3569,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto header_ptr = emu.reg<uint64_t>(x86_register::r15);
                     const auto available_bytes = emu.reg<uint64_t>(x86_register::rsi);
                     const auto channel_this = emu.reg<uint64_t>(x86_register::r10);
@@ -3660,7 +3688,7 @@ namespace sogen
                                        static_cast<unsigned long long>(address));
 
                     hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto rsp = emu.read_stack_pointer();
 
                         uint64_t return_address{};
@@ -3698,7 +3726,7 @@ namespace sogen
                                        static_cast<unsigned long long>(address));
 
                     hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto rsp = emu.read_stack_pointer();
 
                         uint64_t return_address{};
@@ -3731,7 +3759,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto name = emu.reg<uint32_t>(x86_register::edi);
                     const auto header_ptr = emu.reg<uint64_t>(x86_register::rax);
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rbx);
@@ -3758,7 +3786,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto receiver_this = emu.reg<uint64_t>(x86_register::rcx);
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
@@ -3785,7 +3813,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto target_this = emu.reg<uint64_t>(x86_register::rcx);
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
@@ -3818,7 +3846,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
 
                     uint64_t header_ptr{};
@@ -3867,7 +3895,7 @@ namespace sogen
                     static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto message_ptr = emu.reg<uint64_t>(x86_register::rcx);
                     const auto error = emu.reg<uint32_t>(x86_register::rdx);
                     const auto interface_name_ptr = emu.reg<uint64_t>(x86_register::r8);
@@ -3895,7 +3923,7 @@ namespace sogen
                                        static_cast<unsigned long long>(address));
 
                     hook_dispatched_execution(win_emu, address, [win_emu, address, name](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto rsp = emu.read_stack_pointer();
 
                         uint64_t return_address{};
@@ -3922,7 +3950,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto rsp = emu.read_stack_pointer();
                     const auto profile = emu.reg<uint64_t>(x86_register::r9);
 
@@ -3952,7 +3980,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
 
                     const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
@@ -4013,7 +4041,7 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 hook_dispatched_execution(win_emu, address, [win_emu, address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
 
                     const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
@@ -4050,7 +4078,7 @@ namespace sogen
                     // struct's error field lives at byte offset 16 (DWORD index 4), matching the exact
                     // `*((_DWORD *)v7 + 4) = <HRESULT>` pattern already confirmed in `Initialize`'s own
                     // failure branches - see project_solidworks_bringup.md #549.
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto struct_ptr_wrapper = emu.reg<uint64_t>(x86_register::rdx);
 
                     uint64_t creation_data_ptr{};
@@ -4082,7 +4110,7 @@ namespace sogen
                                    static_cast<unsigned long long>(run_dispatch_address));
 
                 hook_dispatched_execution(win_emu, run_dispatch_address, [win_emu, run_dispatch_address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto call_target = emu.reg<uint64_t>(x86_register::rax);
                     const auto bind_state = emu.reg<uint64_t>(x86_register::rcx);
                     const auto struct_ptr_arg = emu.reg<uint64_t>(x86_register::rdx);
@@ -4118,7 +4146,7 @@ namespace sogen
 
                 hook_dispatched_execution(
                     win_emu, post_task_dispatch_address, [win_emu, post_task_dispatch_address](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto call_target = emu.reg<uint64_t>(x86_register::rax);
                         const auto trampoline_state = emu.reg<uint64_t>(x86_register::rcx);
 
@@ -4160,7 +4188,7 @@ namespace sogen
                                    "SendMojoMessage call at 0x%llx\n",
                                    static_cast<unsigned long long>(send_mojo_message_call));
                 hook_dispatched_execution(win_emu, send_mojo_message_call, [win_emu, send_mojo_message_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto message_receiver = emu.reg<uint64_t>(x86_register::rcx);
                     const auto message = emu.reg<uint64_t>(x86_register::rdx);
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit the real SendMojoMessage call at 0x%llx, "
@@ -4189,7 +4217,7 @@ namespace sogen
                                    "MojoWriteMessage call at 0x%llx\n",
                                    static_cast<unsigned long long>(write_message_call));
                 hook_dispatched_execution(win_emu, write_message_call, [win_emu, write_message_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto mojo_handle = emu.reg<uint64_t>(x86_register::rcx);
                     const auto mojo_message = emu.reg<uint64_t>(x86_register::rdx);
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit the real MojoWriteMessage call at "
@@ -4203,7 +4231,7 @@ namespace sogen
                                    "return value at 0x%llx\n",
                                    static_cast<unsigned long long>(write_message_return));
                 hook_dispatched_execution(win_emu, write_message_return, [win_emu, write_message_return](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit MojoWriteMessage's own return value at "
                                        "0x%llx, tid=%u mojo_result=%u\n",
@@ -4311,7 +4339,7 @@ namespace sogen
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(entry_address));
                 hook_dispatched_execution(win_emu, entry_address, [win_emu, entry_address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t this_ptr{};
                     emu.try_read_memory(esp + 4, &this_ptr, sizeof(this_ptr));
@@ -4332,7 +4360,7 @@ namespace sogen
 
                 const auto dispatch_address = mod.image_base + 0x112181;
                 hook_dispatched_execution(win_emu, dispatch_address, [win_emu, dispatch_address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
                     const auto hwnd = emu.reg<uint32_t>(x86_register::ebx);
@@ -4346,7 +4374,7 @@ namespace sogen
 
                 const auto runonce_address = mod.image_base + 0x117be0;
                 hook_dispatched_execution(win_emu, runonce_address, [win_emu, runonce_address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t hresult{};
                     emu.try_read_memory(esp + 8, &hresult, sizeof(hresult));
@@ -4375,7 +4403,7 @@ namespace sogen
                                    "reply entry at 0x%llx\n",
                                    static_cast<unsigned long long>(init_completed_address));
                 hook_dispatched_execution(win_emu, init_completed_address, [win_emu, init_completed_address](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t reply_ptr{};
                     emu.try_read_memory(esp + 4, &reply_ptr, sizeof(reply_ptr));
@@ -4405,7 +4433,7 @@ namespace sogen
                                    "InterfaceEndpointClient::HandleValidatedMessage entry at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_validated_entry));
                 hook_dispatched_execution(win_emu, handle_validated_entry, [win_emu, handle_validated_entry](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t message_ptr{};
@@ -4422,7 +4450,7 @@ namespace sogen
                                    "InterfaceEndpointClient::HandleValidatedMessage's own return value at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_validated_return));
                 hook_dispatched_execution(win_emu, handle_validated_return, [win_emu, handle_validated_return](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto dispatched = emu.reg<uint32_t>(x86_register::ebx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
                                        "InterfaceEndpointClient::HandleValidatedMessage's own return value at "
@@ -4442,7 +4470,7 @@ namespace sogen
                                    "0x%llx\n",
                                    static_cast<unsigned long long>(on_read_complete_entry));
                 hook_dispatched_execution(win_emu, on_read_complete_entry, [win_emu, on_read_complete_entry](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t bytes_transferred{};
@@ -4495,7 +4523,7 @@ namespace sogen
                                    "buffered-bytes gate at 0x%llx\n",
                                    static_cast<unsigned long long>(outer_gate_cmp));
                 hook_dispatched_execution(win_emu, outer_gate_cmp, [win_emu, outer_gate_cmp](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto available_bytes = emu.reg<uint32_t>(x86_register::edx);
                     const auto required_bytes = emu.reg<uint32_t>(x86_register::ebx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit OnReadComplete's own outer "
@@ -4522,7 +4550,7 @@ namespace sogen
                                    "declared-size-vs-available check at 0x%llx\n",
                                    static_cast<unsigned long long>(size_sufficiency_cmp));
                 hook_dispatched_execution(win_emu, size_sufficiency_cmp, [win_emu, size_sufficiency_cmp](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto declared_num_bytes = emu.reg<uint32_t>(x86_register::ebx);
                     const auto edx = emu.reg<uint32_t>(x86_register::edx);
                     uint32_t a3_available{};
@@ -4563,7 +4591,7 @@ namespace sogen
                                    "handle-count field check at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_count_check));
                 hook_dispatched_execution(win_emu, handle_count_check, [win_emu, handle_count_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto handle_count_field = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own "
                                        "handle-count field check at 0x%llx, tid=%u handle_count_field=%u "
@@ -4586,7 +4614,7 @@ namespace sogen
                                    "delegate dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(real_delegate_dispatch));
                 hook_dispatched_execution(win_emu, real_delegate_dispatch, [win_emu, real_delegate_dispatch](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::edi);
                     const auto delegate_this = emu.reg<uint32_t>(x86_register::ecx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own real "
@@ -4610,7 +4638,7 @@ namespace sogen
                                    "inner ipcz accept call at 0x%llx\n",
                                    static_cast<unsigned long long>(ipcz_accept_call));
                 hook_dispatched_execution(win_emu, ipcz_accept_call, [win_emu, ipcz_accept_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     // `#572` traced the resolved target (`ipcz::_anonymous_namespace_::NotifyTransport`,
                     // real symbol) and found it builds a `RawMessage{a2, a3, a4, a5}` from its own
@@ -4632,7 +4660,7 @@ namespace sogen
                                    "inner ipcz accept result at 0x%llx\n",
                                    static_cast<unsigned long long>(ipcz_accept_result));
                 hook_dispatched_execution(win_emu, ipcz_accept_result, [win_emu, ipcz_accept_result](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto result_code = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Transport::OnChannelMessage's own inner ipcz "
                                        "accept result at 0x%llx, tid=%u result_code=%u benign=%d\n",
@@ -4653,7 +4681,7 @@ namespace sogen
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(node_link_accept_parcel));
                 hook_dispatched_execution(win_emu, node_link_accept_parcel, [win_emu, node_link_accept_parcel](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t accept_parcel_ptr{};
@@ -4677,7 +4705,7 @@ namespace sogen
                                    static_cast<unsigned long long>(router_accept_inbound_parcel));
                 hook_dispatched_execution(
                     win_emu, router_accept_inbound_parcel, [win_emu, router_accept_inbound_parcel](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
                         // A live run just proved `Connector::ReadMessage`'s own `portal_handle`
                         // field (`*(connector_this+8)`) IS a direct `ipcz::Router*` - exactly
@@ -4711,7 +4739,7 @@ namespace sogen
                                    "notify-gate check at 0x%llx\n",
                                    static_cast<unsigned long long>(notify_gate_check));
                 hook_dispatched_execution(win_emu, notify_gate_check, [win_emu, notify_gate_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
                     uint32_t gate_flag{};
                     emu.try_read_memory(this_ptr + 0x2C, &gate_flag, sizeof(gate_flag));
@@ -4748,7 +4776,7 @@ namespace sogen
                                    "own event-count check at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_count_check));
                 hook_dispatched_execution(win_emu, dispatch_count_check, [win_emu, dispatch_count_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto masked_count = emu.reg<uint32_t>(x86_register::ebx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapEventDispatcher::DispatchAll's own "
                                        "event-count check at 0x%llx, tid=%u masked_count=%u has_events=%d\n",
@@ -4761,7 +4789,7 @@ namespace sogen
                                    "own real callback call at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_callback_call));
                 hook_dispatched_execution(win_emu, dispatch_callback_call, [win_emu, dispatch_callback_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TrapEventDispatcher::DispatchAll's own real "
                                        "callback call at 0x%llx, tid=%u resolved_target=0x%x\n",
@@ -4784,7 +4812,7 @@ namespace sogen
                                    "call at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_or_queue_call));
                 hook_dispatched_execution(win_emu, dispatch_or_queue_call, [win_emu, dispatch_or_queue_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto trap_ptr = emu.reg<uint32_t>(x86_register::esi);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit MojoTrap::DispatchOrQueueEvent "
                                        "call at 0x%llx, tid=%u trap_ptr=0x%x\n",
@@ -4806,7 +4834,7 @@ namespace sogen
                                    static_cast<unsigned long long>(real_watcher_callback_call));
                 hook_dispatched_execution(
                     win_emu, real_watcher_callback_call, [win_emu, real_watcher_callback_call](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                         win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchOrQueueEvent's own real watcher "
                                            "callback call at 0x%llx, tid=%u resolved_target=0x%x\n",
@@ -4873,7 +4901,7 @@ namespace sogen
                                    "args at 0x%llx\n",
                                    static_cast<unsigned long long>(on_handle_ready_entry));
                 hook_dispatched_execution(win_emu, on_handle_ready_entry, [win_emu, on_handle_ready_entry](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t a2_watch_id{};
                     emu.try_read_memory(esp + 4, &a2_watch_id, sizeof(a2_watch_id));
@@ -4908,7 +4936,7 @@ namespace sogen
                                    "call at 0x%llx\n",
                                    static_cast<unsigned long long>(connector_error_call));
                 hook_dispatched_execution(win_emu, connector_error_call, [win_emu, connector_error_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::esi);
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
@@ -4940,7 +4968,7 @@ namespace sogen
                                    "Connector::ReadAllAvailableMessages entry at 0x%llx\n",
                                    static_cast<unsigned long long>(read_all_entry));
                 hook_dispatched_execution(win_emu, read_all_entry, [win_emu, read_all_entry](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     uint8_t guard_0x83{};
                     emu.try_read_memory(connector_this + 0x83, &guard_0x83, sizeof(guard_0x83));
@@ -4968,7 +4996,7 @@ namespace sogen
                                    "entry at 0x%llx\n",
                                    static_cast<unsigned long long>(read_message_entry));
                 hook_dispatched_execution(win_emu, read_message_entry, [win_emu, read_message_entry](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     // `#574`'s own recommendation (a): capture the portal handle this Connector
                     // reads from (`*(this+8)`, the same field `Connector::ReadMessage`'s own real
@@ -4988,7 +5016,7 @@ namespace sogen
                                    "post-MojoReadMessage result at 0x%llx\n",
                                    static_cast<unsigned long long>(read_message_post_call));
                 hook_dispatched_execution(win_emu, read_message_post_call, [win_emu, read_message_post_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto mojo_read_message_result = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Connector::ReadMessage's own "
                                        "post-MojoReadMessage result at 0x%llx, tid=%u mojo_read_message_result=%u\n",
@@ -5008,7 +5036,7 @@ namespace sogen
                                    static_cast<unsigned long long>(dispatch_receiver_null_check));
                 hook_dispatched_execution(win_emu, dispatch_receiver_null_check,
                                           [win_emu, dispatch_receiver_null_check](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto connector_this = emu.reg<uint32_t>(x86_register::esi);
                                               uint32_t incoming_receiver{};
                                               emu.try_read_memory(connector_this + 0xc, &incoming_receiver, sizeof(incoming_receiver));
@@ -5035,7 +5063,7 @@ namespace sogen
                                    "incoming_receiver_->Accept() call at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_accept_call));
                 hook_dispatched_execution(win_emu, dispatch_accept_call, [win_emu, dispatch_accept_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto receiver_this = emu.reg<uint32_t>(x86_register::ecx);
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::eax);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
@@ -5051,7 +5079,7 @@ namespace sogen
                                    "incoming_receiver_->Accept() return value at 0x%llx\n",
                                    static_cast<unsigned long long>(dispatch_accept_return));
                 hook_dispatched_execution(win_emu, dispatch_accept_return, [win_emu, dispatch_accept_return](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto accept_result = emu.reg<uint32_t>(x86_register::eax);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
                                        "incoming_receiver_->Accept() return value at 0x%llx, tid=%u "
@@ -5072,7 +5100,7 @@ namespace sogen
                                    "CreateFromMessageHandle result check at 0x%llx\n",
                                    static_cast<unsigned long long>(msg_create_check));
                 hook_dispatched_execution(win_emu, msg_create_check, [win_emu, msg_create_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
                     uint32_t message_handle{};
                     emu.try_read_memory(ebx, &message_handle, sizeof(message_handle));
@@ -5086,7 +5114,7 @@ namespace sogen
                                    "MessageHeaderValidator::Accept result check at 0x%llx\n",
                                    static_cast<unsigned long long>(header_validate_check));
                 hook_dispatched_execution(win_emu, header_validate_check, [win_emu, header_validate_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto al = emu.reg<uint8_t>(x86_register::al);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit DispatchMessageW's own "
                                        "MessageHeaderValidator::Accept result check at 0x%llx, tid=%u "
@@ -5099,7 +5127,7 @@ namespace sogen
                                    "at 0x%llx\n",
                                    static_cast<unsigned long long>(handle_error_entry));
                 hook_dispatched_execution(win_emu, handle_error_entry, [win_emu, handle_error_entry](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto connector_this = emu.reg<uint32_t>(x86_register::ecx);
                     const auto esp = emu.reg<uint32_t>(x86_register::esp);
                     uint32_t return_addr{};
@@ -5129,7 +5157,7 @@ namespace sogen
                                    static_cast<unsigned long long>(validate_struct_header_result));
                 hook_dispatched_execution(win_emu, validate_struct_header_result,
                                           [win_emu, validate_struct_header_result](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto al = emu.reg<uint8_t>(x86_register::al);
                                               const auto edi = emu.reg<uint32_t>(x86_register::edi);
                                               win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit "
@@ -5144,7 +5172,7 @@ namespace sogen
                                    "MessageHeaderValidator::Accept's own version-switch dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(switch_dispatch_point));
                 hook_dispatched_execution(win_emu, switch_dispatch_point, [win_emu, switch_dispatch_point](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto header_num_bytes = emu.reg<uint32_t>(x86_register::eax);
                     const auto header_version = emu.reg<uint32_t>(x86_register::ecx);
                     const auto header_ptr = emu.reg<uint32_t>(x86_register::edi);
@@ -5171,7 +5199,7 @@ namespace sogen
                                    static_cast<unsigned long long>(validate_struct_header_entry));
                 hook_dispatched_execution(
                     win_emu, validate_struct_header_entry, [win_emu, validate_struct_header_entry](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto esp = emu.reg<uint32_t>(x86_register::esp);
                         uint32_t struct_ptr{};
                         emu.try_read_memory(esp + 4, &struct_ptr, sizeof(struct_ptr));
@@ -5204,7 +5232,7 @@ namespace sogen
                                    static_cast<unsigned long long>(get_message_data_first_call_result));
                 hook_dispatched_execution(win_emu, get_message_data_first_call_result,
                                           [win_emu, get_message_data_first_call_result](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
                                               const auto esp = emu.reg<uint32_t>(x86_register::esp);
                                               uint32_t buffer_out_addr{};
@@ -5228,7 +5256,7 @@ namespace sogen
                                    static_cast<unsigned long long>(get_message_data_retry_call_result));
                 hook_dispatched_execution(win_emu, get_message_data_retry_call_result,
                                           [win_emu, get_message_data_retry_call_result](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto mojo_result = emu.reg<uint32_t>(x86_register::eax);
                                               const auto esp = emu.reg<uint32_t>(x86_register::esp);
                                               uint32_t buffer_out_addr{};
@@ -5263,7 +5291,7 @@ namespace sogen
                                    static_cast<unsigned long long>(set_parcel_get_call_result));
                 hook_dispatched_execution(win_emu, set_parcel_get_call_result,
                                           [win_emu, set_parcel_get_call_result](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto ipcz_result = emu.reg<uint32_t>(x86_register::eax);
                                               const auto size_out_addr = emu.reg<uint32_t>(x86_register::esi);
                                               uint32_t size_value{};
@@ -5294,7 +5322,7 @@ namespace sogen
                                    static_cast<unsigned long long>(accept_parcel_inline_vs_fragment_check));
                 hook_dispatched_execution(win_emu, accept_parcel_inline_vs_fragment_check,
                                           [win_emu, accept_parcel_inline_vs_fragment_check](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto gate_result = emu.reg<uint8_t>(x86_register::al);
                                               const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
                                               uint8_t flag_0x28{};
@@ -5325,7 +5353,7 @@ namespace sogen
                                    static_cast<unsigned long long>(fragment_descriptor_sentinel_check));
                 hook_dispatched_execution(win_emu, fragment_descriptor_sentinel_check,
                                           [win_emu, fragment_descriptor_sentinel_check](cpu_interface&, uint64_t) {
-                                              auto& emu = win_emu->emu();
+                                              auto& emu = win_emu->active_x64_cpu();
                                               const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
                                               const auto message_ptr = emu.reg<uint32_t>(x86_register::esi);
                                               uint32_t descriptor_lo{};
@@ -5346,7 +5374,7 @@ namespace sogen
                                    static_cast<unsigned long long>(get_fragment_result_sentinel_check));
                 hook_dispatched_execution(
                     win_emu, get_fragment_result_sentinel_check, [win_emu, get_fragment_result_sentinel_check](cpu_interface&, uint64_t) {
-                        auto& emu = win_emu->emu();
+                        auto& emu = win_emu->active_x64_cpu();
                         const auto anded_result = emu.reg<uint32_t>(x86_register::eax);
                         const auto fragment_out_ptr = emu.reg<uint32_t>(x86_register::ebx);
                         uint32_t fragment_lo{};
@@ -5392,7 +5420,7 @@ namespace sogen
                                    "validation check at 0x%llx\n",
                                    static_cast<unsigned long long>(watch_id_check));
                 hook_dispatched_execution(win_emu, watch_id_check, [win_emu, watch_id_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto notified_watch_id = emu.reg<uint32_t>(x86_register::eax);
                     const auto watcher_ptr = emu.reg<uint32_t>(x86_register::esi);
                     uint32_t current_watch_id{};
@@ -5417,7 +5445,7 @@ namespace sogen
                                    "real bound-callback call at 0x%llx\n",
                                    static_cast<unsigned long long>(real_final_callback));
                 hook_dispatched_execution(win_emu, real_final_callback, [win_emu, real_final_callback](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit RepeatingCallback::Run's own real "
@@ -5437,7 +5465,7 @@ namespace sogen
                                    "dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(next_hop_callback));
                 hook_dispatched_execution(win_emu, next_hop_callback, [win_emu, next_hop_callback](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit the next hop's own real dispatch at 0x%llx, "
@@ -5456,7 +5484,7 @@ namespace sogen
                                    "dispatch at 0x%llx\n",
                                    static_cast<unsigned long long>(final_hop_callback));
                 hook_dispatched_execution(win_emu, final_hop_callback, [win_emu, final_hop_callback](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
                     const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit the final hop's own real dispatch at 0x%llx, "
@@ -5477,7 +5505,7 @@ namespace sogen
                                    "channel-state check at 0x%llx\n",
                                    static_cast<unsigned long long>(channel_state_check));
                 hook_dispatched_execution(win_emu, channel_state_check, [win_emu, channel_state_check](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto channel_ptr = emu.reg<uint32_t>(x86_register::eax);
                     uint32_t state_flag{};
                     emu.try_read_memory(channel_ptr + 0x34, &state_flag, sizeof(state_flag));
@@ -5493,7 +5521,7 @@ namespace sogen
                                    "dispatch call at 0x%llx\n",
                                    static_cast<unsigned long long>(real_dispatch_call));
                 hook_dispatched_execution(win_emu, real_dispatch_call, [win_emu, real_dispatch_call](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto esi = emu.reg<uint32_t>(x86_register::esi);
                     uint32_t resolved_target{};
                     emu.try_read_memory(esi + 0x14, &resolved_target, sizeof(resolved_target));
@@ -5507,7 +5535,7 @@ namespace sogen
                                    "dispatch return value at 0x%llx\n",
                                    static_cast<unsigned long long>(real_dispatch_return));
                 hook_dispatched_execution(win_emu, real_dispatch_return, [win_emu, real_dispatch_return](cpu_interface&, uint64_t) {
-                    auto& emu = win_emu->emu();
+                    auto& emu = win_emu->active_x64_cpu();
                     const auto al = emu.reg<uint8_t>(x86_register::al);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own real "
                                        "dispatch return value at 0x%llx, tid=%u succeeded=%u\n",
@@ -5518,7 +5546,7 @@ namespace sogen
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -5547,7 +5575,7 @@ namespace sogen
 
         void trace_node_connect_hit(const analysis_context& c, const uint64_t address, const char* name)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -5572,7 +5600,7 @@ namespace sogen
 
         void trace_establish_waiting_routers_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -5596,7 +5624,7 @@ namespace sogen
 
         void trace_delayload_failure_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -5656,7 +5684,7 @@ namespace sogen
         {
             constexpr uint32_t FILE_FLAG_OVERLAPPED = 0x40000000;
 
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -5696,7 +5724,7 @@ namespace sogen
             constexpr uint32_t ws_child = 0x40000000;
             constexpr uint32_t ws_popup = 0x80000000;
 
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -5741,7 +5769,7 @@ namespace sogen
             constexpr uint32_t ws_child = 0x40000000;
             constexpr uint32_t ws_popup = 0x80000000;
 
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -5784,7 +5812,7 @@ namespace sogen
 
         void trace_show_window_i386_caller_hit(const analysis_context& c, const uint64_t address, const bool is_async)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -5807,7 +5835,7 @@ namespace sogen
 
         void trace_set_window_pos_i386_caller_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -5840,7 +5868,7 @@ namespace sogen
 
         void trace_ebwv_window_impl_init_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -5861,7 +5889,7 @@ namespace sogen
 
         void trace_ebwv_client_window_init_internal_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -5882,7 +5910,7 @@ namespace sogen
 
         void trace_ebwv_read_env_var_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -5916,7 +5944,7 @@ namespace sogen
 
         void trace_ebwv_client_window_init_gate_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto al = emu.reg<uint8_t>(x86_register::al);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
 
@@ -5940,7 +5968,7 @@ namespace sogen
 
         void trace_ebwv_on_paint_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -5961,7 +5989,7 @@ namespace sogen
 
         void trace_ebwv_on_key_event_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -5986,7 +6014,7 @@ namespace sogen
 
         void trace_ebwv_on_pointer_event_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6011,7 +6039,7 @@ namespace sogen
 
         void trace_ebwv_process_window_message_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6039,7 +6067,7 @@ namespace sogen
 
         void trace_ebwv_create_client_visual_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6060,7 +6088,7 @@ namespace sogen
 
         void trace_ebwv_connect_to_host_wincomp_visual_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6079,7 +6107,7 @@ namespace sogen
 
         void trace_ebwv_create_controller_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -6120,7 +6148,7 @@ namespace sogen
 
         void trace_ebwv_controller_completed_invoke_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
 
             uint32_t return_address = 0;
@@ -6153,7 +6181,7 @@ namespace sogen
 
         void trace_ebwv_create_controller_params_helper_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6175,7 +6203,7 @@ namespace sogen
 
         void trace_ebwv_webview_runtime_class_initialize_i386_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.read_stack_pointer();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6275,7 +6303,7 @@ namespace sogen
 
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -6297,7 +6325,7 @@ namespace sogen
 
         void trace_platform_channel_ctor_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -6315,7 +6343,7 @@ namespace sogen
 
         void trace_platform_channel_tracker_entry_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
 
             uint64_t return_address{};
@@ -6349,7 +6377,7 @@ namespace sogen
 
         rtti_decode_result decode_rtti_type_name(const analysis_context& c, const uint64_t object_ptr)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             rtti_decode_result result{};
 
             if (!emu.try_read_memory(object_ptr, &result.vtable_ptr, sizeof(result.vtable_ptr)) || result.vtable_ptr == 0)
@@ -6397,7 +6425,7 @@ namespace sogen
 
         void trace_platform_channel_delegate_call_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
 
             const auto rsi = emu.reg<uint64_t>(x86_register::rsi);
             const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
@@ -6421,7 +6449,7 @@ namespace sogen
 
         void trace_platform_channel_delegate_return_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
 
             const auto rsi = emu.reg<uint64_t>(x86_register::rsi);
             const auto rax = emu.reg<uint64_t>(x86_register::rax);
@@ -6439,7 +6467,7 @@ namespace sogen
 
         void trace_sldim_queue_check_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
 
             ++g_sldim_queue_check_state.total;
@@ -6462,7 +6490,7 @@ namespace sogen
 
         void trace_sldim_oncommand_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
             const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
@@ -6484,7 +6512,7 @@ namespace sogen
 
         void trace_sldim_oncommand_branch_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto state_ptr = emu.reg<uint32_t>(x86_register::eax);
 
             uint32_t flag_94{};
@@ -6497,7 +6525,7 @@ namespace sogen
 
         void trace_sldim_oncmdmsg_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
 
@@ -6516,7 +6544,7 @@ namespace sogen
 
         void trace_sldim_findentry_result_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
 
             c.win_emu->log.error("[sldim-oncommand-trace] message-map lookup result at 0x%llx tid=%u found=%d (entry=0x%x)\n",
@@ -6525,7 +6553,7 @@ namespace sogen
 
         void trace_sldim_handler_delegate_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
 
@@ -6544,7 +6572,7 @@ namespace sogen
 
         void trace_sldim_trypop_entry_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
 
             uint32_t queue_ptr{};
@@ -6567,13 +6595,13 @@ namespace sogen
                 c.win_emu->log.error("[sldim-trypop-trace] arming a write-watch on the queue count field at 0x%llx\n",
                                      static_cast<unsigned long long>(count_field_addr));
 
-                emu.hook_memory_write(
+                c.win_emu->emu().hook_memory_write(
                     count_field_addr, sizeof(uint32_t),
                     [&c, count_field_addr](cpu_interface&, const uint64_t write_address, const void* value, const size_t size) {
                         uint32_t new_value{};
                         memcpy(&new_value, value, std::min(size, sizeof(new_value)));
 
-                        const auto rip = c.win_emu->emu().read_instruction_pointer();
+                        const auto rip = c.win_emu->active_cpu().read_instruction_pointer();
                         const auto* writer_mod_name = c.win_emu->mod_manager.find_name(rip);
                         const auto* writer_mod = c.win_emu->mod_manager.find_by_address(rip);
                         const auto writer_offset = writer_mod ? rip - writer_mod->image_base : rip;
@@ -6590,7 +6618,7 @@ namespace sogen
 
         void trace_sldim_trypop_count_check_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
 
@@ -6620,7 +6648,7 @@ namespace sogen
 
         void trace_sldim_cmsgthread_ctor_hit(const analysis_context& c, const uint64_t address, const bool two_arg)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
             ++g_sldim_cmsgthread_ctor_hits;
@@ -6648,7 +6676,7 @@ namespace sogen
 
         void trace_sldim_cmsgthread_dtor_entry_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
             ++g_sldim_cmsgthread_dtor_entry_hits;
@@ -6660,7 +6688,7 @@ namespace sogen
 
         void trace_sldim_cmsgthread_dtor_check_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto state_obj = emu.reg<uint32_t>(x86_register::eax);
             const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
 
@@ -6681,7 +6709,7 @@ namespace sogen
 
         void trace_sldim_pending_command_state_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto state_obj = emu.reg<uint32_t>(x86_register::eax);
 
             if (state_obj == 0 || g_sldim_pending_command_write_watch_armed || c.win_emu->current_thread().id != 40)
@@ -6696,28 +6724,28 @@ namespace sogen
                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(field4_addr), state_obj,
                 c.win_emu->current_thread().id);
 
-            emu.hook_memory_write(field4_addr, sizeof(uint32_t),
-                                  [&c, field4_addr](cpu_interface&, const uint64_t write_address, const void* value, const size_t size) {
-                                      uint32_t new_value{};
-                                      memcpy(&new_value, value, std::min(size, sizeof(new_value)));
+            c.win_emu->emu().hook_memory_write(
+                field4_addr, sizeof(uint32_t),
+                [&c, field4_addr](cpu_interface&, const uint64_t write_address, const void* value, const size_t size) {
+                    uint32_t new_value{};
+                    memcpy(&new_value, value, std::min(size, sizeof(new_value)));
 
-                                      const auto rip = c.win_emu->emu().read_instruction_pointer();
-                                      const auto* writer_mod_name = c.win_emu->mod_manager.find_name(rip);
-                                      const auto* writer_mod = c.win_emu->mod_manager.find_by_address(rip);
-                                      const auto writer_offset = writer_mod ? rip - writer_mod->image_base : rip;
+                    const auto rip = c.win_emu->active_cpu().read_instruction_pointer();
+                    const auto* writer_mod_name = c.win_emu->mod_manager.find_name(rip);
+                    const auto* writer_mod = c.win_emu->mod_manager.find_by_address(rip);
+                    const auto writer_offset = writer_mod ? rip - writer_mod->image_base : rip;
 
-                                      c.win_emu->log.error(
-                                          "[sldim-pendingcmd-trace] WRITE to state_obj->field4 0x%llx (at 0x%llx): new_value=0x%x "
-                                          "size=%zu writer_rip=0x%llx (%s+0x%llx) tid=%u\n",
-                                          static_cast<unsigned long long>(field4_addr), static_cast<unsigned long long>(write_address),
-                                          new_value, size, static_cast<unsigned long long>(rip), writer_mod_name,
-                                          static_cast<unsigned long long>(writer_offset), c.win_emu->current_thread().id);
-                                  });
+                    c.win_emu->log.error("[sldim-pendingcmd-trace] WRITE to state_obj->field4 0x%llx (at 0x%llx): new_value=0x%x "
+                                         "size=%zu writer_rip=0x%llx (%s+0x%llx) tid=%u\n",
+                                         static_cast<unsigned long long>(field4_addr), static_cast<unsigned long long>(write_address),
+                                         new_value, size, static_cast<unsigned long long>(rip), writer_mod_name,
+                                         static_cast<unsigned long long>(writer_offset), c.win_emu->current_thread().id);
+                });
         }
 
         void trace_sldim_teardown_665460_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
             ++g_sldim_teardown_665460_hits;
@@ -6759,7 +6787,7 @@ namespace sogen
 
         void trace_sldim_wndproc_dispatch_edx_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::edi);
             const auto edx = emu.reg<uint32_t>(x86_register::edx);
             const auto eax = emu.reg<uint32_t>(x86_register::eax);
@@ -6791,7 +6819,7 @@ namespace sogen
 
         void trace_sldim_appmgr_wmclose_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
 
             uint32_t hwnd{};
@@ -6814,7 +6842,7 @@ namespace sogen
 
         void trace_sldim_appmgr_gate_byte1be84cc_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
 
             uint8_t value{};
             const auto read_ok = g_sldim_appmgr_gate_byte1be84cc_data_va != 0 &&
@@ -6831,7 +6859,7 @@ namespace sogen
 
         void trace_sldim_appmgr_finished_this10_gate_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
             uint32_t this10{};
@@ -6848,7 +6876,7 @@ namespace sogen
 
         void trace_sldim_globaldata_flag_check_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
 
             uint32_t value{};
             const auto read_ok =
@@ -6874,7 +6902,7 @@ namespace sogen
 
         void trace_sldim_state_setter_hit(const analysis_context& c, const uint64_t address, const size_t site_idx)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
 
@@ -6894,7 +6922,7 @@ namespace sogen
 
         void trace_sldim_webview2_error_entry_hit(const analysis_context& c, const uint64_t address, const size_t site_idx)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
 
             uint8_t byte_1bde910{};
@@ -6912,7 +6940,7 @@ namespace sogen
 
         void trace_sldim_oncreatecontroller_completed_hit(const analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
             const auto esp = emu.reg<uint32_t>(x86_register::esp);
 
@@ -7190,7 +7218,7 @@ namespace sogen
         {
             ++g_sldim_dispatch_hop_count;
 
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             const auto* mod_name = c.win_emu->mod_manager.find_name(address);
             const auto* mod = c.win_emu->mod_manager.find_by_address(address);
             const auto offset = mod ? address - mod->image_base : address;
@@ -7618,7 +7646,7 @@ namespace sogen
 
             ++g_sldim_dispatch_indirect_call_hits;
 
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_x64_cpu();
             std::array<uint8_t, MAX_INSTRUCTION_BYTES> code{};
             if (!emu.try_read_memory(address, code.data(), code.size()))
             {
@@ -7743,7 +7771,7 @@ namespace sogen
             }
         }
 
-        bool is_return(const disassembler& d, x86_64_cpu& emu, const uint64_t address)
+        bool is_return(const disassembler& d, guest_cpu& emu, const uint64_t address)
         {
             std::array<uint8_t, MAX_INSTRUCTION_BYTES> instruction_bytes{};
             const auto result = emu.try_read_memory(address, instruction_bytes.data(), instruction_bytes.size());
@@ -7752,20 +7780,19 @@ namespace sogen
                 return false;
             }
 
-            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
-            const auto instructions = d.disassemble(emu, reg_cs, instruction_bytes, 1, address);
+            const auto instructions = d.disassemble(emu, instruction_bytes, 1, address);
             if (instructions.empty())
             {
                 return false;
             }
 
-            const auto handle = d.resolve_handle(emu, reg_cs);
+            const auto handle = d.resolve_handle(emu);
             return cs_insn_group(handle, instructions.data(), CS_GRP_RET);
         }
 
         void record_instruction(analysis_context& c, const uint64_t address)
         {
-            auto& emu = c.win_emu->emu();
+            auto& emu = c.win_emu->active_cpu();
             std::array<uint8_t, MAX_INSTRUCTION_BYTES> instruction_bytes{};
             const auto result = emu.try_read_memory(address, instruction_bytes.data(), instruction_bytes.size());
             if (!result)
@@ -7773,9 +7800,8 @@ namespace sogen
                 return;
             }
 
-            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
             disassembler disasm{};
-            const auto instructions = disasm.disassemble(emu, reg_cs, instruction_bytes, 1, address);
+            const auto instructions = disasm.disassemble(emu, instruction_bytes, 1, address);
             if (instructions.empty())
             {
                 return;
@@ -7809,7 +7835,7 @@ namespace sogen
             }
 
             c.syscall_to_resume_after_break = address;
-            c.win_emu->emu().reg<uint64_t>(x86_register::rip, address - SYSCALL_INSTRUCTION_SIZE);
+            c.win_emu->abi().rewind_syscall(c.win_emu->active_cpu(), address);
             return true;
         }
 
@@ -8661,7 +8687,7 @@ namespace sogen
                 {
                     if (g_dispatch_message_w_internal_vas[i] != 0 && address == g_dispatch_message_w_internal_vas[i])
                     {
-                        auto& emu = c.win_emu->emu();
+                        auto& emu = c.win_emu->active_x64_cpu();
                         const auto lp_msg = emu.reg<uint32_t>(x86_register::ecx);
                         uint32_t message{};
                         if (emu.try_read_memory(lp_msg + 4, &message, sizeof(message)) && message == WM_COMMAND)
@@ -8783,7 +8809,7 @@ namespace sogen
             {
                 c.emit_observation<entry_point_execution_event>([&](auto& event) { event.interesting = is_interesting_call; });
             }
-            else if (is_previous_main_exe && binary != previous_binary && !is_return(c.d, c.win_emu->emu(), previous_ip))
+            else if (is_previous_main_exe && binary != previous_binary && !is_return(c.d, c.win_emu->active_cpu(), previous_ip))
             {
                 auto nearest_entry = binary->address_names.upper_bound(address);
                 if (nearest_entry == binary->address_names.begin())
@@ -8872,6 +8898,7 @@ namespace sogen
 
             auto& win_emu = *c.win_emu;
             auto& emu = win_emu.active_cpu();
+            auto* arm64 = dynamic_cast<arm64_cpu*>(&emu);
 
             const auto address = emu.read_instruction_pointer();
             if (c.syscall_to_resume_after_break)
@@ -8907,14 +8934,20 @@ namespace sogen
                     return instruction_hook_continuation::skip_instruction;
                 }
             }
-            else if (!previous_ip || mod->contains(previous_ip))
+            // ARM64 stubs begin with their SVC, so a regular call arrives at the export from the caller.
+            else if (!previous_ip || mod->contains(previous_ip) || (arm64 && mod->address_names.contains(address)))
             {
                 if (!c.settings->skip_syscalls)
                 {
-                    const auto rsp = emu.read_stack_pointer();
-
                     uint64_t return_address{};
-                    emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+                    if (arm64)
+                    {
+                        return_address = arm64->reg(arm64_register::lr);
+                    }
+                    else
+                    {
+                        emu.try_read_memory(emu.read_stack_pointer(), &return_address, sizeof(return_address));
+                    }
 
                     const auto* caller_mod_name = win_emu.mod_manager.find_name(return_address);
                     const auto call_count = next_traced_call_count(c);
@@ -9330,7 +9363,7 @@ namespace sogen
                                                });
 
             c.win_emu->emu().hook_memory_read(min, max - min, [&c](cpu_interface&, const uint64_t address, const void*, size_t) {
-                const auto rip = c.win_emu->emu().read_instruction_pointer();
+                const auto rip = c.win_emu->active_cpu().read_instruction_pointer();
                 const auto& watched_module = *c.win_emu->mod_manager.executable;
                 const auto accessor_module = get_module_if_interesting(c.win_emu->mod_manager, c.settings->modules, rip);
 
@@ -9346,7 +9379,7 @@ namespace sogen
                 }
 
                 accessed_import access{};
-                access.address = c.win_emu->emu().read_memory<uint64_t>(address);
+                access.address = c.win_emu->memory.read_memory<uint64_t>(address);
                 access.access_context = c.make_execution_context();
                 access.import_name = sym->second.name;
                 access.import_module = watched_module.imported_modules.at(sym->second.module_index);
@@ -9667,6 +9700,7 @@ namespace sogen
         cb.on_generic_access = make_callback(c, handle_generic_access);
         cb.on_generic_activity = make_callback(c, handle_generic_activity);
         cb.on_suspicious_activity = make_callback(c, handle_suspicious_activity);
+        cb.on_socket_activity = make_callback(c, handle_socket_activity);
         cb.on_fast_fail = make_callback(c, handle_fast_fail);
 
         watch_import_table(c);

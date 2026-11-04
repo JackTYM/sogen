@@ -33,7 +33,7 @@
 	shallow = true
 [submodule "deps/zstd"]
 	path = deps/zstd
-	url = https://github.com/facebook/zstd.git
+	url = https://github.com/meta/zstd.git
 	shallow = true
 [submodule "deps/nanobind"]
 	path = deps/nanobind
@@ -58,3 +58,13 @@
 	path = deps/FEX
 	url = https://github.com/JackTYM/FEX.git
 	shallow = true
+[submodule "deps/reproc"]
+	path = deps/reproc
+	url = https://github.com/daandemeyer/reproc.git
+[submodule "deps/mbedtls"]
+	path = deps/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+	shallow = true
+[submodule "deps/libadrenotools"]
+	path = deps/libadrenotools
+	url = https://github.com/bylaws/libadrenotools.git

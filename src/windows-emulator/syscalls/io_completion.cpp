@@ -50,6 +50,7 @@ namespace sogen
             io_completion completion{};
             completion.name = std::move(name);
             completion.number_of_concurrent_threads = number_of_concurrent_threads;
+            completion.inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
 
             const auto new_handle = c.proc.io_completions.store(std::move(completion));
             io_completion_handle.write(new_handle);
@@ -90,6 +91,7 @@ namespace sogen
                     static_cast<unsigned long long>(io_status_information), c.thread().id);
             }
 
+            c.win_emu.wake_idle_vcpu();
             return STATUS_SUCCESS;
         }
 
@@ -151,6 +153,7 @@ namespace sogen
             message.wait_packet_handle = wait_packet_handle;
 
             completion->enqueue(message);
+            c.win_emu.wake_idle_vcpu();
             return STATUS_SUCCESS;
         }
 
@@ -183,7 +186,7 @@ namespace sogen
             }
 
             io_completion_message message{};
-            if (io_completion_wait::dequeue_io_completion_message(c.proc, io_completion_handle, message))
+            if (io_completion_wait::dequeue_io_completion_message(c.win_emu, io_completion_handle, message))
             {
                 key_context.write_if_valid(message.key_context);
                 apc_context.write_if_valid(message.apc_context);
@@ -274,7 +277,8 @@ namespace sogen
             const emulator_object<FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>>> io_completion_information, const ULONG count,
             const emulator_object<ULONG> num_entries_removed, const emulator_object<LARGE_INTEGER> timeout, const BOOLEAN alertable)
         {
-            if (count == 0 || !io_completion_information)
+            constexpr auto max_count = std::numeric_limits<ULONG>::max() / sizeof(FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>>);
+            if (count == 0 || count > max_count || !io_completion_information)
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -296,7 +300,7 @@ namespace sogen
             }
 
             const auto removed =
-                io_completion_wait::dequeue_io_completion_entries(c.proc, io_completion_handle, io_completion_information, count);
+                io_completion_wait::dequeue_io_completion_entries(c.win_emu, io_completion_handle, io_completion_information, count);
             num_entries_removed.write_if_valid(removed);
             if (removed > 0)
             {
@@ -369,6 +373,7 @@ namespace sogen
 
             wait_completion_packet packet{};
             packet.name = std::move(name);
+            packet.inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
             wait_packet_handle.write(c.proc.wait_completion_packets.store(std::move(packet)));
             return STATUS_SUCCESS;
         }
@@ -452,12 +457,14 @@ namespace sogen
                 switch (resolved_target_handle.value.type)
                 {
                 case handle_types::process:
-                    if (resolved_target_handle == GUEST_PROCESS_HANDLE)
+                    if (resolved_target_handle == GUEST_PROCESS_HANDLE || c.proc.processes.get(resolved_target_handle))
                     {
                         return true;
                     }
 
                     return !std::holds_alternative<NTSTATUS>(resolve_child_record(c, resolved_target_handle, SYNCHRONIZE));
+                case handle_types::managed_thread:
+                    return c.proc.managed_threads.get(resolved_target_handle) != nullptr;
                 case handle_types::event:
                     return c.proc.events.get(resolved_target_handle) != nullptr;
                 case handle_types::thread:
@@ -470,6 +477,8 @@ namespace sogen
                     return c.proc.mutants.get(resolved_target_handle) != nullptr;
                 case handle_types::timer:
                     return c.proc.timers.get(resolved_target_handle) != nullptr;
+                case handle_types::file:
+                    return resolved_target_handle == STDIN_HANDLE || resolved_target_handle == NUL_HANDLE;
                 default:
                     return false;
                 }
@@ -508,7 +517,7 @@ namespace sogen
             wait_packet->io_status_information = io_status_information;
             wait_packet->associated = true;
 
-            io_completion_wait::materialize_signaled_wait_packets(c.proc, io_completion_handle);
+            io_completion_wait::materialize_signaled_wait_packets(c.win_emu, io_completion_handle);
             already_signaled.write_if_valid(wait_packet->queued_completion ? TRUE : FALSE);
 
             return STATUS_SUCCESS;
@@ -525,7 +534,7 @@ namespace sogen
 
             if (wait_packet->associated && !wait_packet->queued_completion)
             {
-                io_completion_wait::materialize_signaled_wait_packets(c.proc, wait_packet->io_completion_handle);
+                io_completion_wait::materialize_signaled_wait_packets(c.win_emu, wait_packet->io_completion_handle);
             }
 
             // ntdll's thread pool relies on these statuses to know whether the wait callback is still coming:

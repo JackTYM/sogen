@@ -2,6 +2,7 @@
 
 #include "../std_include.hpp"
 #include "hive_parser.hpp"
+#include "registry_notification.hpp"
 #include "serialization_helper.hpp"
 #include "../handles.hpp"
 
@@ -31,20 +32,26 @@ namespace sogen
     {
         utils::path_key hive{};
         utils::path_key path{};
+        uint64_t generation{};
         uint16_t tag{};
+        std::optional<registry_notify_block> notify_block{};
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->hive);
             buffer.write(this->path);
+            buffer.write(this->generation);
             buffer.write(this->tag);
+            buffer.write_optional(this->notify_block);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->hive);
             buffer.read(this->path);
+            buffer.read(this->generation);
             buffer.read(this->tag);
+            buffer.read_optional(this->notify_block);
         }
 
         std::u16string to_string() const
@@ -104,16 +111,6 @@ namespace sogen
     class registry_manager
     {
       public:
-        // Hive values are read-only. Keys created at runtime live in the overlay; deleting a hive key hides it with a
-        // tombstone, and the hive file itself is never modified.
-        enum class delete_result
-        {
-            deleted,
-            not_found,
-            read_only,
-            has_sub_keys,
-        };
-
         using hive_ptr = std::unique_ptr<hive_parser>;
         using hive_map = std::unordered_map<utils::path_key, hive_ptr>;
 
@@ -128,19 +125,23 @@ namespace sogen
         registry_manager& operator=(const registry_manager&) = delete;
 
         std::optional<registry_key> get_key(const utils::path_key& key);
-        registry_key create_key(const utils::path_key& key);
+        bool key_exists(const registry_key& key);
+        static bool is_root_key(const registry_key& key);
+        bool can_create_key(const std::filesystem::path& key) const;
+        std::optional<registry_key> create_key(const std::filesystem::path& key);
+        void delete_key(const registry_key& key);
         std::optional<registry_value> get_value(const registry_key& key, std::string_view name);
         std::optional<registry_value> get_value(const registry_key& key, size_t index);
+        size_t get_value_count(const registry_key& key);
         void set_value(const registry_key& key, std::string name, uint32_t type, std::span<const std::byte> data);
-        delete_result delete_key(const registry_key& key);
-        delete_result delete_value(const registry_key& key, std::string_view name);
+        bool delete_value(const registry_key& key, std::string_view name);
 
         std::optional<std::string_view> get_sub_key_name(const registry_key& key, size_t index);
         size_t get_sub_key_count(const registry_key& key);
 
         std::optional<exposed_hive_key> get_hive_key(const registry_key& key);
-
         std::vector<std::byte> get_class_name(const registry_key& key);
+        uint32_t get_max_sub_key_class_length(const registry_key& key);
 
         std::optional<std::u16string> read_u16string(const registry_key& key, size_t index);
         void serialize_runtime_state(utils::buffer_serializer& buffer) const;
@@ -151,31 +152,38 @@ namespace sogen
         {
             uint32_t type{};
             std::vector<std::byte> data{};
+            bool deleted{};
 
             void serialize(utils::buffer_serializer& buffer) const
             {
                 buffer.write(this->type);
                 buffer.write_vector(this->data);
+                buffer.write(this->deleted);
             }
 
             void deserialize(utils::buffer_deserializer& buffer)
             {
                 buffer.read(this->type);
                 buffer.read_vector(this->data);
+                buffer.read(this->deleted);
             }
         };
 
         struct overlay_bucket
         {
+            // A false entry hides a sub key that still exists in the read-only hive file.
+            utils::insensitive_string_map<bool> sub_keys{};
             utils::insensitive_string_map<overlay_value> values{};
 
             void serialize(utils::buffer_serializer& buffer) const
             {
+                buffer.write_map(this->sub_keys);
                 buffer.write_map(this->values);
             }
 
             void deserialize(utils::buffer_deserializer& buffer)
             {
+                buffer.read_map(this->sub_keys);
                 buffer.read_map(this->values);
             }
         };
@@ -184,16 +192,19 @@ namespace sogen
         hive_map hives_{};
         std::map<utils::path_key, utils::path_key> path_mapping_{};
         std::map<utils::path_key, overlay_bucket> overlay_values_{};
-        std::set<utils::path_key> overlay_keys_{};
-        std::set<utils::path_key> deleted_keys_{};
+        std::map<utils::path_key, uint64_t> key_generations_{};
 
         utils::path_key normalize_path(utils::path_key path) const;
         static utils::path_key get_full_key_path(const registry_key& key);
+        uint64_t get_generation(const utils::path_key& full_path) const;
+        bool is_deleted_hive_key(const utils::path_key& full_path) const;
+        std::optional<exposed_hive_key> get_original_hive_key(const registry_key& key);
         void add_path_mapping(const utils::path_key& key, const utils::path_key& value);
         void alias_remote_audio_endpoints(const std::filesystem::path& machine);
         void alias_remote_audio_folder(const std::filesystem::path& audio);
 
         hive_map::iterator find_hive(const utils::path_key& key);
+        hive_map::const_iterator find_hive(const utils::path_key& key) const;
 
         void setup();
     };

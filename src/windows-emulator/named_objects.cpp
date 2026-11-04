@@ -31,8 +31,9 @@ namespace sogen
 
         // Binds `section` to an already-registered section slot: opens its named pages and copies its
         // description. `reference_held` says the caller owns a reference to the slot that this consumes.
-        NTSTATUS bind_section_slot(const std::shared_ptr<kernel_arena>& arena, const uint32_t slot, section_object& section)
+        NTSTATUS bind_section_slot(process_context& process, const uint32_t slot, section_object& section)
         {
+            const auto& arena = process.shared_arena;
             std::string shm_name{};
             uint64_t meta{};
             if (!arena->get_shm_backing(slot, shm_name, meta))
@@ -52,7 +53,7 @@ namespace sogen
             section.maximum_size = page_align_up(size);
             section.section_page_protection = static_cast<uint32_t>((meta >> section_protection_shift) & 0xFF);
             section.allocation_attributes = ((meta >> section_reserve_shift) & 1) != 0 ? SEC_RESERVE : SEC_COMMIT;
-            section.backing = std::move(backing);
+            section.view_storage_id = process.section_views.adopt_storage(std::move(backing));
             section.state.adopt(arena, slot);
             arena->release(slot);
             return STATUS_SUCCESS;
@@ -152,7 +153,7 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        section.backing = std::move(backing);
+        section.view_storage_id = process.section_views.adopt_storage(std::move(backing));
 
         const auto existing = process.shared_arena->register_named(canonical_object_name(section.name), kind::section, slot);
         if (!existing)
@@ -167,8 +168,9 @@ namespace sogen
         }
 
         section.state = {};
-        section.backing.reset();
-        const auto status = bind_section_slot(process.shared_arena, existing->slot, section);
+        process.section_views.release_storage(section.view_storage_id);
+        section.view_storage_id = 0;
+        const auto status = bind_section_slot(process, existing->slot, section);
         return NT_SUCCESS(status) ? STATUS_OBJECT_NAME_EXISTS : status;
     }
 
@@ -191,7 +193,7 @@ namespace sogen
             return STATUS_OBJECT_TYPE_MISMATCH;
         }
 
-        const auto status = bind_section_slot(process.shared_arena, found->slot, section);
+        const auto status = bind_section_slot(process, found->slot, section);
         if (NT_SUCCESS(status))
         {
             section.name = std::u16string(name);

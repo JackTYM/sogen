@@ -96,66 +96,61 @@ namespace sogen::sxs
 
     std::optional<std::vector<std::byte>> emulated_assembly_store::read_file(const std::u16string_view windows_path_text)
     {
-        const auto host_path = this->translate(windows_path_text);
-        if (!host_path)
+        const auto path = to_absolute_path(windows_path_text);
+        if (!path)
         {
             return std::nullopt;
         }
 
-        return read_host_file(*host_path);
+        return read_guest_file(this->file_sys_, *path);
     }
 
     std::vector<std::u16string> emulated_assembly_store::list_files(const std::u16string_view windows_directory)
     {
         std::vector<std::u16string> names{};
-        const auto host_path = this->translate(windows_directory);
-        if (!host_path)
+        const auto path = to_absolute_path(windows_directory);
+        if (!path)
         {
             return names;
         }
 
-        std::error_code ec{};
-        for (const auto& entry : std::filesystem::directory_iterator(*host_path, ec))
+        for (auto& entry : this->file_sys_.list_directory(*path))
         {
-            if (entry.is_regular_file(ec))
+            if (!entry.is_directory)
             {
-                names.push_back(entry.path().filename().u16string());
+                names.push_back(std::move(entry.name));
             }
         }
 
         return names;
     }
 
-    std::optional<std::filesystem::path> emulated_assembly_store::translate(const std::u16string_view windows_path_text) const
+    std::optional<windows_path> emulated_assembly_store::to_absolute_path(const std::u16string_view windows_path_text)
     {
-        const windows_path path{std::filesystem::path(std::u16string(windows_path_text))};
+        windows_path path{std::filesystem::path(std::u16string(windows_path_text))};
         if (!path.is_absolute())
         {
             return std::nullopt;
         }
 
-        return this->file_sys_.translate(path);
+        return path;
     }
 
-    std::optional<std::vector<std::byte>> read_host_file(const std::filesystem::path& path)
+    std::optional<std::vector<std::byte>> read_guest_file(const file_system& file_sys, const windows_path& path)
     {
-        std::ifstream stream(path, std::ios::binary);
-        if (!stream)
+        const auto status = file_sys.stat(path);
+        if (!status || static_cast<size_t>(status->st_size) > maximum_manifest_size)
         {
             return std::nullopt;
         }
 
-        stream.seekg(0, std::ios::end);
-        const auto size = static_cast<size_t>(stream.tellg());
-        if (size > maximum_manifest_size)
+        std::vector<std::byte> data{};
+        if (!file_sys.read_file(path, &data))
         {
             return std::nullopt;
         }
 
-        std::vector<std::byte> data(size);
-        stream.seekg(0, std::ios::beg);
-        stream.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
-        return stream ? std::optional(std::move(data)) : std::nullopt;
+        return data;
     }
 
     std::u16string directory_of(const std::u16string_view path)

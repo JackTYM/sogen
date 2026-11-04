@@ -6,6 +6,24 @@ namespace sogen
 
     namespace network
     {
+        namespace
+        {
+            template <typename Query>
+            std::optional<address> query_address(const SOCKET s, const Query query)
+            {
+                sockaddr_storage addr{};
+                socklen_t addrlen = sizeof(sockaddr_storage);
+                if (query(s, reinterpret_cast<sockaddr*>(&addr), &addrlen) != 0)
+                {
+                    return {};
+                }
+
+                address result{};
+                result.set_address(reinterpret_cast<sockaddr*>(&addr), addrlen);
+                return result;
+            }
+        }
+
         socket_wrapper::socket_wrapper(SOCKET s)
             : socket_(s)
         {
@@ -26,6 +44,18 @@ namespace sogen
             return GET_SOCKET_ERROR();
         }
 
+        std::optional<int> socket_wrapper::get_socket_error()
+        {
+            int error{};
+            socklen_t length = sizeof(error);
+            if (::getsockopt(this->socket_.get_socket(), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length) == SOCKET_ERROR)
+            {
+                return std::nullopt;
+            }
+
+            return error;
+        }
+
         bool socket_wrapper::is_ready(const bool in_poll)
         {
             return this->socket_.is_ready(in_poll);
@@ -43,34 +73,12 @@ namespace sogen
 
         std::optional<address> socket_wrapper::get_local_address()
         {
-            sockaddr_storage addr{};
-            socklen_t addrlen = sizeof(sockaddr_storage);
-            const auto res = ::getsockname(this->socket_.get_socket(), reinterpret_cast<sockaddr*>(&addr), &addrlen);
-
-            if (res != 0)
-            {
-                return {};
-            }
-
-            address address{};
-            address.set_address(reinterpret_cast<sockaddr*>(&addr), addrlen);
-            return address;
+            return query_address(this->socket_.get_socket(), ::getsockname);
         }
 
         std::optional<address> socket_wrapper::get_remote_address()
         {
-            sockaddr_storage addr{};
-            socklen_t addrlen = sizeof(sockaddr_storage);
-            const auto res = ::getpeername(this->socket_.get_socket(), reinterpret_cast<sockaddr*>(&addr), &addrlen);
-
-            if (res != 0)
-            {
-                return {};
-            }
-
-            address address{};
-            address.set_address(reinterpret_cast<sockaddr*>(&addr), addrlen);
-            return address;
+            return query_address(this->socket_.get_socket(), ::getpeername);
         }
 
         bool socket_wrapper::bind(const address& addr)

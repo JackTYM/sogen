@@ -1,6 +1,9 @@
-﻿#include "sogen_internal.hpp"
+#include "sogen_internal.hpp"
 
 #include <windows_emulator.hpp>
+
+#include <array>
+#include <cstring>
 
 namespace sogen::py
 {
@@ -62,7 +65,7 @@ namespace sogen::py
 
     hook_handle hook_registry::instruction(x86_hookable_instructions instruction_type, nb::object callback)
     {
-        auto* hook = this->emu->emu().hook_instruction(instruction_type, [cb = std::move(callback)](cpu_interface&, uint64_t data) {
+        auto* hook = this->emu->x64_emu().hook_instruction(instruction_type, [cb = std::move(callback)](cpu_interface&, uint64_t data) {
             nb::gil_scoped_acquire gil{};
             return coerce_instruction_continuation(cb(data));
         });
@@ -231,12 +234,91 @@ namespace sogen::py
 
     uint64_t sogen_windows_emulator::read_register(const x86_register reg) const
     {
-        return this->emu->emu().reg<uint64_t>(reg);
+        return this->emu->x64_emu().reg<uint64_t>(reg);
     }
 
     void sogen_windows_emulator::write_register(const x86_register reg, const uint64_t value) const
     {
-        this->emu->emu().reg<uint64_t>(reg, value);
+        this->emu->x64_emu().reg<uint64_t>(reg, value);
+    }
+
+    namespace
+    {
+        // Backends disagree on a buffer narrower than the register: some reject it, some read or write the
+        // register's full width regardless. Handing every backend the widest register's worth (ZMM, 64 bytes)
+        // keeps each access in bounds and gives one behaviour everywhere: short values are zero-extended, and
+        // bytes past the register's width read as zero.
+        constexpr size_t max_register_size = 64;
+        using register_buffer = std::array<std::byte, max_register_size>;
+
+        void validate_register_size(const size_t size)
+        {
+            if (size > max_register_size)
+            {
+                throw std::invalid_argument("Registers are at most " + std::to_string(max_register_size) + " bytes wide");
+            }
+        }
+
+        template <typename Cpu, typename Register>
+        nb::bytes read_padded_register(Cpu& cpu, const Register reg, const size_t size)
+        {
+            validate_register_size(size);
+            register_buffer buffer{};
+            cpu.read_register(reg, buffer.data(), buffer.size());
+            return nb::bytes(reinterpret_cast<const char*>(buffer.data()), size);
+        }
+
+        template <typename Cpu, typename Register>
+        void write_padded_register(Cpu& cpu, const Register reg, const nb::bytes& value)
+        {
+            validate_register_size(value.size());
+            register_buffer buffer{};
+            std::memcpy(buffer.data(), value.c_str(), value.size());
+            cpu.write_register(reg, buffer.data(), buffer.size());
+        }
+    }
+
+    nb::bytes sogen_windows_emulator::read_register_bytes(const x86_register reg, const size_t size) const
+    {
+        return read_padded_register(this->emu->x64_emu(), reg, size);
+    }
+
+    void sogen_windows_emulator::write_register_bytes(const x86_register reg, const nb::bytes& value) const
+    {
+        write_padded_register(this->emu->x64_emu(), reg, value);
+    }
+
+    namespace
+    {
+        arm64_cpu& active_arm64_cpu(const windows_emulator& emu)
+        {
+            auto* cpu = dynamic_cast<arm64_cpu*>(&emu.active_cpu());
+            if (!cpu)
+            {
+                throw std::invalid_argument("ARM64 registers require an ARM64 guest");
+            }
+            return *cpu;
+        }
+    }
+
+    uint64_t sogen_windows_emulator::read_register(const arm64_register reg) const
+    {
+        return active_arm64_cpu(*this->emu).reg<uint64_t>(reg);
+    }
+
+    void sogen_windows_emulator::write_register(const arm64_register reg, const uint64_t value) const
+    {
+        active_arm64_cpu(*this->emu).reg<uint64_t>(reg, value);
+    }
+
+    nb::bytes sogen_windows_emulator::read_register_bytes(const arm64_register reg, const size_t size) const
+    {
+        return read_padded_register(active_arm64_cpu(*this->emu), reg, size);
+    }
+
+    void sogen_windows_emulator::write_register_bytes(const arm64_register reg, const nb::bytes& value) const
+    {
+        write_padded_register(active_arm64_cpu(*this->emu), reg, value);
     }
 
     uint16_t sogen_windows_emulator::get_host_port(const uint16_t emulator_port) const

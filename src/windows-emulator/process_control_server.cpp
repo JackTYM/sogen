@@ -437,7 +437,7 @@ namespace sogen
             const auto h = make_handle(request.address);
 
             shared_object_description description{};
-            response.status = describe_shareable_object(target.process, h, description);
+            response.status = describe_shareable_object(target, h, description);
             if (NT_SUCCESS(response.status))
             {
                 write_description_to_response(description, response);

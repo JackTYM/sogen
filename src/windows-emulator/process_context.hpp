@@ -1,4 +1,6 @@
 #pragma once
+#include "section_view_manager.hpp"
+#include "arch/windows_abi.hpp"
 
 #include "emulator_utils.hpp"
 #include "handles.hpp"
@@ -8,6 +10,7 @@
 #include <utils/nt_handle.hpp>
 
 #include <arch_emulator.hpp>
+#include <platform/ui_backend.hpp>
 
 #include "io_device.hpp"
 #include "kusd_mmio.hpp"
@@ -18,41 +21,20 @@
 
 #include "apiset/apiset.hpp"
 
+#include <array>
+
 namespace sogen
 {
 
     struct fake_environment_config;
 
-#define PEB_SEGMENT_SIZE (20 << 20) // 20 MB
-#define GS_SEGMENT_SIZE  (1 << 20)  // 1 MB
+#define PEB_SEGMENT_SIZE        (20 << 20) // 20 MB
+#define GS_SEGMENT_SIZE         (1 << 20)  // 1 MB
 
-#define STACK_SIZE       0x40000ULL // 256KB
+#define STACK_SIZE              0x40000ULL // 256KB
 
-#ifdef __APPLE__
-// Darwin refuses MAP_FIXED anywhere in the low ~4GB regardless of ASLR (the standard 64-bit
-// Mach-O __PAGEZERO convention, enforced at the mmap syscall level) - a backend sharing the guest
-// address space with the host process (guest VA == host VA, e.g. FEX) can never place anything
-// there. GDT_ADDR is a fixed constant sogen always uses directly (not chosen dynamically via
-// find_free_allocation_base, so the reserved-host-ranges mechanism can't route around it), so it
-// has to live well above that floor here. Chosen far from typical host dyld/heap/stack placement
-// (which stays within a few GB above 4GB) to also avoid the *dynamic*, ASLR-dependent collisions
-// that reserved-host-ranges handles for everything else.
-#define GDT_ADDR 0x7ffff0000000ULL
-#else
-#define GDT_ADDR 0x35000
-#endif
-#define GDT_LIMIT      0x1000
-#define GDT_ENTRY_SIZE 0x8
-
-    // Each vCPU gets its own GDT page. Most descriptors are identical, but the WOW64 FS descriptor
-    // (selector 0x53) holds a per-thread 32-bit TEB base that the guest reloads on every 64<->32
-    // transition, so a shared GDT would let a WOW64 thread on one vCPU read another vCPU's TEB base.
-    // base is normally GDT_ADDR, but see memory_manager::gdt_base's doc comment for why it isn't
-    // always that fixed value.
-    constexpr uint64_t gdt_base_for_vcpu(const uint64_t base, const size_t vcpu_index) noexcept
-    {
-        return base + vcpu_index * GDT_LIMIT;
-    }
+#define GDT_LIMIT               0x1000
+#define GDT_ENTRY_SIZE          0x8
 
 // TODO: Get rid of that
 #define WOW64_NATIVE_STACK_SIZE      0x40000ULL
@@ -157,20 +139,21 @@ namespace sogen
         }
     };
 
-    struct gdi_font_descriptor
+    // Every path that presents a window surface goes through this, so none of them can drop the layered-window
+    // alpha and have the compositor show a layered window opaque.
+    inline ui_surface_desc make_window_surface_desc(const gdi_bitmap_surface& surface, const window* win)
     {
-        std::vector<uint8_t> logfont_bytes{};
-
-        void serialize(utils::buffer_serializer& buffer) const
-        {
-            buffer.write_vector(this->logfont_bytes);
-        }
-
-        void deserialize(utils::buffer_deserializer& buffer)
-        {
-            buffer.read_vector(this->logfont_bytes);
-        }
-    };
+        return ui_surface_desc{
+            .width = static_cast<int>(surface.width),
+            .height = static_cast<int>(surface.height),
+            .stride = static_cast<int>(surface.width * sizeof(uint32_t)),
+            .format = ui_surface_format::bgra8,
+            .pixels = surface.pixels.data(),
+            .layered = win && win->layered_blend,
+            .premultiplied_alpha = win && win->layered_premultiplied_alpha,
+            .constant_alpha = win ? win->layered_constant_alpha : uint8_t{255},
+        };
+    }
 
     struct gdi_dc_state
     {
@@ -181,6 +164,8 @@ namespace sogen
         int32_t current_y{};
         bool is_memory_dc{};
         uint32_t map_mode{1}; // MM_TEXT, the real GDI default for a freshly created DC
+        // Retrieved with GetDC and friends, which hand out the desktop window's DC for no window.
+        bool is_window_dc{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -191,6 +176,7 @@ namespace sogen
             buffer.write(this->current_y);
             buffer.write(this->is_memory_dc);
             buffer.write(this->map_mode);
+            buffer.write(this->is_window_dc);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -202,6 +188,7 @@ namespace sogen
             buffer.read(this->current_y);
             buffer.read(this->is_memory_dc);
             buffer.read(this->map_mode);
+            buffer.read(this->is_window_dc);
         }
     };
 
@@ -556,15 +543,22 @@ namespace sogen
             }
         };
 
-        process_context(x86_64_emulator& emu, memory_manager& memory, utils::clock& clock, callbacks& cb)
+        process_context(memory_interface& emu, memory_manager& memory, utils::clock& clock, callbacks& cb, const bool intercept_kusd,
+                        const windows_guest_architecture architecture = windows_guest_architecture::x86_64)
             : callbacks_(&cb),
               clock_(&clock),
               base_allocator(emu),
               peb64(emu),
               process_params64(emu),
-              kusd(memory, clock),
+              kusd(memory, clock, intercept_kusd),
               user_handles(memory)
         {
+            (void)windows_abi_for(architecture);
+            this->native_architecture = architecture;
+            emulator_process current_process{};
+            current_process.id = process_id;
+            [[maybe_unused]] const auto process_handle = this->processes.store(std::move(current_process));
+            assert(process_handle == GUEST_PROCESS_HANDLE);
         }
 
         void setup(windows_emulator& win_emu, const application_settings& app_settings, const mapped_module& executable,
@@ -599,6 +593,9 @@ namespace sogen
 
         void serialize(utils::buffer_serializer& buffer, const emulator_thread* active_thread) const;
         void deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread);
+        void prepare_for_state_restore(windows_emulator& win_emu);
+        void restore_after_state_restore(windows_emulator& win_emu);
+        void restore_windows_after_state_restore(windows_emulator& win_emu);
 
         generic_handle_store* get_handle_store(handle handle);
         emulator_thread* find_thread_by_id(uint32_t thread_id);
@@ -618,6 +615,19 @@ namespace sogen
         bool break_on_termination{false};
 
         uint32_t default_locale_id{};
+        // Each vCPU gets its own GDT page. Most descriptors are identical, but the WOW64 FS descriptor
+        // (selector 0x53) holds a per-thread 32-bit TEB base that the guest reloads on every 64<->32
+        // transition, so a shared GDT would let a WOW64 thread on one vCPU read another vCPU's TEB base.
+        uint64_t gdt_base{};
+
+        windows_guest_architecture native_architecture{windows_guest_architecture::x86_64};
+
+        const windows_arch_abi& abi() const
+        {
+            return windows_abi_for(this->native_architecture);
+        }
+
+        uint32_t hard_error_mode{0};
 
         callbacks* callbacks_{};
         utils::clock* clock_{};
@@ -635,6 +645,8 @@ namespace sogen
         uint64_t shared_section_size{0};
         uint64_t dbwin_buffer{0};
         uint64_t dbwin_buffer_size{0};
+        std::map<uint64_t, uint32_t> orphaned_section_backings{};
+        section_view_manager section_views{};
 
         std::optional<NTSTATUS> exit_status{};
 
@@ -732,11 +744,14 @@ namespace sogen
         uint64_t zw_callback_return{};
         uint64_t dispatch_client_message{};
         uint32_t gdi_default_dc_handle{};
+        uint32_t gdi_memory_dc_default_bitmap_handle{};
+        uint32_t gdi_objects_peak{};
+        uint32_t user_objects_peak{};
         std::map<uint32_t, gdi_dc_state> gdi_dc_states{};
         // Per-DC stack of states pushed by NtGdiSaveDC and popped by NtGdiRestoreDC.
         std::map<uint32_t, std::vector<gdi_dc_state>> gdi_dc_save_states{};
         std::map<uint32_t, gdi_bitmap_surface> gdi_bitmap_surfaces{};
-        std::map<uint32_t, gdi_font_descriptor> gdi_font_descriptors{};
+        std::map<uint32_t, EMU_LOGFONTW> gdi_fonts{};
         // Rectangles (YX-banded, non-overlapping) of every complex region; simple and null regions live in RGNATTR only.
         std::map<uint32_t, std::vector<RECT>> gdi_regions{};
         // Persistent per-top-level-window paint surface; child controls composite into it at their offset.
@@ -744,6 +759,7 @@ namespace sogen
         dxgk_state dxgk{};
         std::vector<handle> etw_notification_events{};
         hwnd mouse_capture_window{};
+        std::optional<ULONG> timer_resolution_request{};
         // The window that currently holds keyboard focus / is the foreground window, and the last known
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
         // and GetCursorPos to drive menu cursors and gate their input loop on the window being active.
@@ -765,6 +781,7 @@ namespace sogen
         // window without an explicit SetCursor still shows its class cursor. The host pointer is shown only
         // when cursor_show_count >= 0 and this is set.
         bool cursor_shape_visible{true};
+        std::optional<RECT> cursor_clip{};
         // Per-virtual-key pressed state (0x80 = down), updated from key/mouse-button events and reported by
         // GetKeyState; games poll this for in-game input (movement, etc.) rather than window messages.
         std::array<uint8_t, 256> key_state{};
@@ -784,6 +801,101 @@ namespace sogen
         // Keyboard raw input registration (HID usage page 0x01, usage 0x06), mirroring the mouse fields above.
         bool raw_keyboard_registered{};
         hwnd raw_keyboard_target{};
+
+        // Keyboard and mouse input held back until every low-level hook it is due for has seen it, in arrival order.
+        struct low_level_input
+        {
+            uint64_t id{};
+            ui_event event{};
+            int32_t screen_x{};
+            int32_t screen_y{};
+            DWORD time{};
+            std::vector<uint64_t> hooks{};
+            utils::clock::steady_time_point waiting_since{};
+            bool in_progress{};
+
+            void serialize(utils::buffer_serializer& buffer) const
+            {
+                buffer.write(this->id);
+                buffer.write(this->event.window);
+                buffer.write(this->event.message);
+                buffer.write(this->event.wParam);
+                buffer.write(this->event.lParam);
+                buffer.write(this->event.relative_motion.has_value());
+                if (this->event.relative_motion)
+                {
+                    buffer.write(this->event.relative_motion->first);
+                    buffer.write(this->event.relative_motion->second);
+                }
+                buffer.write(this->event.cursor_target.has_value());
+                if (this->event.cursor_target)
+                {
+                    buffer.write(this->event.cursor_target->first);
+                    buffer.write(this->event.cursor_target->second);
+                }
+                buffer.write(this->event.injected);
+                buffer.write(this->event.extra_info);
+                buffer.write(this->event.injected_character);
+                buffer.write(this->screen_x);
+                buffer.write(this->screen_y);
+                buffer.write(this->time);
+                buffer.write_vector(this->hooks);
+                buffer.write(this->waiting_since.time_since_epoch().count());
+                buffer.write(this->in_progress);
+            }
+
+            void deserialize(utils::buffer_deserializer& buffer)
+            {
+                buffer.read(this->id);
+                buffer.read(this->event.window);
+                buffer.read(this->event.message);
+                buffer.read(this->event.wParam);
+                buffer.read(this->event.lParam);
+                bool has_relative_motion{};
+                buffer.read(has_relative_motion);
+                if (has_relative_motion)
+                {
+                    std::pair<int32_t, int32_t> relative_motion{};
+                    buffer.read(relative_motion.first);
+                    buffer.read(relative_motion.second);
+                    this->event.relative_motion = relative_motion;
+                }
+                else
+                {
+                    this->event.relative_motion.reset();
+                }
+                bool has_cursor_target{};
+                buffer.read(has_cursor_target);
+                if (has_cursor_target)
+                {
+                    std::pair<int32_t, int32_t> cursor_target{};
+                    buffer.read(cursor_target.first);
+                    buffer.read(cursor_target.second);
+                    this->event.cursor_target = cursor_target;
+                }
+                else
+                {
+                    this->event.cursor_target.reset();
+                }
+                buffer.read(this->event.injected);
+                buffer.read(this->event.extra_info);
+                buffer.read(this->event.injected_character);
+                buffer.read(this->screen_x);
+                buffer.read(this->screen_y);
+                buffer.read(this->time);
+                buffer.read_vector(this->hooks);
+                utils::clock::steady_duration::rep waiting_since_ticks{};
+                buffer.read(waiting_since_ticks);
+                this->waiting_since = utils::clock::steady_time_point{utils::clock::steady_duration{waiting_since_ticks}};
+                buffer.read(this->in_progress);
+            }
+        };
+
+        std::vector<low_level_input> pending_low_level_input{};
+        uint64_t next_low_level_input_id{1};
+        uint64_t next_hook_handle{1};
+        // The host sends the character of a key as its own event, so it has to be dropped with a swallowed key press.
+        bool drop_low_level_characters{};
 
         // One pending raw-input payload (mouse motion + buttons, or a keyboard make/break) keyed by the
         // HRAWINPUT token posted in WM_INPUT's lParam; consumed by NtUserGetRawInputData.
@@ -812,26 +924,29 @@ namespace sogen
         user_handle_table user_handles;
         handle default_monitor_handle{};
         handle default_desktop_window_handle{};
+
+        static constexpr uint32_t default_display_width = 1920;
+        static constexpr uint32_t default_display_height = 1080;
+        uint32_t display_width{default_display_width};
+        uint32_t display_height{default_display_height};
+        uint32_t registry_display_width{default_display_width};
+        uint32_t registry_display_height{default_display_height};
+
+        void set_display_mode(windows_emulator& win_emu, uint32_t width, uint32_t height);
+        void set_mouse_capture(hwnd window);
+        void release_mouse_capture(hwnd window);
         handle_store<handle_types::event, event> events{};
         handle_store<handle_types::job, job_object> jobs{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
-        handle_store<handle_types::section, section, 2> sections{};
-        // Keeps a pagefile-backed section's section_object alive for as long as a guest-visible view of
-        // it is mapped, independent of the handle-table entry above (see handle_NtMapViewOfSection /
-        // handle_NtUnmapViewOfSection). Real Windows' documented view/handle lifetime independence (MSDN:
-        // "the file mapping object may be used until all references to it, including the memory-mapped
-        // view, are released") falls out for free from this being an ordinary shared_ptr: the object is
-        // only ever actually destroyed (freeing section_object::backing) once neither this map
-        // nor any `sections` entry references it anymore. Keyed by the view's own guest VA. Not
-        // serialized - runtime-only, like the host aliasing it tracks.
-        std::unordered_map<uint64_t, std::shared_ptr<section_object>> section_views{};
+        handle_store<handle_types::section, section> sections{};
         handle_store<handle_types::device, io_device_container> devices{};
         handle console_handle{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
         handle_store<handle_types::io_completion, io_completion> io_completions{};
         handle_store<handle_types::wait_completion_packet, wait_completion_packet> wait_completion_packets{};
         handle_store<handle_types::worker_factory, worker_factory> worker_factories{};
+        handle_store<handle_types::thread_state_change, thread_state_change> thread_state_changes{};
         handle_store<handle_types::port, port_container> ports{};
         alpc::state alpc{};
         handle_store<handle_types::mutant, mutant> mutants{};
@@ -839,6 +954,8 @@ namespace sogen
         handle default_desktop{};
         handle_store<handle_types::desktop, desktop> desktops{};
         handle_store<handle_types::window_station, window_station> window_stations{};
+        // WinSta0, the interactive window station every process starts in, is the fixed handle 1.
+        uint64_t process_window_station{1};
         user_handle_store<handle_types::window, window> windows{user_handles};
         user_handle_store<handle_types::type::menu, menu> menus{user_handles};
         handle_store<handle_types::timer, timer> timers{};
@@ -866,7 +983,11 @@ namespace sogen
         handle_store<handle_types::token, process_token> tokens{};
         user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         user_handle_store<handle_types::cursor_icon, cursor_icon> icons{user_handles};
-        handle_store<handle_types::registry, registry_key, 2> registry_keys{};
+        handle_store<handle_types::deferred_window_positions, deferred_window_positions> deferred_window_position_batches{};
+        handle_store<handle_types::registry, registry_key> registry_keys{};
+        handle_store<handle_types::process, emulator_process> processes{};
+        handle_store<handle_types::managed_thread, managed_process_thread> managed_threads{};
+        handle_store<handle_types::debug_object, debug_object> debug_objects{};
         std::map<uint32_t, handle> thread_handles_by_id{};
         std::map<uint32_t, child_process_record> child_processes{};
         std::map<uint32_t, windows_hook_entry> windows_hooks{};
@@ -883,18 +1004,9 @@ namespace sogen
 
         std::vector<std::byte> default_register_set{};
 
-        // Process and thread ids mimic Windows' PspCidTable: a single space of distinct multiples of 4.
-        // The root process (no parent) keeps id 4; threads take 8, 12, 16, ... Real Windows never
-        // hands out tiny or non-4-aligned ids, and some code (e.g. CEG-style anti-tamper) relies on
-        // that. A child spawned via NtCreateUserProcess now runs as its own independent host OS
-        // process (see windows_emulator's create_child_process callback) with its own process_context,
-        // so this can no longer be a single constant shared by every process: it would make every
-        // guest process - parent and child alike - report itself as pid 4, indistinguishable from one
-        // another to any code that opens another process by pid (e.g. NtOpenProcess). setup() assigns
-        // it from application_settings::process_id when the parent minted one for this child
-        // (matching child_process_record::pid, see handle_NtCreateUserProcess), otherwise it keeps the
-        // root process default below.
-        uint32_t process_id = 4;
+        // Process and thread ids share Windows' 4-aligned client ID space.
+        uint32_t process_id{default_guest_process_id};
+        uint32_t initial_thread_id{8};
         uint32_t spawned_thread_count{0};
 
         // The kernel-object arena shared with every other sogen host process of this process tree (see
@@ -919,27 +1031,19 @@ namespace sogen
         // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)
         // rather than reading the handle attribute directly. Transient (valid only until the next reply).
         std::vector<alpc_reply_handle> pending_alpc_message_handles{};
+        std::map<uint32_t, std::vector<std::array<uint64_t, 2>>> pending_alpc_reply_views{};
 
-        // Transient (not serialized) WASAPI render-engine simulation. sogen has no host audio engine draining
-        // the shared ring, so dsound opens its stream event-driven (AUDCLNT_STREAMFLAGS_EVENTCALLBACK) and its
-        // render thread would block forever on the buffer-ready event a real engine signals every period. We
-        // model that engine on the per-context-switch tick: signal the auto-reset events dsound registered via
-        // IAudioClient::SetEventHandle so it produces, and advance the shared read cursor at real time so its
-        // DirectSound play cursor moves and MSS's "non-moving playback cursor" watchdog stops resetting.
-        struct audio_render_stream
-        {
-            // The render section's own backing buffer, read/written directly (host-side, no guest VA
-            // needed) so the tick works whether or not the guest currently has a view mapped. weak_ptr,
-            // not shared_ptr: this must not itself keep the section alive - dsound churns stream setup,
-            // and a stream whose section_object has genuinely been destroyed (last handle and view both
-            // gone) is exactly the "no longer accessible" signal drive_audio_render_engine prunes on.
-            std::weak_ptr<section_object> section;
-            uint64_t start_time_ns{}; // steady-clock ns anchor for the read cursor (0 = anchor on first tick)
-        };
+        // Guest events WASAPI EVENTCALLBACK clients registered via SetEventHandle, keyed by the stream whose endpoint
+        // port received them. The audio service hands each to its stream when the stream starts.
+        std::map<uint32_t, uint64_t> audio_render_events_by_stream{};
 
-        std::vector<audio_render_stream> audio_render_streams{};
-        std::vector<handle> audio_render_events{};
-        uint64_t next_audio_tick_ns{}; // steady-clock ns; throttles the tick to real time instead of switch count
+        // Events registered through an unnamed endpoint port, keyed by the registering thread instead, which also
+        // starts the stream. An entry whose stream is never started stays until that thread registers again.
+        std::map<uint32_t, uint64_t> pending_audio_render_events{};
+
+        // Audio streams are numbered per process, so an endpoint port name identifies one stream across every
+        // audio-service connection.
+        uint32_t next_audio_stream_id{1};
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx
@@ -948,6 +1052,9 @@ namespace sogen
         uint16_t last_extended_params_image_machine{IMAGE_FILE_MACHINE_UNKNOWN};
 
         uint64_t next_luid{0x1001};
+        std::array<uint8_t, 6> uuid_seed{};
+        uint64_t next_uuid_time{};
+        uint32_t uuid_sequence{};
     };
 
 } // namespace sogen

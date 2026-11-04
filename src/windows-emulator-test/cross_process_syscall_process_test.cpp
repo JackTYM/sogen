@@ -509,10 +509,17 @@ namespace sogen::test
 
     namespace
     {
-        section make_pagefile_section(const std::vector<std::byte>& content, const ACCESS_MASK granted_access)
+        section make_pagefile_section(process_context& process, const std::vector<std::byte>& content, const ACCESS_MASK granted_access)
         {
-            return section::from_pagefile_backing(content.size(), PAGE_READWRITE, SEC_COMMIT, granted_access,
-                                                  shared_backing::create_from_content(content));
+            const auto storage_id = process.section_views.create_storage(static_cast<size_t>(page_align_up(content.size())));
+            std::ranges::copy(content, process.section_views.storage_memory(storage_id)->data());
+            return section::from_pagefile_storage(content.size(), PAGE_READWRITE, SEC_COMMIT, granted_access, storage_id);
+        }
+
+        std::byte* section_memory(process_context& process, const section& entry)
+        {
+            const auto memory = process.section_views.storage_memory(entry->view_storage_id);
+            return memory ? memory->data() : nullptr;
         }
     }
 
@@ -522,7 +529,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         const std::vector<std::byte> content = {std::byte{'h'}, std::byte{'i'}, std::byte{'!'}};
-        const auto source_handle = parent.process.sections.store(make_pagefile_section(content, 0x000F001F));
+        const auto source_handle = parent.process.sections.store(make_pagefile_section(parent.process, content, 0x000F001F));
 
         process_context::child_process_record record{};
         record.granted_access = PROCESS_ALL_ACCESS;
@@ -546,8 +553,9 @@ namespace sogen::test
 
         auto* const child_section = child.process.sections.get(minted);
         ASSERT_NE(child_section, nullptr);
-        ASSERT_NE(child_section->object->backing, nullptr);
-        ASSERT_TRUE(std::equal(content.begin(), content.end(), child_section->object->backing->data()));
+        const auto* const child_memory = section_memory(child.process, *child_section);
+        ASSERT_NE(child_memory, nullptr);
+        ASSERT_TRUE(std::equal(content.begin(), content.end(), child_memory));
         ASSERT_EQ(child_section->object->maximum_size, content.size());
         ASSERT_EQ(child_section->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
@@ -557,7 +565,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        auto image_section = make_pagefile_section({std::byte{1}}, 0x000F001F);
+        auto image_section = make_pagefile_section(parent.process, {std::byte{1}}, 0x000F001F);
         image_section.object->allocation_attributes = SEC_IMAGE;
         const auto source_handle = parent.process.sections.store(std::move(image_section));
 
@@ -580,7 +588,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        auto file_section = make_pagefile_section({std::byte{1}}, 0x000F001F);
+        auto file_section = make_pagefile_section(parent.process, {std::byte{1}}, 0x000F001F);
         file_section.object->file_name = u"C:\\some\\file.dll";
         const auto source_handle = parent.process.sections.store(std::move(file_section));
 
@@ -705,7 +713,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        const auto source_handle = parent.process.sections.store(make_pagefile_section({std::byte{1}}, 0x000F001F));
+        const auto source_handle = parent.process.sections.store(make_pagefile_section(parent.process, {std::byte{1}}, 0x000F001F));
 
         process_context::child_process_record record{};
         record.granted_access = PROCESS_ALL_ACCESS;
@@ -725,7 +733,7 @@ namespace sogen::test
     {
         auto parent = create_empty_emulator();
 
-        const auto source_handle = parent.process.sections.store(make_pagefile_section({std::byte{1}}, 0x000F001F));
+        const auto source_handle = parent.process.sections.store(make_pagefile_section(parent.process, {std::byte{1}}, 0x000F001F));
 
         const auto c = make_context(parent);
 
@@ -746,7 +754,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         const std::vector<std::byte> content = {std::byte{'h'}, std::byte{'i'}, std::byte{'!'}};
-        const auto source_handle = child.process.sections.store(make_pagefile_section(content, 0x000F001F));
+        const auto source_handle = child.process.sections.store(make_pagefile_section(child.process, content, 0x000F001F));
 
         process_context::child_process_record record{};
         record.granted_access = PROCESS_ALL_ACCESS;
@@ -770,8 +778,9 @@ namespace sogen::test
 
         auto* const parent_section = parent.process.sections.get(minted);
         ASSERT_NE(parent_section, nullptr);
-        ASSERT_NE(parent_section->object->backing, nullptr);
-        ASSERT_TRUE(std::equal(content.begin(), content.end(), parent_section->object->backing->data()));
+        const auto* const parent_memory = section_memory(parent.process, *parent_section);
+        ASSERT_NE(parent_memory, nullptr);
+        ASSERT_TRUE(std::equal(content.begin(), content.end(), parent_memory));
         ASSERT_EQ(parent_section->object->maximum_size, content.size());
         ASSERT_EQ(parent_section->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
@@ -781,7 +790,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        auto image_section = make_pagefile_section({std::byte{1}}, 0x000F001F);
+        auto image_section = make_pagefile_section(child.process, {std::byte{1}}, 0x000F001F);
         image_section.object->allocation_attributes = SEC_IMAGE;
         const auto source_handle = child.process.sections.store(std::move(image_section));
 
@@ -883,7 +892,7 @@ namespace sogen::test
         auto child_a = create_empty_emulator();
         auto child_b = create_empty_emulator();
 
-        const auto source_handle = child_a.process.sections.store(make_pagefile_section({std::byte{1}}, 0x000F001F));
+        const auto source_handle = child_a.process.sections.store(make_pagefile_section(child_a.process, {std::byte{1}}, 0x000F001F));
 
         process_context::child_process_record record_a{};
         record_a.granted_access = PROCESS_ALL_ACCESS;
@@ -910,7 +919,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        const auto source_handle = child.process.sections.store(make_pagefile_section({std::byte{1}}, 0x000F001F));
+        const auto source_handle = child.process.sections.store(make_pagefile_section(child.process, {std::byte{1}}, 0x000F001F));
 
         process_context::child_process_record record{};
         record.granted_access = PROCESS_TERMINATE; // deliberately lacks PROCESS_DUP_HANDLE (0x0040)
@@ -1064,7 +1073,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        auto s = make_pagefile_section({std::byte{1}, std::byte{2}}, 0x000F001F);
+        auto s = make_pagefile_section(parent.process, {std::byte{1}, std::byte{2}}, 0x000F001F);
         const auto source_handle = parent.process.sections.store(std::move(s));
 
         const auto duplicated = duplicate_into_child(parent, child, source_handle);
@@ -1074,9 +1083,14 @@ namespace sogen::test
         auto* const child_section = child.process.sections.get(duplicated.minted);
         ASSERT_NE(child_section, nullptr);
 
-        parent_section->object->backing->data()[100] = std::byte{0x5e};
-        ASSERT_EQ(child_section->object->backing->data()[100], std::byte{0x5e});
-        child_section->object->backing->data()[200] = std::byte{0x6f};
-        ASSERT_EQ(parent_section->object->backing->data()[200], std::byte{0x6f});
+        auto* const parent_memory = section_memory(parent.process, *parent_section);
+        auto* const child_memory = section_memory(child.process, *child_section);
+        ASSERT_NE(parent_memory, nullptr);
+        ASSERT_NE(child_memory, nullptr);
+
+        parent_memory[100] = std::byte{0x5e};
+        ASSERT_EQ(child_memory[100], std::byte{0x5e});
+        child_memory[200] = std::byte{0x6f};
+        ASSERT_EQ(parent_memory[200], std::byte{0x6f});
     }
 } // namespace sogen::test

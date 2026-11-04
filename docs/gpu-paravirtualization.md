@@ -314,10 +314,9 @@ plus the surrounding calls needed to actually use them:
     device is ever enumerated. The extension is implemented by the loader, not the driver, so it can
     appear on Linux loaders too — but enabling it is harmless everywhere: it only un-hides
     non-conformant devices from enumeration, it never misreports a device's capabilities.
-  - `create_device` now appends `VK_KHR_portability_subset` when the physical device is recognized as
-    a portability device (advertises the extension, or — as a fallback — reports Apple's vendor ID;
-    Vulkan requires enabling it whenever the device actually advertises it); the guest never asks for
-    it.
+  - `create_device` now appends `VK_KHR_portability_subset` when the physical device advertises it
+    (Vulkan requires enabling it whenever the device does); the guest never asks for it. Whether a
+    device is a portability device is checked once and cached per physical device.
   Verified end-to-end on macOS against a real GPU: the guest `vulkan-shim-test` enumerates the host
   **Apple M5 Pro** through MoltenVK and its `fill+readback` (`0xDEADBEEF`) and `clear+readback`
   (`0xFF0000FF`) checks both pass — the GPU produces the pixels and the guest reads them back exactly.
@@ -346,16 +345,22 @@ plus the surrounding calls needed to actually use them:
     capability it cannot provide and device creation succeeds.
 
   DXVK never observes the retraction — it believes the query and takes its normal code paths — and
-  that is safe because D3D9 exercises none of the spoofed capabilities. Two residual caveats:
-  depth clip stays at the Vulkan default, which matches D3D9's default state, so a title that
-  explicitly disables D3D9 depth clipping silently misrenders; and DXVK's `VK_NULL_HANDLE` descriptor
-  binds for unbound resources rely on MoltenVK/Metal tolerating null descriptors in practice without
-  the formal `nullDescriptor` feature — empirical behavior, not a guaranteed contract.
+  that is safe because D3D9 exercises none of the spoofed capabilities. There is no DXVK
+  configuration that relaxes its required-feature set, and MoltenVK cannot grow a geometry stage, so
+  the bridge is the only place the mismatch can be resolved. Three known limitations:
+  - The spoof is not scoped to DXVK: every guest Vulkan client on a portability device is told the
+    five capabilities exist. A client that actually uses one of them (a geometry shader, cull
+    distance, or a D3D12 title through vkd3d) fails at pipeline creation instead of at adapter
+    selection, where it would otherwise have skipped the device cleanly.
+  - Depth clip stays at the Vulkan default, which matches D3D9's default state, so a title that
+    explicitly disables D3D9 depth clipping silently misrenders.
+  - DXVK's `VK_NULL_HANDLE` descriptor binds for unbound resources rely on MoltenVK/Metal tolerating
+    null descriptors in practice without the formal `nullDescriptor` feature — empirical behavior,
+    not a guaranteed contract.
 
   All of this is gated to **portability devices** — those advertising `VK_KHR_portability_subset`,
-  or (as a fallback conformant native drivers can't hit) reporting Apple's vendor ID; conformant
-  native drivers advertise neither (the check is cached per physical device). A native Linux/Windows
-  driver that really lacks one of these features (e.g. a
+  which is the Vulkan spec's own definition of a non-conformant device, or (as a fallback conformant
+  native drivers can't hit) reporting Apple's vendor ID; a conformant native driver does neither. A native Linux/Windows driver that really lacks one of these features (e.g. a
   software rasterizer without `geometryShader`) sees its real capabilities, and whatever the guest
   requests reaches it unmodified — `vkCreateDevice` fails there exactly as it would without the shim.
 

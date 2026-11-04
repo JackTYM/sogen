@@ -1,8 +1,12 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../registry/registry_utils.hpp"
+
+#include <charconv>
 
 #include <utils/io.hpp>
+#include <utils/string.hpp>
 
 namespace sogen
 {
@@ -11,20 +15,161 @@ namespace sogen
     {
         namespace
         {
-            LCID default_locale(const syscall_context& c)
+            std::optional<uint32_t> parse_hex_identifier(std::u16string_view value)
+            {
+                while (!value.empty() && (value.front() == u' ' || value.front() == u'\t'))
+                {
+                    value.remove_prefix(1);
+                }
+                while (!value.empty() && (value.back() == u' ' || value.back() == u'\t'))
+                {
+                    value.remove_suffix(1);
+                }
+
+                if (value.starts_with(u"0x") || value.starts_with(u"0X"))
+                {
+                    value.remove_prefix(2);
+                }
+
+                if (value.empty())
+                {
+                    return std::nullopt;
+                }
+
+                const auto text = u16_to_u8(value);
+                uint32_t result{};
+                const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), result, 16);
+                if (error != std::errc{} || end != text.data() + text.size())
+                {
+                    return std::nullopt;
+                }
+
+                return result;
+            }
+
+            std::optional<uint32_t> read_hex_identifier(registry_manager& registry, const std::filesystem::path& key_path,
+                                                        const std::string_view value_name)
+            {
+                const auto value = registry_utils::read_registry_string(registry, key_path, value_name);
+                return value ? parse_hex_identifier(*value) : std::nullopt;
+            }
+
+            LCID configured_locale_id(const syscall_context& c)
             {
                 return c.win_emu.fake_env.locale_id;
             }
 
-            LANGID default_language(const syscall_context& c)
+            LANGID configured_language_id(const syscall_context& c)
             {
-                return static_cast<LANGID>(default_locale(c) & 0xFFFF);
+                return static_cast<LANGID>(configured_locale_id(c) & 0xFFFF);
             }
 
-            uint64_t default_keyboard_layout(const syscall_context& c)
+            LCID get_system_locale_id(const syscall_context& c)
             {
-                const uint64_t language = default_language(c);
-                return (language << 16) | language;
+                return read_hex_identifier(c.win_emu.registry, R"(\Registry\Machine\System\CurrentControlSet\Control\Nls\Language)",
+                                           "Default")
+                    .value_or(configured_locale_id(c));
+            }
+
+            LCID get_user_locale_id(const syscall_context& c)
+            {
+                return read_hex_identifier(c.win_emu.registry, R"(\Registry\User\Control Panel\International)", "Locale")
+                    .value_or(get_system_locale_id(c));
+            }
+
+            LANGID get_install_language_id(const syscall_context& c)
+            {
+                return static_cast<LANGID>(read_hex_identifier(c.win_emu.registry,
+                                                               R"(\Registry\Machine\System\CurrentControlSet\Control\Nls\Language)",
+                                                               "InstallLanguage")
+                                               .value_or(configured_language_id(c)));
+            }
+
+            std::vector<uint32_t> get_keyboard_layouts(const syscall_context& c)
+            {
+                auto& registry = c.win_emu.registry;
+                std::vector<uint32_t> result{};
+                const auto key = registry.get_key(utils::path_key{R"(\Registry\User\Keyboard Layout\Preload)"});
+                if (key)
+                {
+                    for (size_t index = 1; index <= 64; ++index)
+                    {
+                        const auto value = registry_utils::read_registry_string(registry, *key, std::to_string(index));
+                        if (!value)
+                        {
+                            break;
+                        }
+
+                        if (value->size() != 8)
+                        {
+                            continue;
+                        }
+
+                        if (const auto identifier = parse_hex_identifier(*value))
+                        {
+                            result.push_back(*identifier);
+                        }
+                    }
+                }
+
+                if (result.empty())
+                {
+                    result.push_back(configured_language_id(c));
+                }
+
+                return result;
+            }
+
+            uint64_t keyboard_layout_to_handle(const uint32_t identifier)
+            {
+                const auto language = static_cast<uint16_t>(identifier & 0xFFFF);
+
+                // Standard KLIDs have a zero high word. Windows represents those HKLs by
+                // repeating the language identifier in both words (for example,
+                // 00000416 -> 04160416). Preserve non-standard identifiers as-is until
+                // per-layout device handles are emulated.
+                if ((identifier & 0xFFFF0000) == 0)
+                {
+                    return (static_cast<uint64_t>(language) << 16) | language;
+                }
+
+                return identifier;
+            }
+
+            std::u16string keyboard_layout_to_name(const uint32_t identifier)
+            {
+                auto name = utils::string::to_hex_number(identifier, true);
+                name.insert(0, 8 - name.size(), '0');
+                return u8_to_u16(name);
+            }
+
+            uint64_t get_default_keyboard_layout(const syscall_context& c)
+            {
+                return keyboard_layout_to_handle(get_keyboard_layouts(c).front());
+            }
+
+            windows_path get_system32_path(const syscall_context& c, const std::string_view file_name)
+            {
+                return c.win_emu.version.get_system_root() / "System32" / file_name;
+            }
+
+            NTSTATUS map_nls_file(const syscall_context& c, const windows_path& path, const emulator_object<uint64_t> section_pointer,
+                                  const emulator_object<ULONG> section_size)
+            {
+                const auto nls_file = c.win_emu.file_sys.read_file(path);
+                if (nls_file.empty())
+                {
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+
+                const auto size = static_cast<size_t>(page_align_up(nls_file.size()));
+                const auto section_memory = c.win_emu.memory.allocate_memory(size, memory_permission::read);
+                c.emu.write_memory(section_memory, nls_file.data(), nls_file.size());
+
+                section_pointer.write_if_valid(section_memory);
+                section_size.write_if_valid(static_cast<ULONG>(size));
+
+                return STATUS_SUCCESS;
             }
         }
 
@@ -32,7 +177,7 @@ namespace sogen
                                              const emulator_object<LCID> default_locale_id,
                                              const emulator_object<LARGE_INTEGER> /*default_casing_table_size*/)
         {
-            const auto locale_file = utils::io::read_file(c.win_emu.file_sys.translate(R"(C:\Windows\System32\locale.nls)"));
+            const auto locale_file = c.win_emu.file_sys.read_file(get_system32_path(c, "locale.nls"));
             if (locale_file.empty())
             {
                 return STATUS_FILE_INVALID;
@@ -43,15 +188,15 @@ namespace sogen
             c.emu.write_memory(base, locale_file.data(), locale_file.size());
 
             base_address.write(base);
-            default_locale_id.write(default_locale(c));
+            default_locale_id.write(get_system_locale_id(c));
 
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQueryDefaultLocale(const syscall_context& c, BOOLEAN /*user_profile*/,
+        NTSTATUS handle_NtQueryDefaultLocale(const syscall_context& c, const BOOLEAN user_profile,
                                              const emulator_object<LCID> default_locale_id)
         {
-            default_locale_id.write(default_locale(c));
+            default_locale_id.write(user_profile ? get_user_locale_id(c) : get_system_locale_id(c));
             return STATUS_SUCCESS;
         }
 
@@ -61,47 +206,20 @@ namespace sogen
         {
             if (section_type == 11)
             {
-                const auto file_path = R"(C:\Windows\System32\C_)" + std::to_string(section_data) + ".NLS";
-                const auto locale_file = utils::io::read_file(c.win_emu.file_sys.translate(file_path));
-                if (locale_file.empty())
-                {
-                    return STATUS_OBJECT_NAME_NOT_FOUND;
-                }
-
-                const auto size = static_cast<size_t>(page_align_up(locale_file.size()));
-                const auto section_memory = c.win_emu.memory.allocate_memory(size, memory_permission::read);
-                c.emu.write_memory(section_memory, locale_file.data(), locale_file.size());
-
-                section_pointer.write_if_valid(section_memory);
-                section_size.write_if_valid(static_cast<ULONG>(size));
-
-                return STATUS_SUCCESS;
+                return map_nls_file(c, get_system32_path(c, "C_" + std::to_string(section_data) + ".NLS"), section_pointer, section_size);
             }
 
+            // l_intl.nls: backs RtlUpcaseUnicodeChar/RtlDowncaseUnicodeChar beyond ASCII.
             if (section_type == 14)
             {
-                // Unicode case-mapping table (RtlpInitUppercaseTables' RtlUpcaseUnicodeChar/
-                // RtlDowncaseUnicodeChar backing data). Real Windows ships this as l_intl.nls -
-                // sogen's shipped filesystem only has a copy under SysWOW64, not System32.
-                auto locale_file = utils::io::read_file(c.win_emu.file_sys.translate(R"(C:\Windows\System32\l_intl.nls)"));
-                if (locale_file.empty())
+                const auto status = map_nls_file(c, get_system32_path(c, "l_intl.nls"), section_pointer, section_size);
+                if (status != STATUS_OBJECT_NAME_NOT_FOUND)
                 {
-                    locale_file = utils::io::read_file(c.win_emu.file_sys.translate(R"(C:\Windows\SysWOW64\l_intl.nls)"));
+                    return status;
                 }
 
-                if (locale_file.empty())
-                {
-                    return STATUS_OBJECT_NAME_NOT_FOUND;
-                }
-
-                const auto size = static_cast<size_t>(page_align_up(locale_file.size()));
-                const auto section_memory = c.win_emu.memory.allocate_memory(size, memory_permission::read);
-                c.emu.write_memory(section_memory, locale_file.data(), locale_file.size());
-
-                section_pointer.write_if_valid(section_memory);
-                section_size.write_if_valid(static_cast<ULONG>(size));
-
-                return STATUS_SUCCESS;
+                // Some emulation roots only ship l_intl.nls under SysWOW64.
+                return map_nls_file(c, c.win_emu.version.get_system_root() / "SysWOW64" / "l_intl.nls", section_pointer, section_size);
             }
 
             c.win_emu.log.warn("Unsupported section type: %X\n", static_cast<uint32_t>(section_type));
@@ -118,24 +236,43 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context& c, const uint64_t /*keyboard_layout*/, const uint32_t /*flags*/)
+        uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context& c, const uint64_t keyboard_layout, const uint32_t /*flags*/)
         {
-            return default_keyboard_layout(c);
+            return keyboard_layout == 0 ? get_default_keyboard_layout(c) : keyboard_layout;
+        }
+
+        uint64_t handle_NtUserLoadKeyboardLayoutEx(const syscall_context& c, const handle /*file*/, const uint32_t /*table_offset*/,
+                                                   const emulator_pointer /*tables*/, const uint64_t /*old_keyboard_layout*/,
+                                                   const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> keyboard_layout_id,
+                                                   const uint32_t /*new_keyboard_layout*/, const uint32_t /*flags*/)
+        {
+            if (keyboard_layout_id)
+            {
+                const auto requested_layout = read_unicode_string(c.emu, keyboard_layout_id);
+                if (requested_layout.size() == 8)
+                {
+                    if (const auto identifier = parse_hex_identifier(requested_layout))
+                    {
+                        return keyboard_layout_to_handle(*identifier);
+                    }
+                }
+            }
+
+            return get_default_keyboard_layout(c);
         }
 
         uint64_t handle_NtUserGetKeyboardLayout(const syscall_context& c, const uint32_t /*thread_id*/)
         {
-            return default_keyboard_layout(c);
+            return get_default_keyboard_layout(c);
         }
 
         uint32_t handle_NtUserGetKeyboardLayoutList(const syscall_context& c, const uint32_t buffer_count,
                                                     const emulator_pointer keyboard_layouts)
         {
-            const auto keyboard_layout = default_keyboard_layout(c);
-
+            const auto layouts = get_keyboard_layouts(c);
             if (buffer_count == 0)
             {
-                return 1;
+                return static_cast<uint32_t>(layouts.size());
             }
 
             if (keyboard_layouts == 0)
@@ -143,16 +280,14 @@ namespace sogen
                 return 0;
             }
 
-            if (c.proc.is_wow64_process)
+            const auto count = std::min<size_t>(buffer_count, layouts.size());
+            for (size_t i = 0; i < count; ++i)
             {
-                c.emu.write_memory(keyboard_layouts, static_cast<uint32_t>(keyboard_layout));
-            }
-            else
-            {
-                c.emu.write_memory(keyboard_layouts, keyboard_layout);
+                const auto keyboard_layout = keyboard_layout_to_handle(layouts[i]);
+                c.emu.write_memory(keyboard_layouts + i * sizeof(uint64_t), keyboard_layout);
             }
 
-            return 1;
+            return static_cast<uint32_t>(count);
         }
 
         BOOL handle_NtUserGetKeyboardLayoutName(const syscall_context& c, const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> name)
@@ -162,10 +297,8 @@ namespace sogen
                 return FALSE;
             }
 
-            std::array<char, 9> layout_name{};
-            std::snprintf(layout_name.data(), layout_name.size(), "%08X", static_cast<uint32_t>(default_language(c)));
-            const auto layout_name_u16 = u8_to_u16(layout_name.data());
-            const auto name_bytes = layout_name_u16.size() * sizeof(char16_t);
+            auto keyboard_layout_name = keyboard_layout_to_name(get_keyboard_layouts(c).front());
+            const auto name_bytes = keyboard_layout_name.size() * sizeof(char16_t);
 
             bool written = false;
             name.access([&](UNICODE_STRING<EmulatorTraits<Emu64>>& str) {
@@ -174,7 +307,7 @@ namespace sogen
                     return;
                 }
 
-                c.emu.write_memory(str.Buffer, layout_name_u16.c_str(), name_bytes + sizeof(char16_t));
+                c.emu.write_memory(str.Buffer, keyboard_layout_name.c_str(), name_bytes + sizeof(char16_t));
                 str.Length = static_cast<USHORT>(name_bytes);
                 written = true;
             });
@@ -184,13 +317,13 @@ namespace sogen
 
         NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context& c, const emulator_object<LANGID> language_id)
         {
-            language_id.write(default_language(c));
+            language_id.write(static_cast<LANGID>(get_user_locale_id(c)));
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtQueryInstallUILanguage(const syscall_context& c, const emulator_object<LANGID> language_id)
         {
-            language_id.write(default_language(c));
+            language_id.write(get_install_language_id(c));
             return STATUS_SUCCESS;
         }
     }

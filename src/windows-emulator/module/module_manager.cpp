@@ -17,127 +17,6 @@ namespace sogen
 
     namespace
     {
-        // Locates ntdll32's own cached copy of TEB32.WOW32Reserved (fs:[0xC0], the undocumented but
-        // well-established "Wow64Transition" field). Every 32-bit syscall stub reaches the wow64
-        // dispatcher via a shared two-instruction indirection: the stub does
-        // `mov eax,<syscall#>; mov edx,<thunk>; call edx` where <thunk> is a small, module-internal
-        // trampoline that itself does `jmp dword ptr [<cache>]` - <cache> being ntdll32's OWN cached
-        // copy of fs:[0xC0], read once during LdrpInitializeProcess rather than re-read from the TEB
-        // on every syscall. Writing fs:[0xC0] itself (e.g. once wow64cpu.dll loads and its real thunk
-        // address becomes known) is therefore too late: that caching already happened, with whatever
-        // (null, since this backend never runs whatever real code would set fs:[0xC0]) fs:[0xC0] held
-        // at process start. Scan for the syscall stub's own bytes instead, extract <thunk> from the
-        // stub's second `mov` immediate, then dereference <thunk>'s own `jmp dword ptr [<cache>]` to
-        // get <cache>'s real address - this needs no hardcoded RVA and survives ntdll32 build changes.
-        std::optional<uint64_t> scan_wow64_transition_cache_address(const memory_manager& memory, const mapped_module& ntdll32)
-        {
-            for (const auto& section : ntdll32.sections)
-            {
-                const auto& region = section.region;
-                constexpr size_t stub_size = 12; // B8 imm32 BA imm32 FF D2
-                if (!is_executable(region.permissions) || region.length < stub_size)
-                {
-                    continue;
-                }
-
-                std::vector<uint8_t> data(region.length);
-                if (!memory.try_read_memory(region.start, data.data(), data.size()))
-                {
-                    continue;
-                }
-
-                for (size_t i = 0; i + stub_size <= data.size(); ++i)
-                {
-                    if (data[i] != 0xB8 || data[i + 5] != 0xBA || data[i + 10] != 0xFF || data[i + 11] != 0xD2)
-                    {
-                        continue;
-                    }
-
-                    uint32_t thunk_address{};
-                    std::memcpy(&thunk_address, &data[i + 6], sizeof(thunk_address));
-
-                    std::array<uint8_t, 6> thunk_bytes{};
-                    if (!memory.try_read_memory(thunk_address, thunk_bytes.data(), thunk_bytes.size()) || thunk_bytes[0] != 0xFF ||
-                        thunk_bytes[1] != 0x25)
-                    {
-                        continue;
-                    }
-
-                    uint32_t cache_address{};
-                    std::memcpy(&cache_address, &thunk_bytes[2], sizeof(cache_address));
-                    return cache_address;
-                }
-            }
-
-            return std::nullopt;
-        }
-
-        // wow64cpu.dll's real RunSimulatedCode entry has no export, so its caller previously used a
-        // single hand-decoded RVA relative to TurboDispatchJumpAddressStart. That fixed offset drifts
-        // across wow64cpu.dll builds: on a genuine Windows Server 2025 system DLL (the one CI's
-        // create-emulation-root job bakes), the hardcoded RVA landed 0x11 (17) bytes before the real
-        // prologue, inside the tail (a bare `retn`) of the unrelated,
-        // preceding function. The registered gate crossing (built from that RVA up to
-        // TurboDispatchJumpAddressStart) then accidentally swallowed that ret too, and FEXCore's JIT
-        // refused to execute it (a genuine NoExec fault) every time real control flow legitimately
-        // returned through it - surfacing as a deterministic, CI-only STATUS_FATAL_USER_CALLBACK_
-        // EXCEPTION during the one-time win32k client-thread-setup callback. RunSimulatedCode's
-        // prologue is a highly distinctive, fixed instruction sequence (9 specific register pushes in
-        // a specific order, then a specific stack adjustment) any compiler emits identically
-        // regardless of build - scan for it directly, matching scan_kernelbase_nls_cache_reference/
-        // scan_wow64_transition_cache_address's approach for the same class of problem, instead of
-        // trusting a single hand-decoded RVA. Returns the closest match preceding dispatch_start
-        // (TurboDispatchJumpAddressStart), matching the known layout invariant that RunSimulatedCode
-        // precedes it in the same dispatch code block.
-        std::optional<uint64_t> scan_run_simulated_code_entry(const memory_manager& memory, const mapped_module& wow64cpu,
-                                                              uint64_t dispatch_start)
-        {
-            static constexpr std::array<uint8_t, 16> pattern{
-                0x41, 0x57,             // push r15
-                0x41, 0x56,             // push r14
-                0x41, 0x55,             // push r13
-                0x41, 0x54,             // push r12
-                0x53,                   // push rbx
-                0x56,                   // push rsi
-                0x57,                   // push rdi
-                0x55,                   // push rbp
-                0x48, 0x83, 0xEC, 0x68, // sub rsp, 0x68
-            };
-
-            std::optional<uint64_t> best;
-
-            for (const auto& section : wow64cpu.sections)
-            {
-                const auto& region = section.region;
-                if (!is_executable(region.permissions) || region.length < pattern.size())
-                {
-                    continue;
-                }
-
-                std::vector<uint8_t> data(region.length);
-                if (!memory.try_read_memory(region.start, data.data(), data.size()))
-                {
-                    continue;
-                }
-
-                for (size_t i = 0; i + pattern.size() <= data.size(); ++i)
-                {
-                    if (std::memcmp(data.data() + i, pattern.data(), pattern.size()) != 0)
-                    {
-                        continue;
-                    }
-
-                    const auto candidate = region.start + i;
-                    if (candidate < dispatch_start && (!best.has_value() || candidate > *best))
-                    {
-                        best = candidate;
-                    }
-                }
-            }
-
-            return best;
-        }
-
         // gNlsProcessLocalCache's RVA silently drifts across different Windows servicing/OS-build
         // combinations (confirmed directly: it differs between the Windows 2022 and 2025 CI-baked
         // kernelbase.dll builds - one relocates the global entirely, out of where the other build's
@@ -310,6 +189,7 @@ namespace sogen
             buffer.write(mod.entry_point);
 
             buffer.write(mod.machine);
+            buffer.write(mod.characteristics);
             buffer.write(mod.dll_characteristics);
             buffer.write(mod.size_of_stack_reserve);
             buffer.write(mod.size_of_stack_commit);
@@ -336,6 +216,7 @@ namespace sogen
             buffer.read(mod.entry_point);
 
             buffer.read(mod.machine);
+            buffer.read(mod.characteristics);
             buffer.read(mod.dll_characteristics);
             buffer.read(mod.size_of_stack_reserve);
             buffer.read(mod.size_of_stack_commit);
@@ -353,7 +234,7 @@ namespace sogen
 
     pe_detection_result pe_architecture_detector::detect_from_file(const std::filesystem::path& file)
     {
-        auto variant_result = winpe::get_pe_arch(file);
+        const auto variant_result = winpe::get_pe_format(file);
 
         if (std::holds_alternative<std::error_code>(variant_result))
         {
@@ -363,19 +244,78 @@ namespace sogen
             return result;
         }
 
-        auto arch = std::get<winpe::pe_arch>(variant_result);
+        const auto format = std::get<winpe::pe_format>(variant_result);
         pe_detection_result result;
-        result.architecture = arch;
-        result.suggested_mode = determine_execution_mode(arch);
+        result.architecture = format.architecture;
+        result.machine = format.machine;
+        result.suggested_mode = determine_execution_mode(format);
+        return result;
+    }
+
+    pe_detection_result pe_architecture_detector::detect_from_data(const std::span<const std::byte> data)
+    {
+        const auto variant_result = winpe::get_pe_format(
+            [&](const uint64_t offset, void* destination, const size_t length) {
+                std::memcpy(destination, data.data() + offset, length);
+                return true;
+            },
+            0, data.size());
+
+        if (std::holds_alternative<std::error_code>(variant_result))
+        {
+            pe_detection_result result;
+            result.error_message = std::get<std::error_code>(variant_result).message();
+            return result;
+        }
+
+        const auto format = std::get<winpe::pe_format>(variant_result);
+        pe_detection_result result;
+        result.architecture = format.architecture;
+        result.machine = format.machine;
+        result.suggested_mode = determine_execution_mode(format);
+        return result;
+    }
+
+    pe_detection_result pe_architecture_detector::detect_from_file(const file_system& file_sys, const windows_path& path)
+    {
+        const auto input = file_sys.open_read(path);
+        if (!input.file)
+        {
+            pe_detection_result result;
+            result.error_message = "Cannot open file";
+            return result;
+        }
+
+        const auto size = input.file->size();
+        const auto variant_result = winpe::get_pe_format(
+            [&](const uint64_t offset, void* destination, const size_t length) {
+                return input.file->seek(static_cast<int64_t>(offset), SEEK_SET) &&
+                       input.file->read({static_cast<std::byte*>(destination), length}) == length;
+            },
+            0, size < 0 ? 0 : static_cast<uint64_t>(size));
+
+        if (std::holds_alternative<std::error_code>(variant_result))
+        {
+            pe_detection_result result;
+            result.error_message = std::get<std::error_code>(variant_result).message();
+            return result;
+        }
+
+        const auto format = std::get<winpe::pe_format>(variant_result);
+        pe_detection_result result;
+        result.architecture = format.architecture;
+        result.machine = format.machine;
+        result.suggested_mode = determine_execution_mode(format);
         return result;
     }
 
     pe_detection_result pe_architecture_detector::detect_from_memory(const memory_interface& memory, uint64_t base_address,
                                                                      uint64_t image_size)
     {
-        auto variant_result = winpe::get_pe_arch([&](const uint64_t address, void* destination,
-                                                     const size_t size) { return memory.try_read_memory(address, destination, size); },
-                                                 base_address, image_size);
+        const auto variant_result =
+            winpe::get_pe_format([&](const uint64_t address, void* destination,
+                                     const size_t size) { return memory.try_read_memory(address, destination, size); },
+                                 base_address, image_size);
 
         if (std::holds_alternative<std::error_code>(variant_result))
         {
@@ -384,31 +324,35 @@ namespace sogen
             return result;
         }
 
-        auto arch = std::get<winpe::pe_arch>(variant_result);
+        const auto format = std::get<winpe::pe_format>(variant_result);
         pe_detection_result result;
-        result.architecture = arch;
-        result.suggested_mode = determine_execution_mode(arch);
+        result.architecture = format.architecture;
+        result.machine = format.machine;
+        result.suggested_mode = determine_execution_mode(format);
         return result;
     }
 
-    execution_mode pe_architecture_detector::determine_execution_mode(winpe::pe_arch executable_arch)
+    execution_mode pe_architecture_detector::determine_execution_mode(const winpe::pe_format format)
     {
-        switch (executable_arch)
+        switch (format.machine)
         {
-        case winpe::pe_arch::pe32:
-            return execution_mode::wow64_32bit;
-        case winpe::pe_arch::pe64:
-            return execution_mode::native_64bit;
+        case PEMachineType::I386:
+            return format.architecture == winpe::pe_arch::pe32 ? execution_mode::wow64_32bit : execution_mode::unknown;
+        case PEMachineType::AMD64:
+        case PEMachineType::ARM64EC:
+        case PEMachineType::ARM64:
+            return format.architecture == winpe::pe_arch::pe64 ? execution_mode::native_64bit : execution_mode::unknown;
         default:
             return execution_mode::unknown;
         }
     }
 
     // PE32 Mapping Strategy Implementation
-    mapped_module pe32_mapping_strategy::map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path,
+    mapped_module pe32_mapping_strategy::map_from_data(memory_manager& memory, const std::span<const std::byte> data,
+                                                       std::filesystem::path identity, windows_path module_path,
                                                        const uint64_t relocation_base)
     {
-        return map_module_from_file<std::uint32_t>(memory, std::move(file), std::move(module_path), relocation_base);
+        return map_module_from_data<std::uint32_t>(memory, data, std::move(identity), std::move(module_path), relocation_base);
     }
 
     mapped_module pe32_mapping_strategy::map_from_memory(memory_manager& memory, uint64_t base_address, uint64_t image_size,
@@ -418,10 +362,11 @@ namespace sogen
     }
 
     // PE64 Mapping Strategy Implementation
-    mapped_module pe64_mapping_strategy::map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path,
+    mapped_module pe64_mapping_strategy::map_from_data(memory_manager& memory, const std::span<const std::byte> data,
+                                                       std::filesystem::path identity, windows_path module_path,
                                                        const uint64_t relocation_base)
     {
-        return map_module_from_file<std::uint64_t>(memory, std::move(file), std::move(module_path), relocation_base);
+        return map_module_from_data<std::uint64_t>(memory, data, std::move(identity), std::move(module_path), relocation_base);
     }
 
     mapped_module pe64_mapping_strategy::map_from_memory(memory_manager& memory, uint64_t base_address, uint64_t image_size,
@@ -449,11 +394,28 @@ namespace sogen
         }
     }
 
-    module_manager::module_manager(memory_manager& memory, file_system& file_sys, callbacks& cb)
+    module_manager::module_manager(memory_manager& memory, file_system& file_sys, callbacks& cb,
+                                   const windows_guest_architecture architecture)
         : memory_(&memory),
           file_sys_(&file_sys),
-          callbacks_(&cb)
+          callbacks_(&cb),
+          native_architecture_(architecture)
     {
+        (void)windows_abi_for(architecture);
+    }
+
+    bool module_manager::supports_image(const pe_detection_result& detection_result) const
+    {
+        if (!detection_result.is_valid() || detection_result.suggested_mode == execution_mode::unknown)
+        {
+            return false;
+        }
+        if (this->native_architecture_ == windows_guest_architecture::arm64)
+        {
+            return detection_result.machine == PEMachineType::ARM64;
+        }
+        return detection_result.machine == PEMachineType::I386 || detection_result.machine == PEMachineType::AMD64 ||
+               detection_result.machine == PEMachineType::ARM64EC;
     }
 
     mapped_module* module_manager::map_module_core(const pe_detection_result& detection_result,
@@ -462,6 +424,13 @@ namespace sogen
         if (!detection_result.is_valid())
         {
             logger.error("Cannot map module: %s\n", detection_result.error_message.c_str());
+            return nullptr;
+        }
+
+        if (!this->supports_image(detection_result))
+        {
+            logger.error("Cannot map PE machine 0x%04x into guest architecture %u\n", static_cast<unsigned>(detection_result.machine),
+                         static_cast<unsigned>(this->native_architecture_));
             return nullptr;
         }
 
@@ -491,13 +460,19 @@ namespace sogen
 
     execution_mode module_manager::detect_execution_mode(const windows_path& executable_path, const logger& logger)
     {
-        const auto local_file = this->file_sys_->translate(executable_path);
-        auto detection_result = pe_architecture_detector::detect_from_file(local_file);
+        auto detection_result = pe_architecture_detector::detect_from_file(*this->file_sys_, executable_path);
 
         if (!detection_result.is_valid())
         {
-            logger.error("Failed to detect executable architecture of file %s: %s\n", local_file.string().c_str(),
+            logger.error("Failed to detect executable architecture of file %s: %s\n", executable_path.string().c_str(),
                          detection_result.error_message.c_str());
+            return execution_mode::unknown;
+        }
+
+        if (!this->supports_image(detection_result))
+        {
+            logger.error("Executable PE machine 0x%04x is incompatible with guest architecture %u\n",
+                         static_cast<unsigned>(detection_result.machine), static_cast<unsigned>(this->native_architecture_));
             return execution_mode::unknown;
         }
 
@@ -511,11 +486,18 @@ namespace sogen
         this->memory_->set_dep_enabled(this->executable->machine != static_cast<uint16_t>(PEMachineType::I386) ||
                                        (this->executable->dll_characteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT) != 0);
 
+        // Without high-entropy ASLR, Windows allocates bottom-up below 4 GB, and older programs truncate pointers to 32 bits.
+        constexpr auto high_entropy_aslr = IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA | IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+        if ((this->executable->dll_characteristics & high_entropy_aslr) != high_entropy_aslr)
+        {
+            this->memory_->set_default_allocation_address(MIN_ALLOCATION_ADDRESS);
+        }
+
         this->ntdll = this->map_module_or_throw(ntdll_path, logger, true);
         this->win32u = this->map_module_or_throw(win32u_path, logger, true);
     }
 
-    void module_manager::load_wow64_modules(x86_64_emulator& emu, const windows_path& executable_path, const windows_path& ntdll_path,
+    void module_manager::load_wow64_modules(const windows_path& executable_path, const windows_path& ntdll_path,
                                             const windows_path& win32u_path, const windows_path& ntdll32_path,
                                             windows_version_manager& version, const logger& logger)
     {
@@ -594,10 +576,10 @@ namespace sogen
         this->memory_->write_memory(ldr_init_block_addr, &init_block, static_cast<size_t>(init_block_size));
 
         // Install the WOW64 Heaven's Gate trampoline used for compat-mode -> 64-bit transitions.
-        this->install_wow64_heaven_gate(emu, logger);
+        this->install_wow64_heaven_gate(logger);
     }
 
-    void module_manager::install_wow64_heaven_gate(x86_64_emulator& emu, const logger& logger)
+    void module_manager::install_wow64_heaven_gate(const logger& logger)
     {
         using wow64::heaven_gate::kCodeBase;
         using wow64::heaven_gate::kCodeSize;
@@ -728,18 +710,6 @@ namespace sogen
         {
             this->wow64_heaven_gate_code_base_ = *code_base;
 
-            // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
-            // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
-            // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
-            // cannot execute that at all (bitness fixed per compiled Context - see
-            // notify_process_bitness's doc comment) and instead intercepts execution reaching this
-            // page before any of it is ever JIT-compiled, then synthesizes the mode switch itself
-            // (marshal register state into its other-bitness Context and flip which one runs) -
-            // see register_gate_crossing / gate_crossing_kind::heaven_gate (arch_emulator.hpp).
-            // The trampoline is driven with the confirmed convention RAX=RIP, RBX=RSP, RCX=CS,
-            // RDX=SS (see exception_dispatch.cpp), which the FEX crossing handler decodes.
-            emu.register_gate_crossing(*code_base, kCodeSize, x86_64_emulator::gate_crossing_kind::heaven_gate);
-
             if (!this->modules_.contains(*code_base))
             {
                 mapped_module module{};
@@ -775,23 +745,33 @@ namespace sogen
         }
     }
 
-    void module_manager::map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
+    void module_manager::map_main_modules(cpu_interface& cpu, const windows_path& executable_path, windows_version_manager& version,
                                           process_context& context, const logger& logger)
     {
+        if (context.native_architecture != this->native_architecture_)
+        {
+            throw std::invalid_argument("Module manager and process architectures differ");
+        }
+        (void)context.abi().instruction_pointer(cpu);
+
         const auto& system_root = version.get_system_root();
         const auto system32_path = system_root / "System32";
         const auto syswow64_path = system_root / "SysWOW64";
 
         current_execution_mode_ = detect_execution_mode(executable_path, logger);
+        if (current_execution_mode_ == execution_mode::unknown)
+        {
+            throw std::runtime_error("Unknown or unsupported execution mode detected");
+        }
         context.is_wow64_process = (current_execution_mode_ == execution_mode::wow64_32bit);
 
-        // Must happen before any module gets mapped below: a JIT-based backend (FEXCore) needs to
-        // know the bitness before compiling its first block (see notify_process_bitness's doc
-        // comment), and a 32-bit process's own image/ntdll32 map into the low 4GB - a range some
-        // backends must steer real host allocations away from for a 64-bit process, but must NOT for
-        // a 32-bit one (see reserve_host_memory_ranges's doc comment) - so the reservation has to be
-        // recomputed now that the bitness is known, before either module is mapped.
-        emu.notify_process_bitness(context.is_wow64_process);
+        // Must precede any module mapping: a fixed-bitness JIT backend rejects unsupported execution
+        // modes here, before its first block would be mis-decoded. Host-range reservations are
+        // re-derived afterwards so mapping starts from a fresh view of the backend's host layout.
+        if (auto* x64_cpu = dynamic_cast<x86_64_cpu*>(&cpu))
+        {
+            x64_cpu->notify_process_bitness(context.is_wow64_process);
+        }
         this->memory_->reset_host_memory_ranges();
 
         switch (current_execution_mode_)
@@ -801,178 +781,7 @@ namespace sogen
             break;
 
         case execution_mode::wow64_32bit:
-            // Data-driven interception of the real WoW64 CPU-simulation dispatcher: unlike
-            // ntdll32/win32u/native-ntdll (mapped directly by load_wow64_modules), wow64cpu.dll is
-            // never mapped by sogen - real ntdll loads it dynamically through the guest loader (task
-            // #27), which flows through map_module_core and fires on_module_load. When it appears,
-            // register its turbo-thunk dispatcher (TurboDispatchJumpAddressStart..End - the address
-            // ntdll32's Wow64Transition points at) as a gate crossing so a JIT backend intercepts the
-            // 32<->64 mode switch there instead of mis-compiling that 64-bit dispatch code. A no-op on
-            // native-execution backends (register_gate_crossing's default). See fex_x86_64_emulator's
-            // perform_gate_crossing for the (not-yet-decodable) wow64cpu_dispatch convention.
-            this->callbacks_->on_module_load.add([this, emu_ptr = &emu, &context](mapped_module& mod) {
-                if (mod.name != "wow64cpu.dll")
-                {
-                    return;
-                }
-                const auto dispatch_start = mod.find_export("TurboDispatchJumpAddressStart");
-                if (dispatch_start == 0)
-                {
-                    return;
-                }
-                // wow64cpu.dll layout (decoded by hand from the shipped binary, cross-checked by
-                // objdump; all RVAs relative to the image base, which we recover from the
-                // TurboDispatchJumpAddressStart export @ 0x17a6 so everything tracks ASLR):
-                //   BTCpuSimulate (export, 0x11c0) = `L: call RunSimulatedCode; jmp L`;
-                //   RunSimulatedCode (0x1650, NOT an export) = the 64->32 forward transition;
-                //   TurboDispatchJumpAddressStart (export, 0x17a6) = the 64-bit turbo dispatcher tail;
-                //   the WOW64SVC far-transition thunk (0x2010) = the 32->64 reverse gate.
-                constexpr uint64_t turbo_dispatch_start_rva = 0x17a6;
-                const auto image_base = dispatch_start - turbo_dispatch_start_rva;
-
-                // TurboDispatchJumpAddressEnd's RVA relative to Start is NOT reliably 0x17af - 0x17a6
-                // == 9 bytes across every wow64cpu.dll build (on some builds the bytes at
-                // image_base+0x17af decode as nonsense, not the documented dispatcher code, and
-                // executing them corrupts guest memory). Resolve the real export address directly
-                // instead of assuming a fixed offset, exactly like TurboDispatchJumpAddressStart above.
-                const auto dispatch_end = mod.find_export("TurboDispatchJumpAddressEnd");
-                if (dispatch_end != 0)
-                {
-                    emu_ptr->set_wow64_turbo_dispatch_end(dispatch_end);
-                }
-
-                // Register the forward (64->32) transition, RunSimulatedCode. Its body contains the
-                // un-JIT-able `mov gs, cx`; registering the span makes a JIT backend intercept it at
-                // its entry and marshal the 32-bit register block itself instead of compiling those
-                // bytes. See the FEX backend's enter_wow64_32bit_from_run_simulated_code
-                // (gate_crossing_kind::wow64_run_simulated_code).
-                //
-                // Prefer the build-independent prologue scan (see scan_run_simulated_code_entry's doc
-                // comment for why the fixed RVA below drifts across wow64cpu.dll builds); fall back to
-                // the hand-decoded RVA only if the scan finds no match, so an unrecognized future
-                // build shape degrades to the previous behavior instead of failing outright.
-                constexpr uint64_t run_simulated_code_rva = 0x1650;
-                uint64_t run_simulated_code_address = image_base + run_simulated_code_rva;
-                uint64_t run_simulated_code_size = turbo_dispatch_start_rva - run_simulated_code_rva;
-
-                if (const auto scanned = scan_run_simulated_code_entry(*this->memory_, mod, dispatch_start); scanned.has_value())
-                {
-                    run_simulated_code_address = *scanned;
-                    run_simulated_code_size = dispatch_start - *scanned;
-                }
-
-                emu_ptr->register_gate_crossing(run_simulated_code_address, static_cast<size_t>(run_simulated_code_size),
-                                                x86_64_emulator::gate_crossing_kind::wow64_run_simulated_code);
-
-                // NtContinue never returns through the normal syscall path - the real kernel restores
-                // the guest's context directly, including a mode switch back to 32-bit compatibility
-                // mode, without wow64.dll's usual "jmp RunSimulatedCode" return sequence ever running.
-                // handle_NtContinueEx (syscalls/thread.cpp) needs a reverse-gate address to redirect a
-                // WoW64 thread's 64-bit engine to when NtContinue fires mid-gate-crossing, so the
-                // existing reverse-gate machinery performs the real engine flip instead of the syscall
-                // handler corrupting the active (64-bit) engine's own control-flow state. Deliberately
-                // NOT run_simulated_code_rva (0x1650) itself - enter_wow64_32bit_from_run_simulated_code
-                // only spills the 8 nonvolatile registers and adjusts rsp by -0xA8 when src.rip equals
-                // that exact address (its "true, freshly-called-from-BTCpuSimulate entry" case); a
-                // NtContinue-triggered crossing is never that - it fires mid-execution of wow64.dll's
-                // own real code, so re-running that one-time prologue spill scribbles over the frozen
-                // 64-bit stack with whatever's currently in r12-r15/rbx/rsi/rdi/rbp and double-adjusts
-                // rsp, corrupting state for every syscall dispatched afterward. 0x167f is the
-                // syscall-return re-entry point instead - it falls
-                // within this same registered gate range (0x1650 already extends the whole way to
-                // turbo_dispatch_start_rva) but is documented as "already runs with rsp prologue-
-                // adjusted and must not be double-counted", exactly matching a mid-syscall return.
-                constexpr uint64_t syscall_reentry_rva = 0x167f;
-                context.wow64_syscall_reentry_addr = image_base + syscall_reentry_rva;
-
-                // Register the reverse (32->64) transition. The 32-bit ntdll syscall stub reaches the
-                // WOW64SVC thunk @ 0x2010 via `call fs:[0xC0]` (Wow64Transition); the thunk does a far
-                // `ljmp 0x33:...` into 64-bit mode, which the fixed-bitness 32-bit Context cannot do.
-                // Registering the 32-bit portion of the thunk [0x2010, 0x2024) makes the JIT intercept
-                // it, marshal the 32-bit state, and hand control to the real 64-bit TurboDispatch so
-                // wow64.dll services the syscall (see enter_wow64_64bit_from_wow64svc_thunk,
-                // gate_crossing_kind::wow64cpu_dispatch). NOTE: TurboDispatchJumpAddressStart itself is
-                // deliberately NOT registered - that 64-bit dispatch code MUST execute to translate the
-                // 32-bit service number and issue the real 64-bit syscall sogen hooks.
-                constexpr uint64_t wow64svc_thunk_rva = 0x2010;
-                constexpr uint64_t wow64svc_thunk_size = 0x14;
-                emu_ptr->register_gate_crossing(image_base + wow64svc_thunk_rva, wow64svc_thunk_size,
-                                                x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
-
-                // BTCpuProcessInit enables "turbo thunks" by default (it sets the flag at RVA 0x4590),
-                // so BTCpuGetBopCode (RVA 0x11e0) returns the W64SVC *turbo* bop (RVA 0x6000) instead of
-                // the WOW64SVC thunk (0x2010). The 32-bit syscall stub's `call fs:[0xC0]` (Wow64Transition)
-                // therefore targets 0x6000, whose `ljmp 0x33:...; jmp [r15+0xf8]` is the same un-executable
-                // 32-bit bitness switch. Register it as a reverse gate too, routed to the SAME handler:
-                // enter_wow64_64bit_from_wow64svc_thunk is bop-agnostic - it marshals the live 32-bit
-                // register file into the CONTEXT block and resumes the 64-bit TurboDispatch, never executing
-                // the thunk bytes - so the reverse transition works whichever bop code BTCpuGetBopCode
-                // hands the guest.
-                constexpr uint64_t w64svc_turbo_bop_rva = 0x6000;
-                constexpr uint64_t w64svc_turbo_bop_size = 0x10;
-                emu_ptr->register_gate_crossing(image_base + w64svc_turbo_bop_rva, w64svc_turbo_bop_size,
-                                                x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
-
-                // Real wow64.dll process init writes this same address into TEB32.WOW32Reserved (the
-                // Wow64Transition field at fs:[0xC0], undocumented name but a well-established
-                // reverse-engineered fact). sogen never runs whatever real guest code would normally
-                // populate fs:[0xC0] (this backend synthesizes the gate crossings above instead of
-                // executing wow64cpu.dll's real dispatch code), so the field stays null. Setting
-                // TEB32.WOW32Reserved alone is not enough though: every 32-bit syscall stub reaches
-                // the dispatcher via a shared indirection stub that itself does
-                // `jmp dword ptr [<ntdll32's OWN cached copy of fs:[0xC0]>]`, and that copy is read
-                // once during LdrpInitializeProcess, long before wow64cpu.dll loads and this callback
-                // ever runs - so by the time TEB32.WOW32Reserved gets set here, the (null) value is
-                // already cached and nothing re-reads the TEB. Find and write ntdll32's actual cache
-                // address directly instead (see scan_wow64_transition_cache_address's doc comment) -
-                // the same "write it directly rather than rely on guest code" approach
-                // LdrSystemDllInitBlock below already uses. Still set TEB32.WOW32Reserved on every
-                // existing thread too, in case anything else reads it directly rather than through the
-                // cache - wow64cpu.dll (and this callback) only ever loads once per process, but by the
-                // time it does, worker-factory threads may already exist with their own TEB32.
-                const auto turbo_bop_address = static_cast<std::uint32_t>(image_base + w64svc_turbo_bop_rva);
-                if (const auto cache_address = scan_wow64_transition_cache_address(*this->memory_, *this->wow64_modules_.ntdll32);
-                    cache_address.has_value())
-                {
-                    this->memory_->write_memory(*cache_address, &turbo_bop_address, sizeof(turbo_bop_address));
-                }
-
-                for (auto& t : context.threads | std::views::values)
-                {
-                    if (t.teb32.has_value())
-                    {
-                        t.teb32->access([&](TEB32& teb32_obj) { teb32_obj.WOW32Reserved = turbo_bop_address; });
-                    }
-                }
-
-                // BTCpuProcessInit also writes a standalone compatibility-mode-to-long-mode probe into
-                // its own freshly-r-x'd page: a bare `jmp far 0x33:<target>` (opcode 0xEA), which real
-                // hardware executes to verify the CPU can actually switch into 64-bit mode - a
-                // one-time sanity check unrelated to the two dispatch mechanisms above, but exactly as
-                // un-JIT-able (0xEA is undefined in 64-bit long mode). See perform_gate_crossing's
-                // decode of it (gate_crossing_kind::far_jmp_bitness_switch).
-                //
-                // Unlike the RVAs above, the probe faults at image_base+0x6d41. This is NOT the same
-                // as (mapped base)+0x7000 - image_base here
-                // (dispatch_start - turbo_dispatch_start_rva) sits a fixed 0x2bf bytes above wow64cpu.dll's
-                // real mapped base, so RVAs measured directly against the PE mapping land 0x2bf too
-                // high once added to image_base instead. The other three
-                // gates above don't have this problem because their RVAs were decoded by hand directly
-                // against image_base's own frame of reference, not the PE mapping.
-                constexpr uint64_t cpu_mode_probe_rva = 0x6d41;
-                // Exactly the far jmp's own encoding length (1-byte opcode + 4-byte offset + 2-byte
-                // selector) - NOT rounded up like the other gates above. The probe's target sits just
-                // 9 bytes past its own start (jmp far 0x33:<9 bytes ahead>), so a padded size (e.g.
-                // 0x10) would cover the landing address too: execution would re-enter this
-                // same "non-executable" gate immediately after the crossing, decode the identical bytes,
-                // and cross again forever - an infinite loop rather than the crash this gate exists to
-                // fix.
-                constexpr uint64_t cpu_mode_probe_size = 0x7;
-                emu_ptr->register_gate_crossing(image_base + cpu_mode_probe_rva, cpu_mode_probe_size,
-                                                x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch);
-            });
-
-            load_wow64_modules(emu, executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
+            load_wow64_modules(executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
                                version, logger);
             break;
 
@@ -1013,8 +822,7 @@ namespace sogen
             // created - so a genuine, non-initial DLL_THREAD_DETACH candidate can already exist by the
             // time this callback fires. Any such thread's TEB.NlsCache was set to its own private
             // placeholder (resolve_nls_cache, emulator_thread.cpp) at creation time; retarget it to the
-            // now-resolved real cache below, matching the same "worker threads may already exist"
-            // precedent already handled for TEB32.WOW32Reserved further up in this function. Its RVA is
+            // now-resolved real cache below. Its RVA is
             // specific to the exact kernelbase.dll build it was originally identified against (via
             // static analysis) - resolve_kernelbase_nls_cache_address validates it still lands on
             // writable data before trusting it, since that drifts across Windows builds. Registered only
@@ -1067,11 +875,14 @@ namespace sogen
         context.kernelbase_nls_cache_warmed = false;
     }
 
+    std::filesystem::path module_manager::module_identity(const windows_path& path)
+    {
+        return std::filesystem::path{utils::string::to_lower(path.lexically_normal().to_portable_path().u16string())};
+    }
+
     std::optional<uint64_t> module_manager::get_module_load_count_by_path(const windows_path& path)
     {
-        auto local_file = std::filesystem::weakly_canonical(std::filesystem::absolute(this->file_sys_->translate(path)));
-
-        if (auto load_count_entry = modules_load_count.find(local_file); load_count_entry != modules_load_count.end())
+        if (auto load_count_entry = modules_load_count.find(module_identity(path)); load_count_entry != modules_load_count.end())
         {
             return load_count_entry->second;
         }
@@ -1082,14 +893,40 @@ namespace sogen
     mapped_module* module_manager::map_module(windows_path file, const logger& logger, const bool is_static, bool allow_duplicate,
                                               const uint64_t relocation_base)
     {
-        auto local_file = this->file_sys_->translate(file);
-
-        if (local_file.filename() == "win32u.dll")
+        if (utils::string::to_lower(file.leaf()) == u"win32u.dll")
         {
-            return this->map_local_module(local_file, std::move(file), logger, is_static, false, relocation_base);
+            allow_duplicate = false;
         }
 
-        return this->map_local_module(local_file, std::move(file), logger, is_static, allow_duplicate, relocation_base);
+        auto identity = module_identity(file);
+
+        if (!allow_duplicate)
+        {
+            for (auto& mod : this->modules_ | std::views::values)
+            {
+                if (mod.path == identity)
+                {
+                    return &mod;
+                }
+            }
+        }
+
+        std::vector<std::byte> data{};
+        if (!this->file_sys_->read_file(file, &data) || data.empty())
+        {
+            logger.error("Failed to map module: %s does not resolve to a file\n", file.string().c_str());
+            return nullptr;
+        }
+
+        auto detection_result = pe_architecture_detector::detect_from_data(data);
+
+        return map_module_core(
+            detection_result,
+            [&]() {
+                auto& strategy = strategy_factory_.get_strategy(detection_result.architecture);
+                return strategy.map_from_data(*this->memory_, data, std::move(identity), std::move(file), relocation_base);
+            },
+            logger, is_static);
     }
 
     mapped_module* module_manager::map_module_or_throw(const windows_path& file, const logger& logger, const bool is_static,
@@ -1102,33 +939,6 @@ namespace sogen
         }
 
         return mapped_module;
-    }
-
-    mapped_module* module_manager::map_local_module(const std::filesystem::path& file, windows_path module_path, const logger& logger,
-                                                    const bool is_static, bool allow_duplicate, const uint64_t relocation_base)
-    {
-        auto local_file = weakly_canonical(absolute(file));
-
-        if (!allow_duplicate)
-        {
-            for (auto& mod : this->modules_ | std::views::values)
-            {
-                if (mod.path == local_file)
-                {
-                    return &mod;
-                }
-            }
-        }
-
-        auto detection_result = pe_architecture_detector::detect_from_file(local_file);
-
-        return map_module_core(
-            detection_result,
-            [&]() {
-                auto& strategy = strategy_factory_.get_strategy(detection_result.architecture);
-                return strategy.map_from_file(*this->memory_, std::move(local_file), std::move(module_path), relocation_base);
-            },
-            logger, is_static);
     }
 
     mapped_module* module_manager::map_memory_module(uint64_t base_address, uint64_t image_size, windows_path module_path,
@@ -1158,6 +968,7 @@ namespace sogen
 
     void module_manager::serialize(utils::buffer_serializer& buffer) const
     {
+        buffer.write(this->native_architecture_);
         buffer.write_map(this->modules_);
         buffer.write_map(this->modules_load_count);
 
@@ -1179,6 +990,10 @@ namespace sogen
 
     void module_manager::deserialize(utils::buffer_deserializer& buffer)
     {
+        if (buffer.read<windows_guest_architecture>() != this->native_architecture_)
+        {
+            throw std::runtime_error("Module snapshot architecture does not match the guest");
+        }
         buffer.read_map(this->modules_);
         buffer.read_map(this->modules_load_count);
         this->last_module_cache_ = this->modules_.end();

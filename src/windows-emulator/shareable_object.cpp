@@ -3,6 +3,7 @@
 #include "windows_emulator.hpp"
 #include "cross_process.hpp"
 #include "devices/named_pipe.hpp"
+#include "memory_utils.hpp"
 
 namespace sogen
 {
@@ -56,6 +57,58 @@ namespace sogen
 
             object.state.adopt(process.shared_arena, static_cast<uint32_t>(description.arena_slot));
         }
+
+        std::shared_ptr<shared_backing> get_shareable_section_memory(windows_emulator& win_emu, section_object& object)
+        {
+            auto& views = win_emu.process.section_views;
+            if (object.view_storage_id == 0 && object.backing_address == 0 && object.allocation_attributes != SEC_RESERVE &&
+                win_emu.memory.can_alias_host_memory_anywhere())
+            {
+                object.view_storage_id = views.create_storage(static_cast<size_t>(page_align_up(object.maximum_size)));
+            }
+
+            return object.view_storage_id != 0 ? views.storage_memory(object.view_storage_id) : nullptr;
+        }
+
+        std::vector<std::byte> read_guest_section_backing(const windows_emulator& win_emu, const section_object& object)
+        {
+            constexpr size_t page_size = 0x1000;
+            std::vector<std::byte> content(static_cast<size_t>(page_align_up(object.maximum_size)));
+            for (size_t offset = 0; offset < content.size(); offset += page_size)
+            {
+                if (!win_emu.memory.try_read_memory(object.backing_address + offset, content.data() + offset, page_size))
+                {
+                    std::fill_n(content.data() + offset, page_size, std::byte{0});
+                }
+            }
+
+            return content;
+        }
+
+        NTSTATUS place_section_content(windows_emulator& win_emu, section_object& object, std::vector<std::byte> content)
+        {
+            if (content.empty())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            if (win_emu.memory.can_alias_host_memory_anywhere())
+            {
+                object.view_storage_id = win_emu.process.section_views.adopt_storage(shared_backing::create_from_content(content));
+                return STATUS_SUCCESS;
+            }
+
+            const auto protection = map_nt_to_emulator_protection(object.section_page_protection);
+            object.backing_address = win_emu.memory.allocate_memory(
+                content.size(), protection, false, 0, memory_region_kind::pagefile_section_view, win_emu.highest_user_address());
+            if (!object.backing_address)
+            {
+                return STATUS_NO_MEMORY;
+            }
+
+            win_emu.memory.write_memory(object.backing_address, content.data(), content.size());
+            return STATUS_SUCCESS;
+        }
     }
 
     bool is_shareable_object_type(const handle_types::type type)
@@ -65,8 +118,9 @@ namespace sogen
                type == handle_types::process || type == handle_types::token;
     }
 
-    NTSTATUS describe_shareable_object(process_context& process, const handle resolved_handle, shared_object_description& description)
+    NTSTATUS describe_shareable_object(windows_emulator& win_emu, const handle resolved_handle, shared_object_description& description)
     {
+        auto& process = win_emu.process;
         description.type = static_cast<handle_types::type>(resolved_handle.value.type);
 
         switch (description.type)
@@ -78,16 +132,23 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            auto& backing = source->object->ensure_backing(static_cast<size_t>(page_align_up(source->object->maximum_size)));
+            const auto memory = get_shareable_section_memory(win_emu, *source->object);
 
             utils::buffer_serializer buffer{};
             source->serialize_object(buffer);
             description.object_bytes = buffer.get_buffer();
             description.granted_access = source->granted_access;
-            description.backing = source->object->backing;
-            if (!backing.is_shared())
+            if (memory && memory->is_shared())
             {
-                description.fallback_content = backing.content();
+                description.backing = memory;
+            }
+            else if (memory)
+            {
+                description.fallback_content = memory->content();
+            }
+            else if (source->object->backing_address != 0)
+            {
+                description.fallback_content = read_guest_section_backing(win_emu, *source->object);
             }
             return STATUS_SUCCESS;
         }
@@ -162,24 +223,8 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            // A named pipe end is routed by name and connection id, so the receiver only needs an instance
-            // with the same identity and parameters; it takes over the end the sender had.
             utils::buffer_serializer buffer{};
-            buffer.write(pipe->name);
-            buffer.write(pipe->is_server_instance);
-            buffer.write(pipe->connection_id);
-            buffer.write(pipe->accepting_connections);
-            buffer.write(pipe->is_synchronous_handle);
-            buffer.write(pipe->access);
-            buffer.write(pipe->pipe_type);
-            buffer.write(pipe->read_mode);
-            buffer.write(pipe->completion_mode);
-            buffer.write(pipe->max_instances);
-            buffer.write(pipe->inbound_quota);
-            buffer.write(pipe->outbound_quota);
-            buffer.write(pipe->default_timeout.QuadPart);
-            buffer.write(pipe->client_connected);
-            buffer.write_vector(std::vector<std::string>(pipe->write_queue.begin(), pipe->write_queue.end()));
+            export_named_pipe_end(process, *pipe).serialize(buffer);
             description.object_bytes = buffer.get_buffer();
             return STATUS_SUCCESS;
         }
@@ -200,8 +245,20 @@ namespace sogen
             section s{};
             s.deserialize_object(buffer);
             s.granted_access = description.granted_access;
-            s.object->backing =
-                description.backing ? description.backing : shared_backing::create_from_content(description.fallback_content);
+            s->identity = 0;
+            s->backing_address = 0;
+            s->mapped_view_count = 0;
+            s->view_storage_id = 0;
+
+            if (description.backing)
+            {
+                s->view_storage_id = process.section_views.adopt_storage(description.backing);
+            }
+            else if (const auto status = place_section_content(win_emu, *s.object, description.fallback_content); !NT_SUCCESS(status))
+            {
+                return status;
+            }
+
             adopted_handle = process.sections.store(std::move(s));
             return STATUS_SUCCESS;
         }
@@ -279,25 +336,9 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            buffer.read(pipe->name);
-            buffer.read(pipe->is_server_instance);
-            buffer.read(pipe->connection_id);
-            buffer.read(pipe->accepting_connections);
-            buffer.read(pipe->is_synchronous_handle);
-            buffer.read(pipe->access);
-            buffer.read(pipe->pipe_type);
-            buffer.read(pipe->read_mode);
-            buffer.read(pipe->completion_mode);
-            buffer.read(pipe->max_instances);
-            buffer.read(pipe->inbound_quota);
-            buffer.read(pipe->outbound_quota);
-            buffer.read(pipe->default_timeout.QuadPart);
-            buffer.read(pipe->client_connected);
-            pipe->publish_server_name(process);
-
-            std::vector<std::string> queued{};
-            buffer.read_vector(queued);
-            pipe->write_queue.assign(queued.begin(), queued.end());
+            named_pipe_end_transfer transfer{};
+            transfer.deserialize(buffer);
+            import_named_pipe_end(process, *pipe, transfer);
 
             adopted_handle = process.devices.store(std::move(container));
             return STATUS_SUCCESS;

@@ -12,6 +12,7 @@ namespace sogen
     {
       public:
         static constexpr uint32_t MAX_HANDLES = 0xFFFF;
+        static constexpr uint32_t MAX_HANDLE_INDICES = MAX_HANDLES >> 2;
         static constexpr size_t CLIENT_MESSAGE_BITS_SIZE = 0xC8;
         static constexpr size_t IME_MESSAGE_BITS_SIZE = 0x400;
         static constexpr size_t WND_MESSAGE_BITS_COUNT = FNID_ARRAY_SIZE + 2;
@@ -32,7 +33,7 @@ namespace sogen
             this->is_wow64_process_ = is_wow64_process;
             this->handle_namespace_ = handle_namespace % NAMESPACE_COUNT;
 
-            used_indices_.resize(MAX_HANDLES, false);
+            used_indices_.resize(MAX_HANDLE_INDICES, false);
             next_free_index_ = 1;
 
             const auto server_info_size = static_cast<size_t>(page_align_up(sizeof(USER_SERVERINFO)));
@@ -46,6 +47,9 @@ namespace sogen
                 srv.cHandleEntries = MAX_HANDLES - 1; //
                 srv.defaultFontHeightScale = -11;
                 srv.defaultFontWidthScale = 0;
+                srv.dpi96DialogBaseUnitWidth = 8;
+                srv.dpi96DialogBaseUnitHeight = 16;
+                srv.asyncKeyStateGeneration = 1;
                 srv.systemDpi = 96;
                 srv.systemMetrics[0] = 1920;  // SM_CXSCREEN
                 srv.systemMetrics[1] = 1080;  // SM_CYSCREEN
@@ -54,14 +58,31 @@ namespace sogen
                 srv.systemMetrics[10] = 17;   // SM_CXHTHUMB
                 srv.systemMetrics[11] = 32;   // SM_CXICON
                 srv.systemMetrics[12] = 32;   // SM_CYICON
+                srv.systemMetrics[13] = 32;   // SM_CXCURSOR
+                srv.systemMetrics[14] = 32;   // SM_CYCURSOR
+                srv.systemMetrics[15] = 19;   // SM_CYMENU
                 srv.systemMetrics[19] = 1;    // SM_MOUSEPRESENT
                 srv.systemMetrics[20] = 17;   // SM_CYVSCROLL
                 srv.systemMetrics[21] = 17;   // SM_CXHSCROLL
                 srv.systemMetrics[43] = 3;    // SM_CMOUSEBUTTONS
+                srv.systemMetrics[49] = 16;   // SM_CXSMICON
+                srv.systemMetrics[50] = 16;   // SM_CYSMICON
                 srv.systemMetrics[75] = 1;    // SM_MOUSEWHEELPRESENT
                 srv.systemMetrics[78] = 1920; // SM_CXVIRTUALSCREEN
                 srv.systemMetrics[79] = 1080; // SM_CYVIRTUALSCREEN
                 srv.systemMetrics[91] = 1;    // SM_MOUSEHORIZONTALWHEELPRESENT
+
+                // user32 reads the DPI-scaled metrics from a cache indexed by slot rather than by metric
+                // (GetDpiDepSysMetCacheMetricSlot); the first 30 slots hold the values for the system DPI.
+                constexpr std::array<std::pair<size_t, size_t>, 30> dpi_dependent_metric_slots{{
+                    {2, 0},   {3, 1},   {4, 2},   {9, 3},   {10, 4},  {11, 5},  {12, 6},  {13, 7},  {14, 8},  {15, 9},
+                    {20, 10}, {21, 11}, {30, 12}, {31, 13}, {32, 14}, {33, 15}, {34, 16}, {35, 17}, {38, 18}, {39, 19},
+                    {49, 20}, {50, 21}, {51, 22}, {52, 23}, {53, 24}, {54, 25}, {55, 26}, {71, 27}, {72, 28}, {92, 29},
+                }};
+                for (const auto& [metric, slot] : dpi_dependent_metric_slots)
+                {
+                    srv.dpiDependentSystemMetrics[slot] = srv.systemMetrics[metric];
+                }
             });
 
             const auto handle_table_size = static_cast<size_t>(page_align_up(sizeof(USER_HANDLEENTRY) * MAX_HANDLES));
@@ -191,11 +212,11 @@ namespace sogen
             return {*memory_, handle_table_addr_};
         }
 
-        // Map an internal handle id to the aheList slot the guest computes from the HANDLE's low 16 bits.
-        // Handles are 4-aligned (id at bit 2), so the slot is id << 2; keep it within the table bounds.
-        static uint32_t handle_index_to_ahe_slot(uint32_t index)
+        // user32 indexes the shared aheList by the HANDLE's low 16 bits, not by our internal id.
+        // Handles are 4-aligned, so the id sits at bit 2 and the slot the guest computes is id << 2.
+        static constexpr uint32_t handle_index_to_ahe_slot(const uint32_t index)
         {
-            return static_cast<uint32_t>(make_handle(index, handle_types::window, false).bits & 0xFFFFu);
+            return index << 2;
         }
 
         emulator_object<USER_DISPINFO> get_display_info() const
@@ -261,8 +282,9 @@ namespace sogen
         // The handle entry's pOwner holds the owning thread. user32's client-side GetWindowThreadProcessId
         // returns 0 outright when pOwner is 0, and short-circuits to the current thread id when pOwner equals
         // it, so windows must record their owning thread here for that API (DirectSound relies on it).
-        void set_owner(const uint32_t index, const uint64_t owner)
+        void set_owner(uint32_t index, const uint64_t owner)
         {
+            index &= (1u << INDEX_BITS) - 1;
             const emulator_object<USER_HANDLEENTRY> handle_table_obj(*memory_, handle_table_addr_);
             handle_table_obj.access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; }, handle_index_to_ahe_slot(index));
         }
@@ -429,10 +451,10 @@ namespace sogen
 
         uint32_t find_free_index()
         {
-            for (uint32_t attempts = 0; attempts < MAX_HANDLES - 1; ++attempts)
+            for (uint32_t attempts = 0; attempts < MAX_HANDLE_INDICES - 1; ++attempts)
             {
                 const auto index = next_free_index_;
-                next_free_index_ = next_free_index_ + 1 < MAX_HANDLES ? next_free_index_ + 1 : 1;
+                next_free_index_ = next_free_index_ + 1 < MAX_HANDLE_INDICES ? next_free_index_ + 1 : 1;
 
                 // The aheList slot is id << 2; ids whose slot would fall outside the table are skipped (checked
                 // before the 16-bit mask so it can't wrap into a live slot), as are slots mirroring a foreign window.
@@ -505,6 +527,7 @@ namespace sogen
       public:
         using index_type = uint32_t;
         using value_map = std::map<index_type, T>;
+        using iterator = value_map::iterator;
 
         explicit user_handle_store(user_handle_table& table)
             : table_(&table)
@@ -626,7 +649,7 @@ namespace sogen
             return h;
         }
 
-        std::pair<typename value_map::iterator, bool> erase(const value_map::iterator& entry)
+        std::pair<iterator, bool> erase(const iterator& entry)
         {
             if (this->block_mutation_)
             {
@@ -762,7 +785,7 @@ namespace sogen
             return this->store_.begin();
         }
 
-        value_map::iterator end()
+        iterator end()
         {
             return this->store_.end();
         }

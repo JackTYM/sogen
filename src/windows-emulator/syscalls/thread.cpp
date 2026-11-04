@@ -4,6 +4,9 @@
 #include "../syscall_utils.hpp"
 #include "../cross_process.hpp"
 #include "../process_control_channel.hpp"
+#include "../thread_context.hpp"
+#include "../exception_dispatch.hpp"
+#include "segment_utils.hpp"
 
 #include <algorithm>
 #include <utils/finally.hpp>
@@ -29,6 +32,144 @@ namespace sogen
             // thread, which this codebase has no per-thread model for either. PROCESS_SET_INFORMATION
             // is the closest process-level right.
             constexpr ACCESS_MASK PROCESS_SET_INFORMATION = 0x0200;
+
+            // The child answers with its whole context; the caller's buffer keeps the ContextFlags it asked with.
+            NTSTATUS get_child_thread_context(const syscall_context& c, const managed_process_thread& thread, const uint64_t context,
+                                              const bool wow64)
+            {
+                auto* manager = c.win_emu.processes();
+                if (!manager)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const auto result = manager->get_thread_context(thread.process, thread.thread_id, wow64);
+                if (!result || result.context.size() < sizeof(DWORD) * 13)
+                {
+                    return STATUS_UNSUCCESSFUL;
+                }
+
+                size_t flags_offset = offsetof(CONTEXT64, ContextFlags);
+                if (wow64)
+                {
+                    flags_offset = offsetof(WOW64_CONTEXT, ContextFlags);
+                }
+                else if (dynamic_cast<arm64_cpu*>(&c.emu))
+                {
+                    flags_offset = offsetof(arm64_context, ContextFlags);
+                }
+
+                const auto flags = c.emu.read_memory<DWORD>(context + flags_offset);
+                c.emu.write_memory(context, result.context.data(), result.context.size());
+                c.emu.write_memory(context + flags_offset, flags);
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS set_child_thread_context(const syscall_context& c, const managed_process_thread& thread, const uint64_t context,
+                                              const bool wow64)
+            {
+                auto* manager = c.win_emu.processes();
+                if (!manager)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                size_t size = sizeof(CONTEXT64);
+                if (wow64)
+                {
+                    size = sizeof(WOW64_CONTEXT);
+                }
+                else if (dynamic_cast<arm64_cpu*>(&c.emu))
+                {
+                    size = sizeof(arm64_context);
+                }
+
+                std::vector<uint8_t> bytes(size);
+                c.emu.read_memory(context, bytes.data(), bytes.size());
+                return manager->set_thread_context(thread.process, thread.thread_id, bytes, wow64) == process_error::none
+                           ? STATUS_SUCCESS
+                           : STATUS_UNSUCCESSFUL;
+            }
+
+            // Takes the parts of new_wow64_context that its ContextFlags select, as SetThreadContext does.
+            void merge_wow64_context(WOW64_CONTEXT& merged_context, const WOW64_CONTEXT& new_wow64_context)
+            {
+                merged_context.ContextFlags = new_wow64_context.ContextFlags;
+
+                if ((new_wow64_context.ContextFlags & CONTEXT_DEBUG_REGISTERS_32) == CONTEXT_DEBUG_REGISTERS_32)
+                {
+                    merged_context.Dr0 = new_wow64_context.Dr0;
+                    merged_context.Dr1 = new_wow64_context.Dr1;
+                    merged_context.Dr2 = new_wow64_context.Dr2;
+                    merged_context.Dr3 = new_wow64_context.Dr3;
+                    merged_context.Dr6 = new_wow64_context.Dr6;
+                    merged_context.Dr7 = new_wow64_context.Dr7;
+                }
+
+                if ((new_wow64_context.ContextFlags & CONTEXT_FLOATING_POINT_32) == CONTEXT_FLOATING_POINT_32 &&
+                    (new_wow64_context.FloatSave.ControlWord & 0x3F) == 0x3F)
+                {
+                    merged_context.FloatSave = new_wow64_context.FloatSave;
+                }
+
+                if ((new_wow64_context.ContextFlags & CONTEXT_SEGMENTS_32) == CONTEXT_SEGMENTS_32)
+                {
+                    merged_context.SegGs = new_wow64_context.SegGs;
+                    merged_context.SegFs = new_wow64_context.SegFs;
+                    merged_context.SegEs = new_wow64_context.SegEs;
+                    merged_context.SegDs = new_wow64_context.SegDs;
+                }
+
+                if ((new_wow64_context.ContextFlags & CONTEXT_INTEGER_32) == CONTEXT_INTEGER_32)
+                {
+                    merged_context.Edi = new_wow64_context.Edi;
+                    merged_context.Esi = new_wow64_context.Esi;
+                    merged_context.Ebx = new_wow64_context.Ebx;
+                    merged_context.Edx = new_wow64_context.Edx;
+                    merged_context.Ecx = new_wow64_context.Ecx;
+                    merged_context.Eax = new_wow64_context.Eax;
+                }
+
+                if ((new_wow64_context.ContextFlags & CONTEXT_CONTROL_32) == CONTEXT_CONTROL_32)
+                {
+                    merged_context.Ebp = new_wow64_context.Ebp;
+                    merged_context.Eip = new_wow64_context.Eip;
+                    merged_context.SegCs = new_wow64_context.SegCs;
+                    merged_context.EFlags = new_wow64_context.EFlags;
+                    merged_context.Esp = new_wow64_context.Esp;
+                    merged_context.SegSs = new_wow64_context.SegSs;
+                }
+
+                if ((new_wow64_context.ContextFlags & CONTEXT_EXTENDED_REGISTERS_32) == CONTEXT_EXTENDED_REGISTERS_32)
+                {
+                    const uint16_t incoming_ext_cw = static_cast<uint16_t>(new_wow64_context.ExtendedRegisters[0]) |
+                                                     (static_cast<uint16_t>(new_wow64_context.ExtendedRegisters[1]) << 8);
+                    if ((incoming_ext_cw & 0x3F) == 0x3F)
+                    {
+                        memcpy(merged_context.ExtendedRegisters, new_wow64_context.ExtendedRegisters,
+                               sizeof(merged_context.ExtendedRegisters));
+                    }
+                }
+            }
+
+            void set_thread_impersonation_token(emulator_thread& thread, const handle token)
+            {
+                thread.impersonation_token = token;
+                if (thread.teb64)
+                {
+                    thread.teb64->access([&](TEB64& teb) { teb.IsImpersonating = token != 0; });
+                }
+                if (thread.teb32)
+                {
+                    thread.teb32->access([&](TEB32& teb) { teb.IsImpersonating = token != 0; });
+                }
+            }
+
+            NTSTATUS get_unresolved_handle_status(const handle h, const handle_types::type expected_type)
+            {
+                return h.value.type == expected_type || h.value.type == handle_types::reserved ? STATUS_INVALID_HANDLE
+                                                                                               : STATUS_OBJECT_TYPE_MISMATCH;
+            }
         }
 
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, const handle thread_handle, const THREADINFOCLASS info_class,
@@ -56,6 +197,19 @@ namespace sogen
                 info.write(DUMMY_IMPERSONATION_TOKEN);
 
                 return STATUS_SUCCESS;
+            }
+
+            if (const auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                if (info_class != ThreadWow64Context)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+                if (thread_information_length != sizeof(WOW64_CONTEXT))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                return set_child_thread_context(c, *managed, thread_information, true);
             }
 
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
@@ -88,67 +242,25 @@ namespace sogen
                 const emulator_object<WOW64_CONTEXT> context_obj{c.emu, thread_information};
                 const auto new_wow64_context = context_obj.read();
 
+                const bool sets_debug_registers =
+                    (new_wow64_context.ContextFlags & CONTEXT_DEBUG_REGISTERS_32) == CONTEXT_DEBUG_REGISTERS_32;
+                const bool needs_switch = sets_debug_registers && thread != c.vcpu.active_thread;
+                if (needs_switch)
+                {
+                    c.vcpu.active_thread->save(c.emu);
+                    if (!c.win_emu.wait_for_thread_registers(c.vcpu, *thread))
+                    {
+                        c.vcpu.active_thread->restore(c.emu, c.proc.gdt_base);
+                        c.retrigger_syscall = true;
+                        return STATUS_UNSUCCESSFUL;
+                    }
+                }
+
                 // Update the persistent context for future queries
                 thread->wow64_cpu_reserved->access([&](WOW64_CPURESERVED& ctx) {
                     ctx.Flags |= WOW64_CPURESERVED_FLAG_RESET_STATE;
                     auto merged_context = ctx.Context;
-                    merged_context.ContextFlags = new_wow64_context.ContextFlags;
-
-                    if ((new_wow64_context.ContextFlags & CONTEXT_DEBUG_REGISTERS_32) == CONTEXT_DEBUG_REGISTERS_32)
-                    {
-                        merged_context.Dr0 = new_wow64_context.Dr0;
-                        merged_context.Dr1 = new_wow64_context.Dr1;
-                        merged_context.Dr2 = new_wow64_context.Dr2;
-                        merged_context.Dr3 = new_wow64_context.Dr3;
-                        merged_context.Dr6 = new_wow64_context.Dr6;
-                        merged_context.Dr7 = new_wow64_context.Dr7;
-                    }
-
-                    if ((new_wow64_context.ContextFlags & CONTEXT_FLOATING_POINT_32) == CONTEXT_FLOATING_POINT_32 &&
-                        (new_wow64_context.FloatSave.ControlWord & 0x3F) == 0x3F)
-                    {
-                        merged_context.FloatSave = new_wow64_context.FloatSave;
-                    }
-
-                    if ((new_wow64_context.ContextFlags & CONTEXT_SEGMENTS_32) == CONTEXT_SEGMENTS_32)
-                    {
-                        merged_context.SegGs = new_wow64_context.SegGs;
-                        merged_context.SegFs = new_wow64_context.SegFs;
-                        merged_context.SegEs = new_wow64_context.SegEs;
-                        merged_context.SegDs = new_wow64_context.SegDs;
-                    }
-
-                    if ((new_wow64_context.ContextFlags & CONTEXT_INTEGER_32) == CONTEXT_INTEGER_32)
-                    {
-                        merged_context.Edi = new_wow64_context.Edi;
-                        merged_context.Esi = new_wow64_context.Esi;
-                        merged_context.Ebx = new_wow64_context.Ebx;
-                        merged_context.Edx = new_wow64_context.Edx;
-                        merged_context.Ecx = new_wow64_context.Ecx;
-                        merged_context.Eax = new_wow64_context.Eax;
-                    }
-
-                    if ((new_wow64_context.ContextFlags & CONTEXT_CONTROL_32) == CONTEXT_CONTROL_32)
-                    {
-                        merged_context.Ebp = new_wow64_context.Ebp;
-                        merged_context.Eip = new_wow64_context.Eip;
-                        merged_context.SegCs = new_wow64_context.SegCs;
-                        merged_context.EFlags = new_wow64_context.EFlags;
-                        merged_context.Esp = new_wow64_context.Esp;
-                        merged_context.SegSs = new_wow64_context.SegSs;
-                    }
-
-                    if ((new_wow64_context.ContextFlags & CONTEXT_EXTENDED_REGISTERS_32) == CONTEXT_EXTENDED_REGISTERS_32)
-                    {
-                        const uint16_t incoming_ext_cw = static_cast<uint16_t>(new_wow64_context.ExtendedRegisters[0]) |
-                                                         (static_cast<uint16_t>(new_wow64_context.ExtendedRegisters[1]) << 8);
-                        if ((incoming_ext_cw & 0x3F) == 0x3F)
-                        {
-                            memcpy(merged_context.ExtendedRegisters, new_wow64_context.ExtendedRegisters,
-                                   sizeof(merged_context.ExtendedRegisters));
-                        }
-                    }
-
+                    merge_wow64_context(merged_context, new_wow64_context);
                     ctx.Context = merged_context;
                     // c.win_emu.callbacks.on_suspicious_activity("WOW64 CONTEXT");
                 });
@@ -157,37 +269,52 @@ namespace sogen
                 // WOW64_CPURESERVED block that wow64cpu reloads on resume. They must be programmed into
                 // the VP directly, otherwise a 32-bit hardware breakpoint armed via the thread context
                 // (e.g. t6r's CEG single-step trick) never arms and never fires.
-                if ((new_wow64_context.ContextFlags & CONTEXT_DEBUG_REGISTERS_32) == CONTEXT_DEBUG_REGISTERS_32)
+                if (sets_debug_registers)
                 {
-                    const bool needs_switch = thread != c.vcpu.active_thread;
                     if (needs_switch)
                     {
-                        c.vcpu.active_thread->save(c.emu);
-                        thread->restore(c.emu);
+                        thread->restore(c.emu, c.proc.gdt_base);
                     }
 
-                    c.emu.reg(x86_register::dr0, static_cast<uint64_t>(new_wow64_context.Dr0));
-                    c.emu.reg(x86_register::dr1, static_cast<uint64_t>(new_wow64_context.Dr1));
-                    c.emu.reg(x86_register::dr2, static_cast<uint64_t>(new_wow64_context.Dr2));
-                    c.emu.reg(x86_register::dr3, static_cast<uint64_t>(new_wow64_context.Dr3));
-                    c.emu.reg(x86_register::dr6, static_cast<uint64_t>(new_wow64_context.Dr6));
-                    c.emu.reg(x86_register::dr7, static_cast<uint64_t>(new_wow64_context.Dr7));
+                    c.x64_cpu().reg(x86_register::dr0, static_cast<uint64_t>(new_wow64_context.Dr0));
+                    c.x64_cpu().reg(x86_register::dr1, static_cast<uint64_t>(new_wow64_context.Dr1));
+                    c.x64_cpu().reg(x86_register::dr2, static_cast<uint64_t>(new_wow64_context.Dr2));
+                    c.x64_cpu().reg(x86_register::dr3, static_cast<uint64_t>(new_wow64_context.Dr3));
+                    c.x64_cpu().reg(x86_register::dr6, static_cast<uint64_t>(new_wow64_context.Dr6));
+                    c.x64_cpu().reg(x86_register::dr7, static_cast<uint64_t>(new_wow64_context.Dr7));
 
                     if (needs_switch)
                     {
                         thread->save(c.emu);
-                        c.vcpu.active_thread->restore(c.emu);
+                        c.vcpu.active_thread->restore(c.emu, c.proc.gdt_base);
                     }
                 }
 
                 return STATUS_SUCCESS;
             }
 
-            if (info_class == ThreadSchedulerSharedDataSlot || info_class == ThreadBasePriority || info_class == ThreadAffinityMask ||
-                info_class == ThreadPriorityBoost || info_class == ThreadEnableAlignmentFaultFixup ||
-                info_class == ThreadActualBasePriority || info_class == ThreadPagePriority || info_class == ThreadIoPriority ||
-                info_class == ThreadPowerThrottlingState || info_class == ThreadDynamicCodePolicyInfo)
+            if (info_class == ThreadSchedulerSharedDataSlot || info_class == ThreadBasePriority || info_class == ThreadActualBasePriority ||
+                info_class == ThreadAffinityMask || info_class == ThreadPriorityBoost || info_class == ThreadEnableAlignmentFaultFixup ||
+                info_class == ThreadDynamicCodePolicyInfo)
             {
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadPowerThrottlingState)
+            {
+                // THREAD_POWER_THROTTLING_STATE: Version, ControlMask, StateMask. Throttling is only a scheduling hint.
+                constexpr ULONG state_size = 3 * sizeof(ULONG);
+                if (thread_information_length != state_size)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                constexpr ULONG current_version = 1;
+                if (emulator_object<ULONG>{c.emu, thread_information}.read() != current_version)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
                 return STATUS_SUCCESS;
             }
 
@@ -195,7 +322,7 @@ namespace sogen
             {
                 BOOLEAN hide = true;
 
-                if (thread_information != 0 && thread_information % 4 != 0)
+                if (thread_information_length != 0 && thread_information != 0 && thread_information % 4 != 0)
                 {
                     return STATUS_DATATYPE_MISALIGNMENT;
                 }
@@ -238,11 +365,17 @@ namespace sogen
             {
                 if (thread_information_length != sizeof(handle))
                 {
-                    return STATUS_BUFFER_OVERFLOW;
+                    return STATUS_INFO_LENGTH_MISMATCH;
                 }
 
                 const emulator_object<handle> info{c.emu, thread_information};
-                info.write(DUMMY_IMPERSONATION_TOKEN);
+                const auto token = info.read();
+                if (token != 0 && token != DUMMY_IMPERSONATION_TOKEN && token != ANONYMOUS_IMPERSONATION_TOKEN &&
+                    c.proc.tokens.get(token) == nullptr)
+                {
+                    return token == CURRENT_PROCESS_TOKEN ? STATUS_BAD_TOKEN_TYPE : STATUS_INVALID_HANDLE;
+                }
+                set_thread_impersonation_token(*thread, token);
 
                 return STATUS_SUCCESS;
             }
@@ -301,15 +434,119 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadIoPriority)
+            {
+                if (thread_information_length != sizeof(ULONG))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                // IO_PRIORITY_HINT stops at IoPriorityCritical.
+                const auto priority = emulator_object<ULONG>{c.emu, thread_information}.read();
+                if (priority > 4)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                thread->io_priority = priority;
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadPagePriority)
+            {
+                if (thread_information_length != sizeof(ULONG))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadIdealProcessor)
+            {
+                if (thread_information_length != sizeof(ULONG))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                // MAXIMUM_PROCESSORS leaves the ideal processor as it is. The previous one is returned as the status.
+                constexpr ULONG maximum_processors = 64;
+                const auto processor = c.emu.read_memory<ULONG>(thread_information);
+                const auto processor_count = c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
+                if (processor != maximum_processors && processor >= processor_count)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto previous = thread->ideal_processor;
+                if (processor != maximum_processors)
+                {
+                    thread->ideal_processor = processor;
+                }
+
+                return static_cast<NTSTATUS>(previous);
+            }
+
             c.win_emu.log.error("Unsupported thread set info class: %X\n", info_class);
-            c.emu.stop();
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtQueryInformationThread(const syscall_context& c, const handle thread_handle, const uint32_t info_class,
                                                  const uint64_t thread_information, const uint32_t thread_information_length,
                                                  const emulator_object<uint32_t> return_length)
         {
+            if (const auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                if (info_class == ThreadWow64Context)
+                {
+                    return_length.write_if_valid(static_cast<uint32_t>(sizeof(WOW64_CONTEXT)));
+                    if (thread_information_length < sizeof(WOW64_CONTEXT))
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+                    return get_child_thread_context(c, *managed, thread_information, true);
+                }
+
+                if (info_class != ThreadBasicInformation || !c.win_emu.processes())
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                if (return_length)
+                {
+                    return_length.write(sizeof(THREAD_BASIC_INFORMATION64));
+                }
+                if (thread_information_length < sizeof(THREAD_BASIC_INFORMATION64))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                const auto status = c.win_emu.processes()->exit_status(managed->process);
+                if (!status)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                NTSTATUS exit_status = STATUS_PENDING;
+                if (status.status)
+                {
+                    exit_status = status.status->kind == process_exit_kind::runtime_failure ? STATUS_UNSUCCESSFUL
+                                                                                            : static_cast<NTSTATUS>(status.status->code);
+                }
+
+                const auto teb =
+                    exit_status == STATUS_PENDING ? c.win_emu.processes()->thread_information(managed->process, managed->thread_id).teb : 0;
+
+                const emulator_object<THREAD_BASIC_INFORMATION64> info{c.emu, thread_information};
+                info.access([&](THREAD_BASIC_INFORMATION64& value) {
+                    value = {};
+                    value.ExitStatus = exit_status;
+                    value.TebBaseAddress = teb;
+                    value.ClientId = {.UniqueProcess = managed->process_id, .UniqueThread = managed->thread_id};
+                });
+                return STATUS_SUCCESS;
+            }
+
             const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
@@ -318,6 +555,26 @@ namespace sogen
             }
 
             emulator_thread& cur_emulator_thread = c.thread();
+
+            if (info_class == ThreadIsIoPending)
+            {
+                if (thread_information_length != sizeof(ULONG))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                if (thread_information % alignof(ULONG) != 0)
+                {
+                    return STATUS_DATATYPE_MISALIGNMENT;
+                }
+                const auto pending = std::ranges::any_of(c.proc.devices | std::views::values,
+                                                         [thread](const auto& device) { return device.has_pending_io(thread->id); });
+                const emulator_object<ULONG> info{c.emu, thread_information};
+                if (!info.try_write(pending) || (return_length && !return_length.try_write(sizeof(ULONG))))
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                return STATUS_SUCCESS;
+            }
 
             if (info_class == ThreadWow64Context)
             {
@@ -408,35 +665,6 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (info_class == ThreadNameInformation)
-            {
-                const auto string_length = thread->name.size() * sizeof(char16_t);
-                const auto required_length = sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>) + string_length + sizeof(char16_t);
-
-                if (return_length)
-                {
-                    return_length.write(static_cast<uint32_t>(required_length));
-                }
-
-                if (thread_information_length < required_length)
-                {
-                    return STATUS_BUFFER_TOO_SMALL;
-                }
-
-                const auto buffer = thread_information + sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>);
-                c.emu.write_memory(buffer, thread->name.c_str(), string_length + sizeof(char16_t));
-                emulator_object<THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>>{c.emu, thread_information}.write({
-                    .ThreadName =
-                        {
-                            .Length = static_cast<USHORT>(string_length),
-                            .MaximumLength = static_cast<USHORT>(string_length + sizeof(char16_t)),
-                            .Buffer = buffer,
-                        },
-                });
-
-                return STATUS_SUCCESS;
-            }
-
             if (info_class == ThreadBasicInformation)
             {
                 // Same bitness ambiguity as ThreadTebInformation above: a 32-bit WOW64 caller
@@ -507,24 +735,6 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (info_class == ThreadIsIoPending)
-            {
-                if (return_length)
-                {
-                    return_length.write(sizeof(ULONG));
-                }
-
-                if (thread_information_length < sizeof(ULONG))
-                {
-                    return STATUS_BUFFER_OVERFLOW;
-                }
-
-                const emulator_object<ULONG> info{c.emu, thread_information};
-                info.write(FALSE);
-
-                return STATUS_SUCCESS;
-            }
-
             if (info_class == ThreadQuerySetWin32StartAddress)
             {
                 if (return_length)
@@ -561,9 +771,45 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadCycleTime)
+            {
+                if (return_length)
+                {
+                    return_length.write(sizeof(THREAD_CYCLE_TIME_INFORMATION));
+                }
+
+                if (thread_information_length != sizeof(THREAD_CYCLE_TIME_INFORMATION))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                // CPU cycles are not modeled; executed instructions are the closest measure.
+                const emulator_object<THREAD_CYCLE_TIME_INFORMATION> info{c.emu, thread_information};
+                info.write(THREAD_CYCLE_TIME_INFORMATION{.AccumulatedCycles = thread->executed_instructions, .CurrentCycleCount = 0});
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadIoPriority)
+            {
+                if (return_length)
+                {
+                    return_length.write(sizeof(ULONG));
+                }
+
+                if (thread_information_length != sizeof(ULONG))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                emulator_object<ULONG>{c.emu, thread_information}.write(thread->io_priority);
+                return STATUS_SUCCESS;
+            }
+
             if (info_class == ThreadHideFromDebugger)
             {
-                if (thread_information != 0 && thread_information % 4 != 0)
+                // The kernel probes the buffer with the alignment of the length the caller passes: a wrong-sized ULONG
+                // must be aligned, while ntdll's own BOOLEAN query (32-bit LdrpDoDebuggerBreak) uses an odd address.
+                if (thread_information_length >= sizeof(ULONG) && thread_information % sizeof(ULONG) != 0)
                 {
                     return STATUS_DATATYPE_MISALIGNMENT;
                 }
@@ -624,26 +870,6 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (info_class == ThreadPagePriority)
-            {
-                if (return_length)
-                {
-                    return_length.write(sizeof(ULONG));
-                }
-
-                if (thread_information_length < sizeof(ULONG))
-                {
-                    return STATUS_BUFFER_OVERFLOW;
-                }
-
-                constexpr ULONG memory_priority_normal = 5;
-
-                const emulator_object<ULONG> info{c.emu, thread_information};
-                info.write(memory_priority_normal);
-
-                return STATUS_SUCCESS;
-            }
-
             if (info_class == ThreadGroupInformation)
             {
                 if (return_length)
@@ -662,35 +888,6 @@ namespace sogen
                         c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
                     ga.Mask = processor_count >= 64 ? ~0ull : ((1ull << processor_count) - 1);
                 });
-
-                return STATUS_SUCCESS;
-            }
-
-            if (info_class == ThreadCycleTime)
-            {
-                return handle_query<THREAD_CYCLE_TIME_INFORMATION>(c.emu, thread_information, thread_information_length, return_length,
-                                                                   [&](THREAD_CYCLE_TIME_INFORMATION& info) {
-                                                                       info.AccumulatedCycles = c.win_emu.get_executed_instructions();
-                                                                       info.CurrentCycleCount = 0;
-                                                                   });
-            }
-
-            if (info_class == ThreadIoPriority)
-            {
-                if (return_length)
-                {
-                    return_length.write(sizeof(ULONG));
-                }
-
-                if (thread_information_length < sizeof(ULONG))
-                {
-                    return STATUS_BUFFER_OVERFLOW;
-                }
-
-                constexpr ULONG io_priority_normal = 2; // IoPriorityNormal
-
-                const emulator_object<ULONG> info{c.emu, thread_information};
-                info.write(io_priority_normal);
 
                 return STATUS_SUCCESS;
             }
@@ -715,10 +912,59 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported thread query info class: 0x%X\n", info_class);
-            c.emu.stop();
+            if (info_class == ThreadPagePriority)
+            {
+                constexpr ULONG normal_page_priority = 5; // MEMORY_NORMAL_PRIORITY
 
-            return STATUS_NOT_SUPPORTED;
+                if (return_length)
+                {
+                    return_length.write(sizeof(ULONG));
+                }
+
+                if (thread_information_length != sizeof(ULONG))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                const emulator_object<ULONG> info{c.emu, thread_information};
+                info.write(normal_page_priority);
+
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadNameInformation)
+            {
+                const auto name_bytes = static_cast<uint32_t>(thread->name.size() * sizeof(char16_t));
+                const auto total_size = static_cast<uint32_t>(sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>)) + name_bytes;
+
+                if (return_length)
+                {
+                    return_length.write(total_size);
+                }
+
+                if (thread_information_length < total_size)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const auto name_buffer = thread_information + sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>);
+                if (name_bytes != 0)
+                {
+                    c.emu.write_memory(name_buffer, thread->name.data(), name_bytes);
+                }
+
+                const emulator_object<THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>> info{c.emu, thread_information};
+                info.access([&](THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>& value) {
+                    value.ThreadName.Length = static_cast<uint16_t>(name_bytes);
+                    value.ThreadName.MaximumLength = static_cast<uint16_t>(name_bytes);
+                    value.ThreadName.Buffer = name_buffer;
+                });
+
+                return STATUS_SUCCESS;
+            }
+
+            c.win_emu.log.error("Unsupported thread query info class: 0x%X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtOpenThread(const syscall_context& c, const emulator_object<handle> thread_handle, ACCESS_MASK /*desired_access*/,
@@ -732,11 +978,33 @@ namespace sogen
 
             const auto id = client_id.read();
 
-            for (auto& [h_val, t] : c.proc.threads)
+            if (id.UniqueProcess == 0 || id.UniqueProcess == c.proc.process_id)
             {
-                if (t.id == id.UniqueThread)
+                for (auto& [h_val, t] : c.proc.threads)
                 {
-                    thread_handle.write(c.proc.threads.make_handle(h_val));
+                    if (t.id == id.UniqueThread)
+                    {
+                        const auto duplicated = c.proc.threads.duplicate(c.proc.threads.make_handle(h_val), std::nullopt);
+                        if (!duplicated)
+                        {
+                            return STATUS_INVALID_HANDLE;
+                        }
+                        thread_handle.write(*duplicated);
+                        return STATUS_SUCCESS;
+                    }
+                }
+            }
+
+            for (auto& [h_val, thread] : c.proc.managed_threads)
+            {
+                if (thread.thread_id == id.UniqueThread && (id.UniqueProcess == 0 || thread.process_id == id.UniqueProcess))
+                {
+                    const auto duplicated = c.proc.managed_threads.duplicate(c.proc.managed_threads.make_handle(h_val), std::nullopt);
+                    if (!duplicated)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+                    thread_handle.write(*duplicated);
                     return STATUS_SUCCESS;
                 }
             }
@@ -764,12 +1032,20 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (!c.proc.is_current_thread_handle(thread_handle, c.vcpu.active_thread))
+            const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (!thread)
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
-
-            token_handle.write(CURRENT_THREAD_TOKEN);
+            if (thread->impersonation_token == 0)
+            {
+                return STATUS_NO_TOKEN;
+            }
+            if (thread->impersonation_token == ANONYMOUS_IMPERSONATION_TOKEN)
+            {
+                return STATUS_CANT_OPEN_ANONYMOUS;
+            }
+            token_handle.write(thread->impersonation_token);
 
             return STATUS_SUCCESS;
         }
@@ -781,11 +1057,34 @@ namespace sogen
             return handle_NtOpenThreadToken(c, thread_handle, desired_access, open_as_self, token_handle);
         }
 
+        NTSTATUS handle_NtImpersonateAnonymousToken(const syscall_context& c, const handle thread_handle)
+        {
+            auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (!thread)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            set_thread_impersonation_token(*thread, ANONYMOUS_IMPERSONATION_TOKEN);
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtTerminateThread(const syscall_context& c, const handle thread_handle, const NTSTATUS exit_status)
         {
             if (std::getenv("SOGEN_DEBUG_WINDOW_TERMINATE_CALLER_STACK") != nullptr)
             {
                 debug_log_syscall_caller_stack(c, "TERMINATE_THREAD_CALLER");
+            }
+
+            if (const auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                if (!c.win_emu.processes())
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                return c.win_emu.processes()->terminate_process(managed->process, static_cast<uint32_t>(exit_status)) == process_error::none
+                           ? STATUS_SUCCESS
+                           : STATUS_INVALID_HANDLE;
             }
 
             auto* thread = !thread_handle.bits ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
@@ -795,8 +1094,16 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            c.win_emu.report_debug_event({
+                .kind = process_debug_event_kind::exit_thread,
+                .thread_id = thread->id,
+                .exit_status = static_cast<uint32_t>(exit_status),
+            });
+
             c.proc.terminate_thread(*thread, exit_status);
+            registry_notification::end_thread_requests(c, thread->id);
             c.win_emu.callbacks.on_thread_terminated(thread_handle, *thread);
+            c.win_emu.wake_idle_vcpu();
 
             if (thread == c.vcpu.active_thread)
             {
@@ -812,7 +1119,9 @@ namespace sogen
             auto& t = c.thread();
             if (delay_interval.value())
             {
-                t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), delay_interval.read());
+                const auto interval = delay_interval.read();
+                t.await_time = interval.QuadPart == 0 ? std::chrono::steady_clock::time_point{}
+                                                      : utils::convert_delay_interval_to_time_point(c.win_emu.clock(), interval);
             }
             c.win_emu.yield_thread(c.vcpu, alertable);
 
@@ -829,6 +1138,7 @@ namespace sogen
                     // subsequent NtWaitForAlertByThreadId consumes it instead of blocking forever. This race-free
                     // delivery is what ntdll's critical sections and SRW locks rely on.
                     t.alerted = true;
+                    c.win_emu.wake_idle_vcpu();
                     return STATUS_SUCCESS;
                 }
             }
@@ -891,6 +1201,19 @@ namespace sogen
         NTSTATUS handle_NtSuspendThread(const syscall_context& c, const handle thread_handle,
                                         const emulator_object<ULONG> previous_suspend_count)
         {
+            if (const auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                auto* manager = c.win_emu.processes();
+                const auto result = manager ? manager->suspend_thread(managed->process, managed->thread_id, false)
+                                            : process_suspend_result{.error = process_error::unavailable};
+                if (!result)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+                previous_suspend_count.write_if_valid(result.previous_count);
+                return STATUS_SUCCESS;
+            }
+
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
@@ -955,6 +1278,30 @@ namespace sogen
                 return static_cast<NTSTATUS>(response->status);
             }
 
+            if (auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                auto* manager = c.win_emu.processes();
+                if (!manager)
+                {
+                    return STATUS_UNSUCCESSFUL;
+                }
+
+                if (managed->resume_observed)
+                {
+                    const auto result = manager->suspend_thread(managed->process, managed->thread_id, true);
+                    previous_suspend_count.write_if_valid(result ? result.previous_count : 0);
+                    return STATUS_SUCCESS;
+                }
+
+                previous_suspend_count.write_if_valid(1);
+                if (manager->resume_process(managed->process) != process_error::none)
+                {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                managed->resume_observed = true;
+                return STATUS_SUCCESS;
+            }
+
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
             if (!thread)
             {
@@ -970,83 +1317,81 @@ namespace sogen
             if (old_count > 0)
             {
                 thread->suspended -= 1;
+                if (old_count == 1)
+                {
+                    c.win_emu.wake_idle_vcpu();
+                }
             }
 
             return STATUS_SUCCESS;
         }
 
-        // On real Windows, NtContinue never "returns" through the normal syscall path: the kernel
-        // restores the caller's context directly onto the trap frame, including switching CS/SS back
-        // to 32-bit compatibility mode for a WoW64 thread, entirely bypassing wow64.dll's usual
-        // "marshal outputs, jmp RunSimulatedCode" return sequence. When a WoW64 thread's own
-        // KiUserExceptionDispatcher calls ZwContinue, that call reaches sogen's syscall dispatch while
-        // the thread's 64-bit engine is transiently active (mid gate-crossing, running wow64.dll's
-        // real CONTEXT32->CONTEXT64 marshaling code) - restoring the given CONTEXT64 directly onto
-        // that engine (as cpu_context::restore does) clobbers its own control-flow state instead of
-        // properly handing control back to the 32-bit engine. Detect this case and replicate the real
-        // kernel's direct mode switch by writing the resume state into the same guest CPU-area block
-        // the reverse-gate mechanism (enter_wow64_32bit_from_run_simulated_code) already reads on
-        // every ordinary wow64 syscall return, then redirecting the 64-bit engine's RIP to that same
-        // reverse-gate entry point so the existing engine-flip logic performs the switch.
-        bool try_restore_wow64_continue_via_reverse_gate(const syscall_context& c, const CONTEXT64& context)
+        NTSTATUS handle_NtCreateThreadStateChange(const syscall_context& c, const emulator_object<handle> state_change_handle,
+                                                  const ACCESS_MASK /*desired_access*/, const uint64_t /*object_attributes*/,
+                                                  const handle thread_handle, const uint64_t /*reserved*/)
         {
-            // Only a dual-engine backend (FEX) can have its 64-bit engine transiently active mid
-            // gate-crossing in the first place - see has_separate_bitness_engines' doc comment. On
-            // every other backend, cpu_context::restore already resumes a WoW64 thread correctly;
-            // taking the reverse-gate path anyway would hijack an ordinary NtContinue call.
-            if (!c.vcpu.cpu.has_separate_bitness_engines())
+            const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (!thread)
             {
-                return false;
+                return STATUS_INVALID_HANDLE;
             }
 
-            // The calling engine's CURRENT CS and even wow64_cpu_reserved being set are both
-            // unreliable signals for "this needs the reverse gate": a WoW64 process can host
-            // genuinely native 64-bit worker/loader threads that still get a wow64_cpu_reserved
-            // block populated as part of standard process-wide thread init, and still run at
-            // CS==0x33 permanently - such a thread's own, perfectly ordinary NtContinue call would
-            // otherwise be misidentified as a wow64 crossing and redirected into wow64cpu.dll
-            // nonsensically. The one signal that actually reflects intent rather than incidental
-            // engine state is the CONTEXT64 argument's own SegCs: only a continuation built by
-            // wow64.dll's real CONTEXT32->CONTEXT64 marshaling (i.e. genuinely resuming 32-bit guest
-            // code) ever carries SegCs==0x23 - a native thread's own NtContinue never does.
-            constexpr uint16_t wow64_code_selector = 0x23;
-            if (!c.proc.is_wow64_process || (context.SegCs & 0xFFFF) != wow64_code_selector)
-            {
-                return false;
-            }
-
-            if (!c.proc.wow64_syscall_reentry_addr || !c.vcpu.thread().teb64.has_value())
-            {
-                return false;
-            }
-
-            const auto teb64 = c.vcpu.thread().teb64->value();
-            const auto cpu_area = c.emu.read_memory<uint64_t>(teb64 + 0x1488);
-            const auto block = cpu_area + 0x80;
-
-            const auto write32 = [&](const uint64_t offset, const uint32_t value) { c.emu.write_memory(block + offset, value); };
-            write32(0x20, static_cast<uint32_t>(context.Rdi));
-            write32(0x24, static_cast<uint32_t>(context.Rsi));
-            write32(0x28, static_cast<uint32_t>(context.Rbx));
-            write32(0x2C, static_cast<uint32_t>(context.Rdx));
-            write32(0x30, static_cast<uint32_t>(context.Rcx));
-            write32(0x34, static_cast<uint32_t>(context.Rax));
-            write32(0x38, static_cast<uint32_t>(context.Rbp));
-            write32(0x3C, static_cast<uint32_t>(context.Rip));
-            write32(0x44, static_cast<uint32_t>(context.EFlags));
-            write32(0x48, static_cast<uint32_t>(context.Rsp));
-
-            for (size_t i = 0; i < 6; ++i)
-            {
-                c.emu.write_memory(block + 0xF0 + (i * 0x10), &context.FltSave.XmmRegisters[i], sizeof(M128A));
-            }
-
-            c.emu.reg(x86_register::rip, *c.proc.wow64_syscall_reentry_addr);
-            return true;
+            thread_state_change state{};
+            state.thread_id = thread->id;
+            state_change_handle.write(c.proc.thread_state_changes.store(std::move(state)));
+            return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtContinueEx(const syscall_context& c, const emulator_object<CONTEXT64> thread_context,
-                                     const uint64_t continue_argument)
+        NTSTATUS handle_NtChangeThreadState(const syscall_context& c, const handle state_change_handle, const handle thread_handle,
+                                            const uint32_t state_change_type, const uint64_t /*extended_information*/,
+                                            const uint64_t /*extended_information_length*/, const uint64_t /*reserved*/)
+        {
+            constexpr uint32_t thread_state_change_suspend = 0;
+            constexpr uint32_t thread_state_change_resume = 1;
+
+            auto* state = c.proc.thread_state_changes.get(state_change_handle);
+            const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (!state || !thread)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (thread->id != state->thread_id)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const emulator_object<ULONG> no_previous_count{c.emu, 0};
+            if (state_change_type == thread_state_change_suspend)
+            {
+                const auto status = handle_NtSuspendThread(c, thread_handle, no_previous_count);
+                if (NT_SUCCESS(status))
+                {
+                    ++state->suspend_count;
+                }
+                return status;
+            }
+
+            if (state_change_type == thread_state_change_resume)
+            {
+                // A state-change object only resumes what it suspended itself.
+                if (state->suspend_count == 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto status = handle_NtResumeThread(c, thread_handle, no_previous_count);
+                if (NT_SUCCESS(status))
+                {
+                    --state->suspend_count;
+                }
+                return status;
+            }
+
+            return STATUS_INVALID_INFO_CLASS;
+        }
+
+        NTSTATUS handle_NtContinueEx(const syscall_context& c, const uint64_t thread_context, const uint64_t continue_argument)
         {
             c.write_status = false;
 
@@ -1060,10 +1405,15 @@ namespace sogen
                 argument = c.emu.read_memory<KCONTINUE_ARGUMENT>(continue_argument);
             }
 
-            const auto context = thread_context.read();
-            if (!try_restore_wow64_continue_via_reverse_gate(c, context))
+            if (auto* arm64 = dynamic_cast<arm64_cpu*>(&c.emu))
             {
-                cpu_context::restore(c.emu, context);
+                cpu_context::restore(*arm64, c.emu.read_memory<arm64_context>(thread_context));
+                // X18 always addresses the thread's TEB; the kernel does not take it from a user context.
+                c.win_emu.abi().install_thread_environment(c.emu, c.thread().teb64->value());
+            }
+            else
+            {
+                cpu_context::restore(c.x64_cpu(), c.emu.read_memory<CONTEXT64>(thread_context));
             }
 
             if (argument.ContinueFlags & KCONTINUE_FLAG_TEST_ALERT)
@@ -1074,7 +1424,7 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtContinue(const syscall_context& c, const emulator_object<CONTEXT64> thread_context, const BOOLEAN raise_alert)
+        NTSTATUS handle_NtContinue(const syscall_context& c, const uint64_t thread_context, const BOOLEAN raise_alert)
         {
             return handle_NtContinueEx(c, thread_context, raise_alert ? 1 : 0);
         }
@@ -1083,23 +1433,26 @@ namespace sogen
                                         const ACCESS_MASK /*desired_access*/, const ULONG /*handle_attributes*/, const ULONG flags,
                                         const emulator_object<handle> new_thread_handle)
         {
+            if (!new_thread_handle.try_write(NULL_HANDLE))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            if (flags != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_INVALID_HANDLE;
+                return get_unresolved_handle_status(process_handle, handle_types::process);
             }
 
             const auto resolved_thread_handle = c.proc.resolve_object_pseudo_handle(thread_handle, c.vcpu.active_thread);
 
             if (resolved_thread_handle != NULL_HANDLE && resolved_thread_handle.value.type != handle_types::thread)
             {
-                return STATUS_INVALID_HANDLE;
-            }
-
-            if (flags != 0)
-            {
-                c.win_emu.log.error("NtGetNextThread flags %X not supported\n", static_cast<uint32_t>(flags));
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
+                return get_unresolved_handle_status(resolved_thread_handle, handle_types::thread);
             }
 
             bool return_next_thread = resolved_thread_handle == NULL_HANDLE;
@@ -1118,66 +1471,240 @@ namespace sogen
                 }
             }
 
-            new_thread_handle.write(NULL_HANDLE);
             return STATUS_NO_MORE_ENTRIES;
+        }
+
+        void load_context(guest_cpu& cpu, const CONTEXT64& context)
+        {
+            cpu_context::restore(dynamic_cast<x86_64_cpu&>(cpu), context);
+        }
+
+        void load_context(guest_cpu& cpu, const arm64_context& context)
+        {
+            cpu_context::restore(dynamic_cast<arm64_cpu&>(cpu), context);
+        }
+
+        void store_context(guest_cpu& cpu, CONTEXT64& context)
+        {
+            cpu_context::save(dynamic_cast<x86_64_cpu&>(cpu), context);
+        }
+
+        void store_context(guest_cpu& cpu, arm64_context& context)
+        {
+            cpu_context::save(dynamic_cast<arm64_cpu&>(cpu), context);
+        }
+
+        bool is_saved_in_syscall(windows_emulator& win_emu, const emulator_thread& thread)
+        {
+            for (uint32_t i = 0; i < win_emu.vcpu_count(); ++i)
+            {
+                const auto& vcpu = win_emu.vcpu(i);
+                if (vcpu.active_thread == &thread)
+                {
+                    return vcpu.active_thread_saved;
+                }
+            }
+
+            return false;
+        }
+
+        // Runs access with the thread's user-mode registers on the calling vCPU and keeps any change it
+        // reports. A thread that has not run yet is described, as on Windows, by its initial context
+        // (RtlUserThreadStart with the start routine and argument) that LdrInitializeThunk continues into.
+        template <typename Context, typename Access>
+        bool access_thread_context(const syscall_context& c, emulator_thread& thread, Access&& access)
+        {
+            // An idle vCPU (the debugger asks between time slices) has no thread loaded.
+            auto* active = c.vcpu.active_thread;
+            if (&thread == active && !c.vcpu.active_thread_saved)
+            {
+                access();
+                return true;
+            }
+
+            // This vCPU's own thread, parked in a host call such as a debugger report, keeps its registers in its
+            // saved state. Saving the CPU over them would lose them, and a change written to the CPU would be undone
+            // when the saved state is reloaded, so the saved state is what gets restored, changed and written back.
+            const bool parked_here = &thread == active;
+
+            if (active && !parked_here)
+            {
+                active->save(c.emu);
+            }
+            const auto _ = utils::finally([&] {
+                if (active && !parked_here)
+                {
+                    active->restore(c.emu, c.proc.gdt_base);
+                }
+            });
+
+            if (!c.win_emu.wait_for_thread_registers(c.vcpu, thread))
+            {
+                c.retrigger_syscall = true;
+                return false;
+            }
+
+            thread.restore(c.emu, c.proc.gdt_base);
+            if (!thread.setup_done && !c.proc.is_wow64_process)
+            {
+                thread.setup_if_necessary(c.emu, c.proc);
+                thread.save(c.emu);
+            }
+
+            // Until it runs, the thread sits at LdrInitializeThunk with its initial context as first argument.
+            std::optional<uint64_t> initial_context{};
+            if (!c.proc.is_wow64_process && c.win_emu.abi().instruction_pointer(c.emu) == c.proc.ldr_initialize_thunk)
+            {
+                initial_context = c.win_emu.abi().function_argument(c.emu, 0);
+                load_context(c.emu, c.emu.read_memory<Context>(*initial_context));
+            }
+
+            // Windows shows a thread inside a syscall after the syscall instruction. Its saved registers keep the
+            // instruction itself, which its vCPU continues after and a retriggered syscall rewinds to.
+            const auto& abi = c.win_emu.abi();
+            const auto in_syscall = is_saved_in_syscall(c.win_emu, thread);
+            const auto syscall_ip = abi.instruction_pointer(c.emu);
+            const auto return_ip = syscall_ip + abi.syscall_abi().syscall_instruction_size();
+            if (in_syscall)
+            {
+                abi.instruction_pointer(c.emu, return_ip);
+            }
+
+            if (!access())
+            {
+                return true;
+            }
+
+            if (in_syscall && abi.instruction_pointer(c.emu) == return_ip)
+            {
+                abi.instruction_pointer(c.emu, syscall_ip);
+            }
+
+            if (initial_context)
+            {
+                auto record = c.emu.read_memory<Context>(*initial_context);
+                store_context(c.emu, record);
+                c.emu.write_memory(*initial_context, record);
+            }
+            else
+            {
+                thread.save(c.emu);
+            }
+
+            return true;
         }
 
         NTSTATUS handle_NtGetContextThread(const syscall_context& c, const handle thread_handle,
                                            const emulator_object<CONTEXT64> thread_context)
         {
-            const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (const auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                return get_child_thread_context(c, *managed, thread_context.value(), false);
+            }
+
+            auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
             {
                 return STATUS_INVALID_HANDLE;
             }
 
-            c.vcpu.active_thread->save(c.emu);
-            const auto _ = utils::finally([&] {
-                c.vcpu.active_thread->restore(c.emu); //
-            });
+            if (dynamic_cast<arm64_cpu*>(&c.emu))
+            {
+                auto context = c.emu.read_memory<arm64_context>(thread_context.value());
+                if ((context.ContextFlags & 0x00FF0000) != arm64_context_architecture)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
 
-            thread->restore(c.emu);
-
-            thread_context.access([&](CONTEXT64& context) {
-                if ((context.ContextFlags & CONTEXT_DEBUG_REGISTERS_64) == CONTEXT_DEBUG_REGISTERS_64)
+                if ((context.ContextFlags & arm64_context_debug_registers) == arm64_context_debug_registers)
                 {
                     c.win_emu.callbacks.on_suspicious_activity("Reading debug registers");
                 }
 
-                cpu_context::save(c.emu, context);
-            });
+                const auto accessed = access_thread_context<arm64_context>(c, *thread, [&] {
+                    store_context(c.emu, context);
+                    return false;
+                });
+                if (!accessed)
+                {
+                    return STATUS_UNSUCCESSFUL;
+                }
 
+                c.emu.write_memory(thread_context.value(), context);
+                return STATUS_SUCCESS;
+            }
+
+            auto context = thread_context.read();
+            if ((context.ContextFlags & CONTEXT_DEBUG_REGISTERS_64) == CONTEXT_DEBUG_REGISTERS_64)
+            {
+                c.win_emu.callbacks.on_suspicious_activity("Reading debug registers");
+            }
+
+            const auto accessed = access_thread_context<CONTEXT64>(c, *thread, [&] {
+                store_context(c.emu, context);
+                return false;
+            });
+            if (!accessed)
+            {
+                return STATUS_UNSUCCESSFUL;
+            }
+
+            thread_context.write(context);
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtSetContextThread(const syscall_context& c, const handle thread_handle,
                                            const emulator_object<CONTEXT64> thread_context)
         {
-            const auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
+            if (const auto* managed = c.proc.managed_threads.get(thread_handle))
+            {
+                return set_child_thread_context(c, *managed, thread_context.value(), false);
+            }
+
+            auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
             {
                 return STATUS_INVALID_HANDLE;
             }
 
-            const auto needs_swich = thread != c.vcpu.active_thread;
-
-            if (needs_swich)
+            if (dynamic_cast<arm64_cpu*>(&c.emu))
             {
-                c.vcpu.active_thread->save(c.emu);
-                thread->restore(c.emu);
+                const auto context = c.emu.read_memory<arm64_context>(thread_context.value());
+                if ((context.ContextFlags & 0x00FF0000) != arm64_context_architecture)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto accessed = access_thread_context<arm64_context>(c, *thread, [&] {
+                    load_context(c.emu, context);
+                    // X18 always addresses the thread's TEB; the kernel does not take it from a user context.
+                    c.win_emu.abi().install_thread_environment(c.emu, thread->teb64->value());
+                    return true;
+                });
+                if (!accessed)
+                {
+                    return STATUS_UNSUCCESSFUL;
+                }
+
+                if ((context.ContextFlags & arm64_context_debug_registers) == arm64_context_debug_registers)
+                {
+                    c.win_emu.callbacks.on_suspicious_activity("Setting debug registers");
+                }
+
+                return STATUS_SUCCESS;
             }
 
-            const auto _ = utils::finally([&] {
-                if (needs_swich)
-                {
-                    c.vcpu.active_thread->restore(c.emu); //
-                }
-            });
-
             const auto context = thread_context.read();
-            cpu_context::restore(c.emu, context);
+            const auto accessed = access_thread_context<CONTEXT64>(c, *thread, [&] {
+                load_context(c.emu, context);
+                return true;
+            });
+            if (!accessed)
+            {
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if ((context.ContextFlags & CONTEXT_DEBUG_REGISTERS_64) == CONTEXT_DEBUG_REGISTERS_64)
             {
@@ -1189,13 +1716,19 @@ namespace sogen
 
         NTSTATUS handle_NtCreateThreadEx(const syscall_context& c, const emulator_object<handle> thread_handle,
                                          const ACCESS_MASK /*desired_access*/,
-                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
+                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                          const handle process_handle, const uint64_t start_routine, const uint64_t argument,
                                          const ULONG create_flags, const EmulatorTraits<Emu64>::SIZE_T /*zero_bits*/,
                                          const EmulatorTraits<Emu64>::SIZE_T stack_size,
                                          const EmulatorTraits<Emu64>::SIZE_T maximum_stack_size,
                                          const emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list)
         {
+            constexpr ULONG valid_create_flags = 0x7F;
+            if (create_flags & ~valid_create_flags)
+            {
+                return STATUS_INVALID_PARAMETER_7;
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
@@ -1250,6 +1783,19 @@ namespace sogen
             catch (const thread_allocation_failure&)
             {
                 return STATUS_NO_MEMORY;
+            }
+
+            c.proc.threads.get(h)->inherit = object_attributes && (object_attributes.read().Attributes & OBJ_INHERIT) != 0;
+
+            c.win_emu.report_debug_event({
+                .kind = process_debug_event_kind::create_thread,
+                .thread_id = c.proc.threads.get(h)->id,
+                .start_address = start_routine,
+            });
+
+            if (!(create_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED))
+            {
+                c.win_emu.wake_idle_vcpu();
             }
 
             thread_handle.write(h);
@@ -1311,11 +1857,19 @@ namespace sogen
                                             const uint32_t apc_flags, const uint64_t apc_routine, const uint64_t apc_argument1,
                                             const uint64_t apc_argument2, const uint64_t apc_argument3)
         {
+            // QUEUE_USER_APC_CALLBACK_DATA_CONTEXT, which older MinGW headers do not define.
+            constexpr uint32_t apc_callback_data_context = 0x00010000;
+            constexpr uint32_t valid_apc_flags = QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC | apc_callback_data_context;
+            if (apc_flags & ~valid_apc_flags)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
             {
-                return STATUS_INVALID_HANDLE;
+                return get_unresolved_handle_status(thread_handle, handle_types::thread);
             }
 
             if (apc_flags)
@@ -1333,6 +1887,7 @@ namespace sogen
                 .apc_argument3 = apc_argument3,
             });
 
+            c.win_emu.wake_idle_vcpu();
             return STATUS_SUCCESS;
         }
 
@@ -1369,8 +1924,11 @@ namespace sogen
                 throw std::runtime_error("Unexpected callback return");
             }
 
+            // ARM64 KiUserCallbackDispatcher passes the callback's X0 as the status argument; x64 leaves it in RAX.
+            const auto is_arm64 = c.win_emu.abi().architecture() == windows_guest_architecture::arm64;
             user_callback_result callback_result{
-                .value = t.callback_return_rax.value_or(c.emu.reg<uint64_t>(x86_register::rax)),
+                .value = is_arm64 ? c.win_emu.abi().syscall_argument(c.emu, 2)
+                                  : t.callback_return_rax.value_or(c.win_emu.abi().return_value(c.emu)),
             };
             t.callback_return_rax.reset();
 
@@ -1409,12 +1967,168 @@ namespace sogen
             {
                 // Move past syscall instruction
                 const auto new_ip = c.emu.read_instruction_pointer();
-                c.emu.reg(x86_register::rip, new_ip + 2);
+                c.win_emu.abi().instruction_pointer(c.emu, new_ip + c.win_emu.abi().syscall_abi().syscall_instruction_size());
             }
 
             c.write_status = false;
             return {};
         }
+    }
+
+    std::vector<uint8_t> capture_thread_context(windows_emulator& win_emu, vcpu_context& vcpu, emulator_thread& thread)
+    {
+        const syscall_context c{.win_emu = win_emu, .emu = vcpu.cpu, .vcpu = vcpu, .proc = win_emu.process};
+        const auto capture = [&]<typename Context>(Context context) {
+            syscalls::access_thread_context<Context>(c, thread, [&] {
+                syscalls::store_context(c.emu, context);
+                return false;
+            });
+            std::vector<uint8_t> bytes(sizeof(context));
+            memcpy(bytes.data(), &context, sizeof(context));
+            return bytes;
+        };
+
+        if (dynamic_cast<arm64_cpu*>(&vcpu.cpu))
+        {
+            arm64_context context{};
+            context.ContextFlags = arm64_context_all;
+            return capture(context);
+        }
+
+        CONTEXT64 context{};
+        context.ContextFlags = CONTEXT64_ALL;
+        return capture(context);
+    }
+
+    bool apply_thread_context(windows_emulator& win_emu, vcpu_context& vcpu, emulator_thread& thread, const std::span<const uint8_t> bytes)
+    {
+        const syscall_context c{.win_emu = win_emu, .emu = vcpu.cpu, .vcpu = vcpu, .proc = win_emu.process};
+        const auto apply = [&]<typename Context>(Context context) {
+            if (bytes.size() < sizeof(context))
+            {
+                return false;
+            }
+            memcpy(&context, bytes.data(), sizeof(context));
+            syscalls::access_thread_context<Context>(c, thread, [&] {
+                syscalls::load_context(c.emu, context);
+                if constexpr (std::is_same_v<Context, arm64_context>)
+                {
+                    // X18 always addresses the thread's TEB; the kernel does not take it from a user context.
+                    c.win_emu.abi().install_thread_environment(c.emu, thread.teb64->value());
+                }
+                return true;
+            });
+            return true;
+        };
+
+        if (dynamic_cast<arm64_cpu*>(&vcpu.cpu))
+        {
+            return apply(arm64_context{});
+        }
+
+        return apply(CONTEXT64{});
+    }
+
+    namespace
+    {
+        bool runs_x86_code(guest_cpu& cpu)
+        {
+            auto* x64 = dynamic_cast<x86_64_cpu*>(&cpu);
+            if (!x64)
+            {
+                return false;
+            }
+
+            const auto bitness = segment_utils::get_segment_bitness(*x64, x64->reg<uint16_t>(x86_register::cs));
+            return bitness && *bitness == segment_utils::segment_bitness::bit32;
+        }
+    }
+
+    std::vector<uint8_t> capture_wow64_thread_context(windows_emulator& win_emu, vcpu_context& vcpu, emulator_thread& thread)
+    {
+        if (!win_emu.process.is_wow64_process || !thread.wow64_cpu_reserved)
+        {
+            return {};
+        }
+
+        const syscall_context c{.win_emu = win_emu, .emu = vcpu.cpu, .vcpu = vcpu, .proc = win_emu.process};
+        std::optional<WOW64_CONTEXT> context{};
+        syscalls::access_thread_context<CONTEXT64>(c, thread, [&] {
+            if (runs_x86_code(c.emu))
+            {
+                CONTEXT64 native{};
+                native.ContextFlags = CONTEXT64_ALL;
+                syscalls::store_context(c.emu, native);
+                context = make_wow64_context(native);
+            }
+            return false;
+        });
+
+        if (!context)
+        {
+            context = thread.wow64_cpu_reserved->read().Context;
+        }
+
+        std::vector<uint8_t> bytes(sizeof(WOW64_CONTEXT));
+        memcpy(bytes.data(), &*context, sizeof(WOW64_CONTEXT));
+        return bytes;
+    }
+
+    bool apply_wow64_thread_context(windows_emulator& win_emu, vcpu_context& vcpu, emulator_thread& thread,
+                                    const std::span<const uint8_t> bytes)
+    {
+        if (!win_emu.process.is_wow64_process || !thread.wow64_cpu_reserved || bytes.size() < sizeof(WOW64_CONTEXT))
+        {
+            return false;
+        }
+
+        WOW64_CONTEXT update{};
+        memcpy(&update, bytes.data(), sizeof(update));
+
+        const syscall_context c{.win_emu = win_emu, .emu = vcpu.cpu, .vcpu = vcpu, .proc = win_emu.process};
+        bool in_registers = false;
+        syscalls::access_thread_context<CONTEXT64>(c, thread, [&] {
+            if (!runs_x86_code(c.emu))
+            {
+                return false;
+            }
+
+            CONTEXT64 native{};
+            native.ContextFlags = CONTEXT64_ALL;
+            syscalls::store_context(c.emu, native);
+            auto merged = make_wow64_context(native);
+            syscalls::merge_wow64_context(merged, update);
+
+            native.Rax = merged.Eax;
+            native.Rbx = merged.Ebx;
+            native.Rcx = merged.Ecx;
+            native.Rdx = merged.Edx;
+            native.Rsi = merged.Esi;
+            native.Rdi = merged.Edi;
+            native.Rbp = merged.Ebp;
+            native.Rsp = merged.Esp;
+            native.Rip = merged.Eip;
+            native.EFlags = merged.EFlags;
+            native.Dr0 = merged.Dr0;
+            native.Dr1 = merged.Dr1;
+            native.Dr2 = merged.Dr2;
+            native.Dr3 = merged.Dr3;
+            native.Dr6 = merged.Dr6;
+            native.Dr7 = merged.Dr7;
+            syscalls::load_context(c.emu, native);
+            in_registers = true;
+            return true;
+        });
+
+        if (!in_registers)
+        {
+            thread.wow64_cpu_reserved->access([&](WOW64_CPURESERVED& reserved) {
+                reserved.Flags |= WOW64_CPURESERVED_FLAG_RESET_STATE;
+                syscalls::merge_wow64_context(reserved.Context, update);
+            });
+        }
+
+        return true;
     }
 
 } // namespace sogen

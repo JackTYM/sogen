@@ -37,6 +37,7 @@ namespace sogen
     constexpr size_t USER_SERVERINFO_BRUSH_SLOT_COUNT = 32;
     constexpr size_t USER_SERVERINFO_BRUSH_TRAILING_BYTES = 0x78;
     constexpr uint32_t USER_DEFAULT_DPI_CONTEXT = 18;
+    constexpr uint32_t USER_DEFAULT_WINDOW_DPI_CONTEXT = (96u << 8) | USER_DEFAULT_DPI_CONTEXT;
 
     struct USER_SERVERINFO
     {
@@ -47,28 +48,44 @@ namespace sogen
         uint64_t apfnClientW[FNID_ARRAY_SIZE];
         uint64_t apfnClientWorker[FNID_ARRAY_SIZE];
         uint8_t pad_3c8[0x19C];
-        uint8_t acOemToAnsi[0x100];
-        uint8_t acAnsiToOem[0x100];
-        DWORD dwInstalledEventHooks;
+        uint8_t oemToAnsi[256];
+        uint8_t ansiToOem[256];
+        uint8_t pad_764[0x4];
         int32_t systemMetrics[0x61];
-        uint8_t pad_8ec[0x96C];
+        int32_t dpiDependentSystemMetrics[0x1E];
+        uint8_t pad_964[0x874];
+        uint32_t systemColors[USER_NUM_SYSCOLORS];
+        uint8_t pad_1254[0x4];
         uint64_t ahbrSystem[USER_SERVERINFO_BRUSH_SLOT_COUNT];
         uint8_t pad_1358[0x34];
         int32_t defaultFontHeightScale;
         int32_t defaultFontWidthScale;
-        uint8_t pad_1394[0x7C2];
+        uint8_t pad_1394[0x74];
+        uint32_t dpi96DialogBaseUnitWidth;
+        uint32_t dpi96DialogBaseUnitHeight;
+        uint8_t pad_1410[0x73C];
+        uint32_t asyncKeyStateGeneration;
+        // user32's GetCapture only asks win32k for the capture window while this is nonzero.
+        uint32_t captureCount;
+        uint8_t pad_1b54[0x2];
         uint16_t systemDpi;
         uint8_t pad_1b58[0x286];
         uint64_t foregroundWindow;
     };
 
     static_assert(offsetof(USER_SERVERINFO, apfnClientA) == 0x188);
-    static_assert(offsetof(USER_SERVERINFO, acOemToAnsi) == 0x564);
-    static_assert(offsetof(USER_SERVERINFO, acAnsiToOem) == 0x664);
+    static_assert(offsetof(USER_SERVERINFO, oemToAnsi) == 0x564);
+    static_assert(offsetof(USER_SERVERINFO, ansiToOem) == 0x664);
     static_assert(offsetof(USER_SERVERINFO, systemMetrics) == 0x768);
+    static_assert(offsetof(USER_SERVERINFO, dpiDependentSystemMetrics) == 0x8EC);
+    static_assert(offsetof(USER_SERVERINFO, systemColors) == 0x11D8);
     static_assert(offsetof(USER_SERVERINFO, ahbrSystem) == 0x1258);
     static_assert(offsetof(USER_SERVERINFO, defaultFontHeightScale) == 0x138C);
     static_assert(offsetof(USER_SERVERINFO, defaultFontWidthScale) == 0x1390);
+    static_assert(offsetof(USER_SERVERINFO, dpi96DialogBaseUnitWidth) == 0x1408);
+    static_assert(offsetof(USER_SERVERINFO, captureCount) == 0x1B50);
+    static_assert(offsetof(USER_SERVERINFO, dpi96DialogBaseUnitHeight) == 0x140C);
+    static_assert(offsetof(USER_SERVERINFO, asyncKeyStateGeneration) == 0x1B4C);
     static_assert(offsetof(USER_SERVERINFO, systemDpi) == 0x1B56);
     static_assert(offsetof(USER_SERVERINFO, foregroundWindow) == 0x1DE0);
     static_assert(sizeof(USER_SERVERINFO) == 0x1de8);
@@ -124,43 +141,7 @@ namespace sogen
     static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x98);
     static_assert(offsetof(USER_SHAREDINFO, DefWindowMsgs) == 0x218);
     static_assert(offsetof(USER_SHAREDINFO, DefWindowSpecMsgs) == 0x228);
-
-    // user32 reads fields after copying 0x238 payload to _gSharedInfo
-    struct WIN32K_USERCONNECT32
-    {
-        uint32_t psi;
-        uint32_t reserved0;
-        uint32_t ahe_list;
-        uint32_t reserved1;
-        uint32_t he_entry_size;
-        uint32_t reserved2;
-        uint32_t disp_info_low;
-        uint32_t reserved3;
-        uint8_t reserved4[0x10];
-        uint32_t monitor_info_low;
-        uint32_t reserved5;
-        uint32_t shared_delta_low;
-        uint32_t shared_delta_high;
-        uint8_t wndmsg_table[0xC8];
-        uint32_t wndmsg_count;
-        uint32_t reserved6;
-        uint32_t wndmsg_bits;
-        uint32_t reserved7;
-        uint32_t ime_msg_count;
-        uint32_t reserved8;
-        uint32_t ime_msg_bits;
-        uint8_t reserved9[0x114];
-    };
-
-    static_assert(offsetof(WIN32K_USERCONNECT32, ahe_list) == 0x8);
-    static_assert(offsetof(WIN32K_USERCONNECT32, he_entry_size) == 0x10);
-    static_assert(offsetof(WIN32K_USERCONNECT32, disp_info_low) == 0x18);
-    static_assert(offsetof(WIN32K_USERCONNECT32, monitor_info_low) == 0x30);
-    static_assert(offsetof(WIN32K_USERCONNECT32, wndmsg_count) == 0x108);
-    static_assert(offsetof(WIN32K_USERCONNECT32, wndmsg_bits) == 0x110);
-    static_assert(offsetof(WIN32K_USERCONNECT32, ime_msg_count) == 0x118);
-    static_assert(offsetof(WIN32K_USERCONNECT32, ime_msg_bits) == 0x120);
-    static_assert(sizeof(WIN32K_USERCONNECT32) == 0x238);
+    static_assert(sizeof(USER_SHAREDINFO) == 0x238);
 
     // WoW64 (32-bit) raw-input structures, as the guest's user32/win32u marshal them.
     struct RAWINPUTDEVICE32
@@ -399,6 +380,7 @@ namespace sogen
     enum USER_WINDOWCOMPOSITIONATTRIB : uint32_t
     {
         WCA_NCRENDERING_ENABLED = 1,
+        WCA_NCRENDERING_POLICY = 2,
         WCA_EXTENDED_FRAME_BOUNDS = 8,
         WCA_CLOAKED = 18,
     };
@@ -416,8 +398,26 @@ namespace sogen
     {
         uint8_t unknown0[0x8];
         uint64_t spwndDesktop;
-        uint8_t unknown10[0xEF];
+        uint8_t unknown10[0x30];
+        uint32_t flags;
+        uint8_t unknown44[0xFF];
     };
+
+    // Referenced from CLIENTINFO (Win32ClientInfo[12]). user32 reads it directly instead of making a syscall,
+    // e.g. GetActiveWindow, GetFocus and GetInputState. 32-bit user32 shares the 64-bit layout.
+    struct USER_CLIENTTHREADINFO
+    {
+        uint32_t flags;
+        uint16_t change_bits;
+        uint16_t wake_bits;
+        uint8_t unknown8[0x18];
+        uint64_t focus_window;
+        uint64_t active_window;
+    };
+
+    static_assert(offsetof(USER_CLIENTTHREADINFO, change_bits) == 0x4);
+    static_assert(offsetof(USER_CLIENTTHREADINFO, focus_window) == 0x20);
+    static_assert(offsetof(USER_CLIENTTHREADINFO, active_window) == 0x28);
 
     // NOLINTEND(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)
 } // namespace sogen

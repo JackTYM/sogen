@@ -9,6 +9,16 @@ namespace sogen
     {
         namespace
         {
+            // Physical memory has holes, so the page numbers span more than the simulated page count.
+            constexpr uint32_t lowest_physical_page = 0x00000001;
+            constexpr uint32_t highest_physical_page = 0x00c9c7ff;
+            constexpr uint32_t physical_page_count = simulated_physical_page_count;
+
+            constexpr uint64_t wow64_large_address_aware_maximum = 0xFFFEFFFF;
+
+            // Windows 11 26200 still answers class 0x100, one past the last class SYSTEM_INFORMATION_CLASS names.
+            constexpr uint32_t last_system_information_class = 0x100;
+
             NTSTATUS handle_system_memory_usage_information(const syscall_context& c, const uint32_t info_class,
                                                             const uint64_t system_information, const uint32_t system_information_length,
                                                             const emulator_object<uint32_t> return_length)
@@ -26,8 +36,7 @@ namespace sogen
 
                 if (info_class == SystemMemoryUsageInformation && system_information_length == sizeof(basic_memory_status_information))
                 {
-                    // Simulated physical memory size (~13 GB).
-                    constexpr uint64_t total_physical_bytes = 0x00c9c7ffULL * 0x1000;
+                    constexpr uint64_t total_physical_bytes = static_cast<uint64_t>(physical_page_count) * 0x1000;
 
                     const basic_memory_status_information info{
                         .total_physical_bytes = total_physical_bytes,
@@ -128,6 +137,8 @@ namespace sogen
 
                     EMU_NUMA_NODE_RELATIONSHIP64 numa_node{};
                     memset(&numa_node, 0, sizeof(numa_node));
+                    numa_node.GroupCount = 1;
+                    numa_node.GroupMask.Mask = active_processor_mask;
 
                     c.emu.write_memory(output_buffer + numa_root_size, numa_node);
                 };
@@ -149,6 +160,18 @@ namespace sogen
                     }
                 };
 
+                const auto write_package = [&](const uint64_t output_buffer) {
+                    EMU_SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX64 proc_info{};
+                    proc_info.Size = core_size;
+                    proc_info.Relationship = RelationProcessorPackage;
+                    c.emu.write_memory(output_buffer, &proc_info, core_root_size);
+
+                    EMU_PROCESSOR_RELATIONSHIP64 package{};
+                    package.GroupCount = 1;
+                    package.GroupMask[0].Mask = active_processor_mask;
+                    c.emu.write_memory(output_buffer + core_root_size, package);
+                };
+
                 if (input_buffer_length != sizeof(LOGICAL_PROCESSOR_RELATIONSHIP))
                 {
                     return STATUS_INVALID_PARAMETER;
@@ -159,7 +182,7 @@ namespace sogen
                 if (request == RelationAll)
                 {
                     const auto core_total_size = static_cast<uint32_t>(core_size * active_processor_count);
-                    const auto required_size = static_cast<uint32_t>(core_total_size + group_size + numa_size);
+                    const auto required_size = static_cast<uint32_t>(core_total_size + core_size + group_size + numa_size);
 
                     if (return_length)
                     {
@@ -172,8 +195,25 @@ namespace sogen
                     }
 
                     write_cores(system_information);
-                    write_numa(system_information + core_total_size);
-                    write_group(system_information + core_total_size + numa_size);
+                    write_package(system_information + core_total_size);
+                    write_numa(system_information + core_total_size + core_size);
+                    write_group(system_information + core_total_size + core_size + numa_size);
+                    return STATUS_SUCCESS;
+                }
+
+                if (request == RelationProcessorPackage)
+                {
+                    if (return_length)
+                    {
+                        return_length.write(core_size);
+                    }
+
+                    if (system_information_length < core_size)
+                    {
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+
+                    write_package(system_information);
                     return STATUS_SUCCESS;
                 }
 
@@ -227,7 +267,18 @@ namespace sogen
                     return STATUS_SUCCESS;
                 }
 
-                c.win_emu.log.error("Unsupported processor relationship: 0x%X\n", request);
+                c.win_emu.log.error("Unsupported processor relationship: 0x%X\n", static_cast<uint32_t>(request));
+
+                if (static_cast<uint32_t>(request) > RelationProcessorModule)
+                {
+                    if (return_length)
+                    {
+                        return_length.write(0);
+                    }
+
+                    return STATUS_UNSUCCESSFUL;
+                }
+
                 c.emu.stop();
                 return STATUS_NOT_SUPPORTED;
             }
@@ -236,12 +287,14 @@ namespace sogen
         constexpr uint64_t FAKE_KERNEL_BASE = 0xFFFFF80000000000ULL;
         constexpr uint32_t FAKE_KERNEL_SIZE = 0x00A00000;
         constexpr uint64_t PROCESSOR_FEATURE_BITS = 0x421993DFEULL;
+        // Observed on Windows on ARM; the bits describe the kernel rather than optional CPU features.
+        constexpr ULONG ARM64_PROCESSOR_FEATURE_BITS = 0xA0000000;
 
         template <typename Traits>
         void fill_ntoskrnl_module(RTL_PROCESS_MODULE_INFORMATION<Traits>& m)
         {
             memset(&m, 0, sizeof(m));
-            m.ImageBase = static_cast<typename Traits::PVOID>(FAKE_KERNEL_BASE);
+            m.ImageBase = static_cast<Traits::PVOID>(FAKE_KERNEL_BASE);
             m.MappedBase = m.ImageBase;
             m.ImageSize = FAKE_KERNEL_SIZE;
             m.LoadCount = 1;
@@ -448,10 +501,48 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_system_pagefile_information(const syscall_context& c, const uint64_t system_information,
+                                                    const uint32_t system_information_length, const emulator_object<uint32_t> return_length)
+        {
+            using info_t = SYSTEM_PAGEFILE_INFORMATION<EmulatorTraits<Emu64>>;
+
+            constexpr std::u16string_view page_file_name{u"\\??\\C:\\pagefile.sys"};
+            constexpr auto page_file_name_size = static_cast<uint32_t>(page_file_name.size() * sizeof(char16_t));
+            constexpr auto required_length = static_cast<uint32_t>(sizeof(info_t)) + page_file_name_size;
+
+            if (return_length)
+            {
+                return_length.write(required_length);
+            }
+
+            if (system_information_length < required_length)
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            info_t info{};
+            info.TotalSize = 0x100000;
+            info.TotalInUse = 0x1000;
+            info.PeakUsage = 0x2000;
+            info.PageFileName.Length = page_file_name_size;
+            info.PageFileName.MaximumLength = page_file_name_size;
+            info.PageFileName.Buffer = system_information + sizeof(info);
+
+            c.emu.write_memory(system_information, info);
+            c.emu.write_memory(info.PageFileName.Buffer, page_file_name.data(), page_file_name_size);
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtQuerySystemInformationEx(const syscall_context& c, const uint32_t info_class, const uint64_t input_buffer,
                                                    const uint32_t input_buffer_length, const uint64_t system_information,
                                                    const uint32_t system_information_length, const emulator_object<uint32_t> return_length)
         {
+            if (info_class > last_system_information_class)
+            {
+                c.win_emu.log.error("Unsupported NtQuerySystemInformation(Ex) info class: 0x%X\n", info_class);
+                return STATUS_INVALID_INFO_CLASS;
+            }
+
             switch (info_class)
             {
             case SystemBasicProcessInformation:
@@ -461,9 +552,10 @@ namespace sogen
                 return handle_system_process_information(c, system_information, system_information_length, return_length);
 
             case SystemFlushInformation:
+            case SystemSecureBootPolicyInformation:
+            case SystemCodeIntegrityPoliciesFullInformation:
             case SystemHypervisorSharedPageInformation:
             case SystemFeatureConfigurationInformation:
-            case SystemSupportedProcessorArchitectures2:
             case SystemFeatureConfigurationSectionInformation:
             case SystemFirmwareTableInformation:
             case SystemPolicyInformation:
@@ -479,6 +571,27 @@ namespace sogen
 
             case SystemModuleInformationEx:
                 return handle_system_module_information_ex(c, system_information, system_information_length, return_length);
+
+            case SystemLeapSecondInformation: {
+                struct system_leap_second_information
+                {
+                    BOOLEAN enabled;
+                    std::array<uint8_t, 3> reserved;
+                    ULONG flags;
+                };
+
+                static_assert(sizeof(system_leap_second_information) == 8);
+                if (return_length)
+                {
+                    return_length.write(sizeof(system_leap_second_information));
+                }
+                if (system_information_length != sizeof(system_leap_second_information))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                c.emu.write_memory(system_information, system_leap_second_information{});
+                return STATUS_SUCCESS;
+            }
 
             case SystemTimeOfDayInformation:
                 return handle_query<SYSTEM_TIMEOFDAY_INFORMATION64>(c.emu, system_information, system_information_length, return_length,
@@ -612,6 +725,18 @@ namespace sogen
                     c.emu, system_information, system_information_length, return_length, [&](SYSTEM_PROCESSOR_INFORMATION64& info) {
                         memset(&info, 0, sizeof(info));
                         info.MaximumProcessors = 2;
+                        auto* arm64 = dynamic_cast<arm64_cpu*>(&c.emu);
+                        if (arm64 && info_class == SystemProcessorInformation)
+                        {
+                            // Windows on ARM reports the MIDR part number as the level and variant/revision as the revision.
+                            const auto midr = arm64->reg(arm64_register::midr_el1);
+                            info.ProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM64;
+                            info.ProcessorLevel = static_cast<USHORT>((midr >> 4) & 0xFFF);
+                            info.ProcessorRevision = static_cast<USHORT>((((midr >> 20) & 0xF) << 8) | (midr & 0xF));
+                            info.ProcessorFeatureBits = ARM64_PROCESSOR_FEATURE_BITS;
+                            return;
+                        }
+
                         info.ProcessorArchitecture =
                             (info_class == SystemProcessorInformation ? PROCESSOR_ARCHITECTURE_AMD64 : PROCESSOR_ARCHITECTURE_INTEL);
                         // TODO: Figure out the best way to derive this from 'kusd.ProcessorFeatures'
@@ -703,11 +828,15 @@ namespace sogen
                         basic_info.Reserved = 0;
                         basic_info.TimerResolution = 0x0002625a;
                         basic_info.PageSize = 0x1000;
-                        basic_info.LowestPhysicalPageNumber = 0x00000001;
-                        basic_info.HighestPhysicalPageNumber = 0x00c9c7ff;
+                        basic_info.NumberOfPhysicalPages = physical_page_count;
+                        basic_info.LowestPhysicalPageNumber = lowest_physical_page;
+                        basic_info.HighestPhysicalPageNumber = highest_physical_page;
                         basic_info.AllocationGranularity = ALLOCATION_GRANULARITY;
                         basic_info.MinimumUserModeAddress = MIN_ALLOCATION_ADDRESS;
-                        basic_info.MaximumUserModeAddress = MAX_ALLOCATION_ADDRESS;
+                        // WoW64 converts this for 32-bit code, whose images are all reported as large address aware.
+                        basic_info.MaximumUserModeAddress = info_class == SystemEmulationBasicInformation && c.proc.is_wow64_process
+                                                                ? wow64_large_address_aware_maximum
+                                                                : MAX_ALLOCATION_ADDRESS;
                         const auto processor_count =
                             c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
                         basic_info.ActiveProcessorsAffinityMask = (processor_count >= 64) ? ~0ull : ((1ull << processor_count) - 1);
@@ -727,14 +856,14 @@ namespace sogen
                     [&](SYSTEM_EXCEPTION_INFORMATION& info) { memset(&info, 0, sizeof(info)); });
 
             case SystemLookasideInformation:
-            case SystemPageFileInformation:
-                // Variable-length lists we don't model (per-lookaside-list stats / configured page files).
-                // Report an empty set.
                 if (return_length)
                 {
                     return_length.try_write(0);
                 }
                 return STATUS_SUCCESS;
+
+            case SystemPageFileInformation:
+                return handle_system_pagefile_information(c, system_information, system_information_length, return_length);
 
             case SystemMemoryListInformation:
                 return handle_query<SYSTEM_MEMORY_LIST_INFORMATION64>(
@@ -748,14 +877,34 @@ namespace sogen
                     [&](SYSTEM_FILECACHE_INFORMATION64& info) { memset(&info, 0, sizeof(info)); });
 
             case SystemPerformanceInformation:
+                if (system_information_length < sizeof(SYSTEM_PERFORMANCE_MEMORY_INFORMATION64))
+                {
+                    if (return_length)
+                    {
+                        return_length.try_write(static_cast<ULONG>(sizeof(SYSTEM_PERFORMANCE_MEMORY_INFORMATION64)));
+                    }
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                c.emu.set_memory(system_information, 0, system_information_length);
+                emulator_object<SYSTEM_PERFORMANCE_MEMORY_INFORMATION64>{c.emu, system_information}.access(
+                    [](SYSTEM_PERFORMANCE_MEMORY_INFORMATION64& info) {
+                        info.AvailablePages = physical_page_count / 2;
+                        info.CommittedPages = physical_page_count / 4;
+                        info.CommitLimit = physical_page_count + physical_page_count / 2;
+                        info.PeakCommitment = info.CommittedPages;
+                    });
+                if (return_length)
+                {
+                    return_length.try_write(system_information_length);
+                }
+                return STATUS_SUCCESS;
+
             case SystemProcessorPowerInformation:
             case SystemInterruptInformation:
             case SystemProcessorIdleInformation:
-                // SYSTEM_PERFORMANCE_INFORMATION is a large, OS-version-dependent counter block;
-                // SystemProcessorPowerInformation / SystemInterruptInformation / SystemProcessorIdleInformation
-                // are per-processor arrays. We don't model any of these, so report no activity by zeroing
-                // exactly the caller's buffer, which keeps any struct revision/processor count happy instead
-                // of rejecting an unexpected size.
+                // Per-processor arrays we don't model: report no activity by zeroing exactly the caller's buffer, which
+                // keeps any processor count happy instead of rejecting an unexpected size.
                 if (system_information)
                 {
                     c.emu.set_memory(system_information, 0, system_information_length);
@@ -777,8 +926,32 @@ namespace sogen
                                                                    info.AvailableMemory[0] = 0x80000000ull;
                                                                });
 
-            case SystemSupportedProcessorArchitectures: {
+            // The second class only differs in what newer ntdll builds ask it with, as IsWow64Process does.
+            case SystemSupportedProcessorArchitectures:
+            case SystemSupportedProcessorArchitectures2: {
                 constexpr auto num_arch = 2;
+
+                // The input is the process whose machine Windows marks with the Process flag; NULL marks none.
+                if (input_buffer_length != sizeof(handle))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                handle process{};
+                if (!c.emu.try_read_memory(input_buffer, &process, sizeof(process)))
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                const auto is_current_process = process.bits != 0 && c.proc.is_current_process_handle(process);
+                const auto* other_process =
+                    !is_current_process && process.value.type == handle_types::process ? c.proc.processes.get(process) : nullptr;
+                const auto is_other_process = other_process != nullptr;
+                const auto process_is_wow64 =
+                    is_current_process ? c.proc.is_wow64_process : is_other_process && other_process->is_wow64_process;
+                if (process.bits != 0 && !is_current_process && !is_other_process)
+                {
+                    return process == CURRENT_THREAD || process.value.type == handle_types::thread ? STATUS_OBJECT_TYPE_MISMATCH
+                                                                                                   : STATUS_INVALID_HANDLE;
+                }
 
                 const auto required_length = sizeof(SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION) * (num_arch + 1);
                 if (system_information_length < required_length)
@@ -792,21 +965,24 @@ namespace sogen
                 }
 
                 std::array<SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION, num_arch + 1> supported_arch{};
-                supported_arch[0].Machine = IMAGE_FILE_MACHINE_AMD64;
+                const auto is_arm64 = c.proc.native_architecture == windows_guest_architecture::arm64;
+                supported_arch[0].Machine = is_arm64 ? IMAGE_FILE_MACHINE_ARM64 : IMAGE_FILE_MACHINE_AMD64;
                 supported_arch[0].KernelMode = 1;
                 supported_arch[0].UserMode = 1;
                 supported_arch[0].Native = 1;
+                supported_arch[0].Process = (is_current_process || is_other_process) && !process_is_wow64 ? 1 : 0;
                 supported_arch[1].Machine = IMAGE_FILE_MACHINE_I386;
                 supported_arch[1].UserMode = 1;
+                supported_arch[1].Process = process_is_wow64 ? 1 : 0;
+                supported_arch[1].WoW64Container = 1;
 
                 c.emu.write_memory(system_information, supported_arch);
+                if (return_length)
+                {
+                    return_length.try_write(required_length);
+                }
                 return STATUS_SUCCESS;
             }
-
-            case SystemCodeIntegrityPolicyInformation:
-                // No Windows Defender Application Control policy is deployed: no lockdown/S-mode options.
-                return handle_query<SYSTEM_CODEINTEGRITYPOLICY_INFORMATION>(c.emu, system_information, system_information_length,
-                                                                            return_length, [](SYSTEM_CODEINTEGRITYPOLICY_INFORMATION&) {});
 
             case SystemCodeIntegrityInformation: {
                 // Report a normal retail configuration: code integrity (driver signature enforcement) enabled,
@@ -819,6 +995,32 @@ namespace sogen
                                                                       });
             }
 
+            case SystemCodeIntegrityPolicyInformation: {
+                struct system_code_integrity_policy_information
+                {
+                    ULONG options;
+                    ULONG hvci_options;
+                    ULONGLONG version;
+                    GUID policy_guid;
+                };
+
+                static_assert(sizeof(system_code_integrity_policy_information) == 32);
+                if (return_length)
+                {
+                    if (!return_length.try_write(sizeof(system_code_integrity_policy_information)))
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                }
+                if (system_information_length != sizeof(system_code_integrity_policy_information))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                const system_code_integrity_policy_information information{};
+                return c.emu.try_write_memory(system_information, &information, sizeof(information)) ? STATUS_SUCCESS
+                                                                                                     : STATUS_ACCESS_VIOLATION;
+            }
+
             case SystemBootEnvironmentInformation:
                 return handle_query<SYSTEM_BOOT_ENVIRONMENT_INFORMATION>(
                     c.emu, system_information, system_information_length, return_length, [&](SYSTEM_BOOT_ENVIRONMENT_INFORMATION& info) {
@@ -829,15 +1031,6 @@ namespace sogen
                         info.FirmwareType = 2; // FirmwareTypeUefi
                         info.BootFlags = 0;
                     });
-
-            case SystemLeapSecondInformation:
-                // Leap second support is on by default since Windows 10 1809 / Server 2019
-                // (HKLM\SYSTEM\CurrentControlSet\Control\LeapSecondInformation Enabled=1).
-                return handle_query<SYSTEM_LEAP_SECOND_INFORMATION>(c.emu, system_information, system_information_length, return_length,
-                                                                    [&](SYSTEM_LEAP_SECOND_INFORMATION& info) {
-                                                                        info.Enabled = TRUE;
-                                                                        info.Flags = 0;
-                                                                    });
 
             case SystemManufacturingInformation: {
                 // SYSTEM_MANUFACTURING_INFORMATION is { ULONG Options; UNICODE_STRING ProfileName; }: 24 bytes

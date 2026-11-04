@@ -25,11 +25,24 @@ namespace sogen
                                      emulator_object<EVENT_BASIC_INFORMATION> event_information, uint32_t event_information_length,
                                      emulator_object<uint32_t> return_length);
         NTSTATUS handle_NtClearEvent(const syscall_context& c, handle event_handle);
+        NTSTATUS handle_NtResetEvent(const syscall_context& c, handle event_handle, emulator_object<LONG> previous_state);
         NTSTATUS handle_NtCreateEvent(const syscall_context& c, emulator_object<handle> event_handle, ACCESS_MASK desired_access,
                                       emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, EVENT_TYPE event_type,
                                       BOOLEAN initial_state);
         NTSTATUS handle_NtOpenEvent(const syscall_context& c, emulator_object<uint64_t> event_handle, ACCESS_MASK desired_access,
                                     emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
+
+        // syscalls/debug.cpp
+        NTSTATUS handle_NtCreateDebugObject(const syscall_context& c, emulator_object<handle> debug_object_handle,
+                                            ACCESS_MASK desired_access,
+                                            emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG flags);
+        NTSTATUS handle_NtWaitForDebugEvent(const syscall_context& c, handle debug_handle, BOOLEAN alertable,
+                                            emulator_object<LARGE_INTEGER> timeout, emulator_pointer state_change);
+        NTSTATUS handle_NtDebugContinue(const syscall_context& c, handle debug_handle, emulator_object<CLIENT_ID64> client_id,
+                                        NTSTATUS continue_status);
+        NTSTATUS handle_NtSetInformationDebugObject(const syscall_context& c, handle debug_handle, ULONG information_class,
+                                                    emulator_pointer information, ULONG length, emulator_object<ULONG> return_length);
+        NTSTATUS handle_NtRemoveProcessDebug(const syscall_context& c, handle process_handle, handle debug_handle);
 
         // syscalls/exception.cpp
         NTSTATUS handle_NtRaiseHardError(const syscall_context& c, NTSTATUS error_status, ULONG number_of_parameters,
@@ -72,6 +85,11 @@ namespace sogen
                                     uint64_t /*apc_context*/, emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
                                     uint64_t buffer, ULONG length, emulator_object<LARGE_INTEGER> /*byte_offset*/,
                                     emulator_object<ULONG> /*key*/);
+        NTSTATUS handle_NtCancelIoFile(const syscall_context& c, handle file_handle,
+                                       emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block);
+        NTSTATUS handle_NtCancelIoFileEx(const syscall_context& c, handle file_handle,
+                                         emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_request_to_cancel,
+                                         emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block);
         NTSTATUS handle_NtCopyFileChunk(const syscall_context& c, handle source_handle, handle destination_handle, handle event_handle,
                                         emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block, ULONG length,
                                         emulator_object<LARGE_INTEGER> source_offset, emulator_object<LARGE_INTEGER> destination_offset,
@@ -126,8 +144,11 @@ namespace sogen
                                         ULONG output_buffer_length);
         NTSTATUS handle_NtFlushBuffersFile(const syscall_context& c, handle file_handle,
                                            emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> /*io_status_block*/);
-        NTSTATUS handle_NtCancelIoFile(const syscall_context& c, handle file_handle,
-                                       emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block);
+        NTSTATUS handle_NtGetCachedSigningLevel(const syscall_context& c, handle file_handle, emulator_object<ULONG> flags,
+                                                emulator_object<UCHAR> signing_level, uint64_t thumbprint,
+                                                emulator_object<ULONG> thumbprint_size, emulator_object<ULONG> thumbprint_algorithm);
+        NTSTATUS handle_NtCompareSigningLevels(const syscall_context& c, UCHAR current_level, UCHAR required_level);
+        NTSTATUS handle_NtSetCachedSigningLevel();
 
         // syscalls/locale.cpp:
         NTSTATUS handle_NtInitializeNlsFiles(const syscall_context& c, emulator_object<uint64_t> base_address,
@@ -140,6 +161,10 @@ namespace sogen
         NTSTATUS handle_NtGetMUIRegistryInfo();
         NTSTATUS handle_NtIsUILanguageComitted();
         uint64_t handle_NtUserActivateKeyboardLayout(const syscall_context& c, uint64_t keyboard_layout, uint32_t flags);
+        uint64_t handle_NtUserLoadKeyboardLayoutEx(const syscall_context& c, handle file, uint32_t table_offset, emulator_pointer tables,
+                                                   uint64_t old_keyboard_layout,
+                                                   emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> keyboard_layout_id,
+                                                   uint32_t new_keyboard_layout, uint32_t flags);
         uint64_t handle_NtUserGetKeyboardLayout(const syscall_context& c, uint32_t thread_id);
         uint32_t handle_NtUserGetKeyboardLayoutList(const syscall_context& c, uint32_t buffer_count, emulator_pointer keyboard_layouts);
         BOOL handle_NtUserGetKeyboardLayoutName(const syscall_context& c, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> name);
@@ -169,6 +194,10 @@ namespace sogen
                                              emulator_pointer buffer, uint64_t number_of_bytes_to_write,
                                              emulator_object<uint64_t> number_of_bytes_write);
         NTSTATUS handle_NtSetInformationVirtualMemory();
+        NTSTATUS handle_NtGetWriteWatch(const syscall_context& c, handle process_handle, ULONG flags, uint64_t base_address,
+                                        uint64_t region_size, uint64_t addresses, emulator_object<uint64_t> count,
+                                        emulator_object<ULONG> granularity);
+        NTSTATUS handle_NtResetWriteWatch(const syscall_context& c, handle process_handle, uint64_t base_address, uint64_t region_size);
         BOOL handle_NtLockVirtualMemory();
         NTSTATUS handle_NtUnlockVirtualMemory();
         NTSTATUS handle_NtFlushVirtualMemory(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
@@ -181,6 +210,8 @@ namespace sogen
                                      emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
         NTSTATUS handle_NtCreateMutant(const syscall_context& c, emulator_object<handle> mutant_handle, ACCESS_MASK desired_access,
                                        emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, BOOLEAN initial_owner);
+        NTSTATUS handle_NtQueryMutant(const syscall_context& c, handle mutant_handle, ULONG mutant_information_class,
+                                      uint64_t mutant_information, ULONG mutant_information_length, emulator_object<ULONG> return_length);
 
         // syscalls/namespace.cpp:
         NTSTATUS handle_NtCreatePrivateNamespace(const syscall_context& c, emulator_object<handle> namespace_handle,
@@ -205,6 +236,8 @@ namespace sogen
         NTSTATUS handle_NtCompareObjects(const syscall_context& c, handle first, handle second);
         DWORD handle_NtUserMsgWaitForMultipleObjectsEx(const syscall_context& c, ULONG count, emulator_object<handle> handles,
                                                        DWORD timeout, DWORD wake_mask, DWORD flags);
+        DWORD completion_NtUserMsgWaitForMultipleObjectsEx(const syscall_context& c, ULONG count, emulator_object<handle> handles,
+                                                           DWORD timeout, DWORD wake_mask, DWORD flags);
         NTSTATUS handle_NtWaitForMultipleObjects(const syscall_context& c, ULONG count, emulator_object<handle> handles,
                                                  WAIT_TYPE wait_type, BOOLEAN alertable, emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtWaitForMultipleObjects32(const syscall_context& c, ULONG count, emulator_object<uint32_t> handles,
@@ -213,11 +246,12 @@ namespace sogen
                                               emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtSignalAndWaitForSingleObject(const syscall_context& c, handle signal_handle, handle wait_handle,
                                                        BOOLEAN alertable, emulator_object<LARGE_INTEGER> timeout);
-        NTSTATUS handle_NtSetInformationObject(const syscall_context& c, handle /*h*/, OBJECT_INFORMATION_CLASS object_information_class,
-                                               emulator_pointer /*object_information*/, ULONG object_information_length);
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& c, handle handle, OBJECT_INFORMATION_CLASS object_information_class,
+                                               emulator_pointer object_information, ULONG object_information_length);
         NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, handle /*h*/, SECURITY_INFORMATION /*security_information*/,
                                               emulator_pointer security_descriptor, ULONG length, emulator_object<ULONG> length_needed);
-        NTSTATUS handle_NtSetSecurityObject();
+        NTSTATUS handle_NtSetSecurityObject(const syscall_context& c, handle h, SECURITY_INFORMATION /*security_information*/,
+                                            emulator_pointer /*security_descriptor*/);
 
         // syscalls/port.cpp:
         NTSTATUS handle_NtConnectPort(const syscall_context& c, emulator_object<handle> client_port_handle,
@@ -236,21 +270,22 @@ namespace sogen
                                             emulator_object<ULONG> connection_info_length);
         NTSTATUS handle_NtAlpcCreatePort(const syscall_context& c, emulator_object<handle> port_handle,
                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                         emulator_pointer port_attributes);
+                                         emulator_object<ALPC_PORT_ATTRIBUTES<EmulatorTraits<Emu64>>> port_attributes);
         NTSTATUS handle_NtCreatePort(const syscall_context& c, emulator_object<handle> port_handle,
                                      emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                      ULONG max_connection_info_length, ULONG max_message_length, ULONG max_pool_usage);
         NTSTATUS handle_NtAlpcConnectPort(const syscall_context& c, emulator_object<handle> port_handle,
                                           emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> server_port_name,
-                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
-                                          emulator_pointer port_attributes, ULONG flags, emulator_pointer /*required_server_sid*/,
-                                          emulator_pointer connection_message, emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
+                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                          emulator_object<ALPC_PORT_ATTRIBUTES<EmulatorTraits<Emu64>>> port_attributes, ULONG flags,
+                                          emulator_pointer /*required_server_sid*/, emulator_pointer connection_message,
+                                          emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
                                           emulator_pointer out_message_attributes, emulator_pointer in_message_attributes,
                                           emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtAlpcConnectPortEx(const syscall_context& c, emulator_object<handle> port_handle,
                                             emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> connection_port_object_attributes,
                                             emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*client_port_object_attributes*/,
-                                            emulator_pointer port_attributes, ULONG flags,
+                                            emulator_object<ALPC_PORT_ATTRIBUTES<EmulatorTraits<Emu64>>> port_attributes, ULONG flags,
                                             emulator_pointer /*server_security_requirements*/, emulator_pointer connection_message,
                                             emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
                                             emulator_pointer out_message_attributes, emulator_pointer in_message_attributes,
@@ -269,18 +304,11 @@ namespace sogen
         NTSTATUS handle_NtAlpcOpenSenderProcess(const syscall_context& c, emulator_object<handle> process_handle, handle port_handle,
                                                 emulator_pointer port_message, ULONG flags, ACCESS_MASK desired_access,
                                                 uint64_t object_attributes);
-        NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, handle port_handle, uint32_t information_class,
-                                               emulator_pointer information, uint32_t length, emulator_pointer return_length);
-        NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, handle port_handle, ULONG flags, handle section_handle,
-                                                EmulatorTraits<Emu64>::SIZE_T section_size, emulator_pointer alpc_section_handle,
-                                                emulator_pointer actual_section_size);
-        NTSTATUS handle_NtAlpcDeletePortSection(const syscall_context& c, handle port_handle, ULONG flags, uint64_t section_handle);
+        NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, handle port_handle, uint32_t port_information_class,
+                                               emulator_pointer port_information, uint32_t length, emulator_object<ULONG> return_length);
         NTSTATUS handle_NtAlpcCreateResourceReserve(const syscall_context& c, handle port_handle, ULONG flags,
                                                     EmulatorTraits<Emu64>::SIZE_T message_size, emulator_pointer resource_id);
         NTSTATUS handle_NtAlpcDeleteResourceReserve(const syscall_context& c, handle port_handle, ULONG flags, uint64_t resource_id);
-        NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, handle port_handle, ULONG flags,
-                                                emulator_pointer view_attributes);
-        NTSTATUS handle_NtAlpcDeleteSectionView(const syscall_context& c, handle port_handle, ULONG flags, emulator_pointer view_base);
         NTSTATUS handle_NtAlpcAcceptConnectPort(const syscall_context& c, emulator_object<handle> port_handle,
                                                 handle connection_port_handle, ULONG flags, emulator_pointer object_attributes,
                                                 emulator_pointer port_attributes, emulator_pointer port_context,
@@ -290,10 +318,11 @@ namespace sogen
                                                       emulator_object<PORT_MESSAGE64> port_message, uint32_t message_information_class,
                                                       emulator_pointer message_information, uint32_t length,
                                                       emulator_object<ULONG> return_length);
-        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& c, handle port_handle, uint32_t information_class,
-                                             emulator_pointer information, uint32_t length);
-        NTSTATUS handle_NtAlpcCreateSecurityContext();
-        NTSTATUS handle_NtAlpcDeleteSecurityContext();
+        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& c, handle port_handle, uint32_t port_information_class,
+                                             emulator_pointer port_information, uint32_t length);
+        NTSTATUS handle_NtAlpcCreateSecurityContext(const syscall_context& c, handle port_handle, ULONG flags,
+                                                    emulator_object<ALPC_SECURITY_ATTR<EmulatorTraits<Emu64>>> security_attribute);
+        NTSTATUS handle_NtAlpcDeleteSecurityContext(const syscall_context& c, handle port_handle, ULONG flags, handle context_handle);
         NTSTATUS handle_NtListenPort(const syscall_context& c, handle port_handle, emulator_pointer connection_request);
         NTSTATUS handle_NtAcceptConnectPort(const syscall_context& c, emulator_object<handle> server_port_handle,
                                             handle connection_port_handle, emulator_pointer connection_request, BOOLEAN accept_connection,
@@ -305,6 +334,13 @@ namespace sogen
         NTSTATUS handle_NtRequestWaitReplyPort(const syscall_context& c, handle port_handle,
                                                emulator_object<PORT_MESSAGE64> request_message,
                                                emulator_object<PORT_MESSAGE64> reply_message);
+        NTSTATUS handle_NtAlpcCreatePortSection(const syscall_context& c, handle port_handle, ULONG flags, handle section_handle,
+                                                uint64_t section_size, emulator_object<handle> alpc_section_handle,
+                                                emulator_object<uint64_t> actual_section_size);
+        NTSTATUS handle_NtAlpcDeletePortSection(const syscall_context& c, handle port_handle, ULONG flags, handle section_handle);
+        NTSTATUS handle_NtAlpcCreateSectionView(const syscall_context& c, handle port_handle, ULONG flags,
+                                                emulator_object<ALPC_DATA_VIEW_ATTR<EmulatorTraits<Emu64>>> view_attributes);
+        NTSTATUS handle_NtAlpcDeleteSectionView(const syscall_context& c, handle port_handle, ULONG flags, uint64_t view_base);
 
         // syscalls/process.cpp:
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, handle process_handle, uint32_t info_class,
@@ -365,7 +401,13 @@ namespace sogen
         NTSTATUS handle_NtDeleteKey(const syscall_context& c, handle key_handle);
         NTSTATUS handle_NtDeleteValueKey(const syscall_context& c, handle key_handle,
                                          emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> value_name);
-        NTSTATUS handle_NtNotifyChangeKey();
+        NTSTATUS handle_NtNotifyChangeKey(const syscall_context& c, handle key_handle, handle event, uint64_t apc_routine,
+                                          uint64_t apc_context, uint64_t io_status_block, ULONG completion_filter, BOOLEAN watch_tree,
+                                          uint64_t buffer, ULONG buffer_size, BOOLEAN asynchronous);
+        NTSTATUS handle_NtNotifyChangeMultipleKeys(const syscall_context& c, handle master_key_handle, ULONG count,
+                                                   uint64_t subordinate_objects, handle event, uint64_t apc_routine, uint64_t apc_context,
+                                                   uint64_t io_status_block, ULONG completion_filter, BOOLEAN watch_tree, uint64_t buffer,
+                                                   ULONG buffer_size, BOOLEAN asynchronous);
         NTSTATUS handle_NtCreateRegistryTransaction(const syscall_context& c, emulator_object<handle> transaction_handle,
                                                     ACCESS_MASK desired_access,
                                                     emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
@@ -387,6 +429,11 @@ namespace sogen
                                         emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                         emulator_object<ULARGE_INTEGER> maximum_size, ULONG section_page_protection,
                                         ULONG allocation_attributes, handle file_handle);
+        NTSTATUS handle_NtCreateSectionEx(const syscall_context& c, emulator_object<handle> section_handle, ACCESS_MASK desired_access,
+                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                          emulator_object<ULARGE_INTEGER> maximum_size, ULONG section_page_protection,
+                                          ULONG allocation_attributes, handle file_handle,
+                                          emulator_object<MEM_EXTENDED_PARAMETER64> extended_parameters, ULONG extended_parameter_count);
         NTSTATUS handle_NtOpenSection(const syscall_context& c, emulator_object<handle> section_handle, ACCESS_MASK /*desired_access*/,
                                       emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
         NTSTATUS handle_NtQuerySection(const syscall_context& c, handle section_handle, SECTION_INFORMATION_CLASS section_information_class,
@@ -407,17 +454,20 @@ namespace sogen
                                              ULONG extended_parameter_count);
         NTSTATUS handle_NtUnmapViewOfSection(const syscall_context& c, handle process_handle, uint64_t base_address);
         NTSTATUS handle_NtUnmapViewOfSectionEx(const syscall_context& c, handle process_handle, uint64_t base_address, ULONG /*flags*/);
-        NTSTATUS handle_NtAreMappedFilesTheSame();
+        NTSTATUS handle_NtAreMappedFilesTheSame(const syscall_context& c, uint64_t file1_mapped_as_an_image, uint64_t file2_mapped_as_file);
 
         // syscalls/semaphore.cpp:
         NTSTATUS handle_NtOpenSemaphore(const syscall_context& c, emulator_object<handle> semaphore_handle, ACCESS_MASK /*desired_access*/,
                                         emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
-        NTSTATUS handle_NtReleaseSemaphore(const syscall_context& c, handle semaphore_handle, ULONG release_count,
+        NTSTATUS handle_NtReleaseSemaphore(const syscall_context& c, handle semaphore_handle, LONG release_count,
                                            emulator_object<LONG> previous_count);
         NTSTATUS handle_NtCreateSemaphore(const syscall_context& c, emulator_object<handle> semaphore_handle,
                                           ACCESS_MASK /*desired_access*/,
-                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG initial_count,
-                                          ULONG maximum_count);
+                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, LONG initial_count,
+                                          LONG maximum_count);
+        NTSTATUS handle_NtQuerySemaphore(const syscall_context& c, handle semaphore_handle, ULONG semaphore_information_class,
+                                         emulator_object<SEMAPHORE_BASIC_INFORMATION> semaphore_information,
+                                         ULONG semaphore_information_length, emulator_object<ULONG> return_length);
 
         // syscalls/system.cpp:
         NTSTATUS handle_NtQuerySystemInformation(const syscall_context& c, uint32_t info_class, uint64_t system_information,
@@ -453,9 +503,15 @@ namespace sogen
         NTSTATUS handle_NtYieldExecution(const syscall_context& c);
         NTSTATUS handle_NtSetThreadExecutionState(const syscall_context& c, ULONG new_flags, emulator_object<ULONG> previous_flags);
         NTSTATUS handle_NtSuspendThread(const syscall_context& c, handle thread_handle, emulator_object<ULONG> previous_suspend_count);
+        NTSTATUS handle_NtCreateThreadStateChange(const syscall_context& c, emulator_object<handle> state_change_handle,
+                                                  ACCESS_MASK desired_access, uint64_t object_attributes, handle thread_handle,
+                                                  uint64_t reserved);
+        NTSTATUS handle_NtChangeThreadState(const syscall_context& c, handle state_change_handle, handle thread_handle,
+                                            uint32_t state_change_type, uint64_t extended_information, uint64_t extended_information_length,
+                                            uint64_t reserved);
         NTSTATUS handle_NtResumeThread(const syscall_context& c, handle thread_handle, emulator_object<ULONG> previous_suspend_count);
-        NTSTATUS handle_NtContinue(const syscall_context& c, emulator_object<CONTEXT64> thread_context, BOOLEAN raise_alert);
-        NTSTATUS handle_NtContinueEx(const syscall_context& c, emulator_object<CONTEXT64> thread_context, uint64_t continue_argument);
+        NTSTATUS handle_NtContinue(const syscall_context& c, uint64_t thread_context, BOOLEAN raise_alert);
+        NTSTATUS handle_NtContinueEx(const syscall_context& c, uint64_t thread_context, uint64_t continue_argument);
         NTSTATUS handle_NtGetNextThread(const syscall_context& c, handle process_handle, handle thread_handle,
                                         ACCESS_MASK /*desired_access*/, ULONG /*handle_attributes*/, ULONG flags,
                                         emulator_object<handle> new_thread_handle);
@@ -485,14 +541,13 @@ namespace sogen
         NTSTATUS handle_NtSetTimerResolution(const syscall_context&, ULONG /*desired_resolution*/, BOOLEAN set_resolution,
                                              emulator_object<ULONG> current_resolution);
         NTSTATUS handle_NtCreateTimer2(const syscall_context& c, emulator_object<handle> timer_handle, uint64_t reserved,
-                                       emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG attributes,
-                                       ACCESS_MASK desired_access);
+                                       uint64_t reserved2, ULONG attributes, ACCESS_MASK desired_access);
         NTSTATUS handle_NtCreateTimer(const syscall_context& c, emulator_object<handle> timer_handle, ACCESS_MASK desired_access,
                                       emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG timer_type);
         NTSTATUS handle_NtOpenTimer(const syscall_context& c, emulator_object<handle> timer_handle, ACCESS_MASK desired_access,
                                     emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
         NTSTATUS handle_NtSetTimer(const syscall_context& c, handle timer_handle, emulator_object<LARGE_INTEGER> due_time,
-                                   uint64_t timer_apc_routine, uint64_t timer_context, BOOLEAN resume_timer, LONG period,
+                                   uint64_t apc_routine, uint64_t apc_context, BOOLEAN resume_timer, LONG period,
                                    emulator_object<BOOLEAN> previous_state);
         NTSTATUS handle_NtSetTimer2(const syscall_context& c, handle timer_handle, emulator_object<LARGE_INTEGER> due_time,
                                     emulator_object<LARGE_INTEGER> period, uint64_t parameters);
@@ -500,8 +555,11 @@ namespace sogen
                                      uint64_t timer_set_information, ULONG timer_set_information_length);
         NTSTATUS handle_NtCancelTimer(const syscall_context& c, handle timer_handle, emulator_object<BOOLEAN> current_state);
         NTSTATUS handle_NtCancelTimer2(const syscall_context& c, handle timer_handle, uint64_t parameters);
+        NTSTATUS handle_NtQueryTimer(const syscall_context& c, handle timer_handle, ULONG information_class, uint64_t information,
+                                     ULONG information_length, emulator_object<ULONG> return_length);
 
         // syscalls/token.cpp:
+        NTSTATUS handle_NtImpersonateAnonymousToken(const syscall_context& c, handle thread_handle);
         NTSTATUS
         handle_NtDuplicateToken(const syscall_context&, handle existing_token_handle, ACCESS_MASK /*desired_access*/,
                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
@@ -548,7 +606,7 @@ namespace sogen
         NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& c, handle token_handle, BOOLEAN disable_all_privileges,
                                                 emulator_object<TOKEN_PRIVILEGES64> new_state, ULONG buffer_length,
                                                 emulator_object<TOKEN_PRIVILEGES64> previous_state, emulator_object<ULONG> return_length);
-        NTSTATUS handle_NtPrivilegeCheck(const syscall_context& c, handle token_handle, uint64_t required_privileges,
+        NTSTATUS handle_NtPrivilegeCheck(const syscall_context& c, handle client_token, emulator_pointer required_privileges,
                                          emulator_object<BOOLEAN> result);
         NTSTATUS handle_NtQuerySecurityPolicy();
         NTSTATUS handle_NtFlushInstructionCache(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
@@ -580,7 +638,8 @@ namespace sogen
         hdc handle_NtUserGetWindowDC(const syscall_context& c, hwnd window);
         hwnd handle_NtUserWindowFromDC(const syscall_context& c, hdc dc);
         uint64_t handle_NtUserGetControlBrush(const syscall_context& c, hwnd window, hdc dc, uint32_t control_type);
-        BOOL handle_NtUserReleaseDC();
+        BOOL handle_NtUserFillWindow(const syscall_context& c, hwnd parent_window, hwnd window, hdc dc, hbrush brush);
+        BOOL handle_NtUserReleaseDC(const syscall_context& c, hdc dc);
         hwnd handle_NtUserSetCapture(const syscall_context& c, hwnd window);
         BOOL handle_NtUserReleaseCapture(const syscall_context& c);
         BOOL handle_NtUserRegisterRawInputDevices(const syscall_context& c, emulator_pointer devices, uint32_t device_count, uint32_t size);
@@ -612,6 +671,8 @@ namespace sogen
         BOOL handle_NtUserClipCursor(const syscall_context& c, emulator_pointer rect);
         BOOL handle_NtUserGetWindowCompositionAttribute(const syscall_context& c, hwnd window,
                                                         emulator_object<USER_WINDOWCOMPOSITIONATTRIBDATA> attribute_data);
+        BOOL handle_NtUserSetWindowCompositionAttribute(const syscall_context& c, hwnd window,
+                                                        emulator_object<USER_WINDOWCOMPOSITIONATTRIBDATA> attribute_data);
         BOOL handle_NtUserSetCursorPos(const syscall_context& c, int32_t x, int32_t y);
         hcursor handle_NtUserSetCursor(const syscall_context& c, hcursor cursor);
         hcursor handle_NtUserGetCursor(const syscall_context& c);
@@ -619,7 +680,7 @@ namespace sogen
         BOOL handle_NtUserSetCursorIconData();
         BOOL handle_NtUserSetCursorIconDataEx();
         BOOL handle_NtUserGetRequiredCursorSizes();
-        NTSTATUS handle_NtUserFindExistingCursorIcon();
+        hicon handle_NtUserFindExistingCursorIcon();
         BOOL handle_NtUserDestroyCursor(const syscall_context& c, hicon icon, DWORD flags);
         hicon handle_NtUserGetCursorFrameInfo(const syscall_context& c, hicon icon, UINT frame, emulator_object<uint32_t> rate_jiffies,
                                               emulator_object<uint32_t> frame_count);
@@ -636,13 +697,21 @@ namespace sogen
                                            emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> window_name);
         BOOL handle_NtUserMoveWindow(const syscall_context& c, hwnd hwnd, int x, int y, int width, int height, BOOL repaint);
         BOOL completion_NtUserMoveWindow(const syscall_context& c, hwnd hwnd, int x, int y, int width, int height, BOOL repaint);
-        uint64_t handle_NtUserGetProcessWindowStation();
-        hwinsta handle_NtUserCreateWindowStation(const syscall_context& c,
-                                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                                 ACCESS_MASK desired_access, DWORD unknown2, DWORD unknown3, DWORD unknown4, DWORD unknown5,
-                                                 DWORD unknown6);
-        BOOL handle_NtUserCloseWindowStation(const syscall_context& c, hwinsta win_sta);
+        uint64_t handle_NtUserGetProcessWindowStation(const syscall_context& c);
+        uint64_t handle_NtUserCreateWindowStation(const syscall_context& c,
+                                                  emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                                  ACCESS_MASK desired_access);
+        BOOL handle_NtUserCloseWindowStation(const syscall_context& c, handle station);
+        BOOL handle_NtUserSetProcessWindowStation(const syscall_context& c, handle station);
+        uint64_t handle_NtUserCreateDesktopEx(const syscall_context& c,
+                                              emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                              emulator_pointer device, emulator_pointer devmode, DWORD flags, ACCESS_MASK desired_access,
+                                              ULONG heap_size);
+        BOOL handle_NtUserCloseDesktop(const syscall_context& c, handle desktop_handle);
         uint64_t handle_NtUserCallHwndParam(const syscall_context& c, hwnd hwnd, uint64_t param, uint32_t code);
+        BOOL handle_NtUserCallHwndLock(const syscall_context& c, hwnd hwnd, uint32_t routine);
+        uint64_t handle_NtUserCallHwnd(const syscall_context& c, hwnd hwnd, uint32_t routine);
+        uint64_t handle_NtUserCallOneParam(const syscall_context& c, uint64_t param, uint32_t routine);
         uint16_t handle_NtUserRegisterClassExWOW(const syscall_context& c, emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
                                                  emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
                                                  emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_version,
@@ -655,9 +724,11 @@ namespace sogen
                                          emulator_object<EMU_WNDCLASSEX> wnd_class_ex, emulator_pointer menu_name, BOOL /*ansi*/);
         int handle_NtUserGetClassName(const syscall_context& c, hwnd win_hwnd, BOOL real,
                                       emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name);
-        NTSTATUS handle_NtUserSetWindowsHookEx(const syscall_context& c, hinstance hmod, pointer module_name, DWORD thread_id,
-                                               int32_t id_hook, pointer lpfn, DWORD flags);
-        NTSTATUS handle_NtUserUnhookWindowsHookEx(const syscall_context& c, handle hook);
+        uint64_t handle_NtUserSetWindowsHookEx(const syscall_context& c, hinstance instance,
+                                               emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> module, DWORD thread_id, int hook_id,
+                                               pointer proc, BOOL ansi);
+        BOOL handle_NtUserUnhookWindowsHookEx(const syscall_context& c, uint64_t hook);
+        lresult handle_NtUserCallNextHookEx(const syscall_context& c, int code, wparam w_param, lparam l_param, BOOL ansi);
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, DWORD ex_style, emulator_object<LARGE_STRING> class_name,
                                          emulator_object<LARGE_STRING> cls_version, emulator_object<LARGE_STRING> window_name, DWORD style,
                                          int x, int y, int width, int height, hwnd parent, hmenu menu, hinstance instance, pointer l_param,
@@ -683,19 +754,28 @@ namespace sogen
                                           uint64_t result_info, DWORD type, BOOL ansi);
         uint64_t completion_NtUserMessageCall(const syscall_context& c, hwnd hwnd, UINT msg, uint64_t w_param, uint64_t l_param,
                                               uint64_t result_info, DWORD type, BOOL ansi);
+        BOOL handle_NtUserGetComboBoxInfo(const syscall_context& c, hwnd combo_box, emulator_pointer combo_box_info);
+        BOOL completion_NtUserGetComboBoxInfo(const syscall_context& c, hwnd combo_box, emulator_pointer combo_box_info);
         uint64_t handle_NtUserDispatchMessage(const syscall_context& c, emulator_object<msg> message);
         BOOL handle_NtUserTranslateMessage(const syscall_context& c, emulator_object<msg> message, UINT flags);
         BOOL handle_NtUserGetMessage(const syscall_context& c, emulator_object<msg> message, hwnd hwnd, UINT msg_filter_min,
                                      UINT msg_filter_max);
+        DWORD handle_NtUserGetMessagePos(const syscall_context& c);
         BOOL handle_NtUserPeekMessage(const syscall_context& c, emulator_object<msg> message, hwnd hwnd, UINT msg_filter_min,
                                       UINT msg_filter_max, UINT remove_message);
         BOOL handle_NtUserWaitMessage(const syscall_context& c);
+        BOOL completion_NtUserGetMessage(const syscall_context& c, emulator_object<msg> message, hwnd hwnd, UINT msg_filter_min,
+                                         UINT msg_filter_max);
+        BOOL completion_NtUserPeekMessage(const syscall_context& c, emulator_object<msg> message, hwnd hwnd, UINT msg_filter_min,
+                                          UINT msg_filter_max, UINT remove_message);
+        BOOL completion_NtUserWaitMessage(const syscall_context& c);
         BOOL handle_NtUserInvalidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
         int handle_NtUserScrollWindowEx(const syscall_context& c, hwnd hwnd, int dx, int dy, emulator_object<RECT> scroll_rect,
                                         emulator_object<RECT> clip_rect, uint64_t update_region, emulator_object<RECT> update_rect,
                                         UINT flags);
         BOOL handle_NtUserValidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect);
         BOOL handle_NtUserGetUpdateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
+        int32_t handle_NtUserGetUpdateRgn(const syscall_context& c, hwnd hwnd, handle region, BOOL erase);
         BOOL handle_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
         BOOL completion_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
         int32_t handle_NtUserGetKeyNameText(const syscall_context& c, int32_t l_param, emulator_pointer buffer, int32_t character_count);
@@ -728,15 +808,19 @@ namespace sogen
                                        UINT flags);
         BOOL completion_NtUserSetWindowPos(const syscall_context& c, hwnd hWnd, hwnd hwnd_insert_after, int x, int y, int cx, int cy,
                                            UINT flags);
-        emulator_pointer handle_NtUserBeginDeferWindowPos(const syscall_context& c, int num_windows);
-        emulator_pointer handle_NtUserDeferWindowPos(const syscall_context& c, emulator_pointer hdwp, hwnd hWnd, hwnd hwnd_insert_after,
-                                                     int x, int y, int cx, int cy, UINT flags);
-        BOOL handle_NtUserEndDeferWindowPos(const syscall_context& c, emulator_pointer hdwp);
-        BOOL handle_NtUserEndDeferWindowPosEx(const syscall_context& c, emulator_pointer hdwp, BOOL async);
+        uint64_t handle_NtUserBeginDeferWindowPos(const syscall_context& c, int count);
+        uint64_t handle_NtUserDeferWindowPos(const syscall_context& c, uint64_t batch_handle, hwnd window, hwnd window_insert_after, int x,
+                                             int y, int width, int height, UINT flags);
+        BOOL handle_NtUserEndDeferWindowPos(const syscall_context& c, uint64_t batch_handle);
+        BOOL handle_NtUserEndDeferWindowPosEx(const syscall_context& c, uint64_t batch_handle, BOOL async);
         BOOL handle_NtUserSetForegroundWindow(const syscall_context& c, hwnd hWnd);
+        uint64_t handle_NtUserDeferWindowPosAndBand(const syscall_context& c, uint64_t batch_handle, hwnd window, hwnd window_insert_after,
+                                                    int x, int y, int width, int height, UINT flags, uint32_t band, BOOL use_band);
+        BOOL completion_NtUserEndDeferWindowPosEx(const syscall_context& c, uint64_t batch_handle, BOOL async);
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
         hwnd completion_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
+        BOOL handle_NtUserZapActiveAndFocus(const syscall_context& c);
         emulator_pointer handle_NtUserSetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
                                                        BOOL Ansi);
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
@@ -744,12 +828,15 @@ namespace sogen
         uint32_t handle_NtUserSetWindowLong(const syscall_context& c, handle hWnd, int nIndex, uint32_t dwNewLong, BOOL Ansi);
         uint16_t handle_NtUserSetWindowWord(const syscall_context& c, handle hWnd, int nIndex, uint16_t wNewWord);
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, hwnd child_hwnd, UINT flags);
+        BOOL handle_NtUserIsTopLevelWindow(const syscall_context& c, hwnd window);
         BOOL handle_NtUserRedrawWindow(const syscall_context& c, hwnd hwnd, emulator_object<RECT> update_rect, uint64_t update_rgn,
                                        UINT flags);
         NTSTATUS handle_NtUserGetCPD();
         BOOL handle_NtUserSetWindowFNID(const syscall_context& c, hwnd hwnd, WORD fnid);
         BOOL handle_NtUserSetDialogPointer(const syscall_context& c, hwnd hwnd, emulator_pointer ptr);
         BOOL handle_NtUserSetDialogSystemMenu(const syscall_context& c, hwnd hwnd);
+        BOOL handle_NtUserSetSysMenu(const syscall_context& c, hwnd hwnd, hmenu menu);
+        BOOL handle_NtUserSetSystemMenu(const syscall_context& c, hwnd hwnd, hmenu menu);
         BOOL handle_NtUserSetMsgBox(const syscall_context& c, hwnd hwnd);
         BOOL handle_NtUserEnableWindow(const syscall_context& c, hwnd hwnd, BOOL enable);
         BOOL handle_NtUserDeleteMenu(const syscall_context& c, uint64_t menu, UINT position, UINT flags);
@@ -758,8 +845,7 @@ namespace sogen
         ULONG handle_NtUserGetAtomName(const syscall_context& c, RTL_ATOM atom,
                                        emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> atom_name);
         NTSTATUS handle_NtUserGetDisplayConfigBufferSizes(const syscall_context& c, UINT32 flags,
-                                                          emulator_object<UINT32> num_path_array_elements,
-                                                          emulator_object<UINT32> num_mode_info_array_elements);
+                                                          emulator_object<UINT32> num_path_array_elements);
         NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, UINT32 flags, emulator_object<UINT32> num_path_array_elements,
                                                  emulator_pointer path_array, emulator_object<UINT32> current_topology_id,
                                                  emulator_pointer reserved);
@@ -775,6 +861,7 @@ namespace sogen
         BOOL handle_NtUserValidateTimerCallback(const syscall_context& c, uint64_t timer_proc);
         uint32_t handle_NtUserGetQueueStatusReadonly(const syscall_context& c, UINT flags);
         uint32_t handle_NtUserGetQueueStatus(const syscall_context& c, UINT flags);
+        BOOL handle_NtUserThreadMessageQueueAttached(const syscall_context& c, DWORD thread_id);
         uint64_t handle_NtUserCreateAcceleratorTable(const syscall_context& c, emulator_pointer entries, int32_t entry_count);
         BOOL handle_NtUserDestroyAcceleratorTable(const syscall_context& c, handle accelerator_table);
         int32_t handle_NtUserCopyAcceleratorTable();
@@ -784,53 +871,59 @@ namespace sogen
                                               emulator_object<EMU_MENUITEMINFO> item_info,
                                               emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> item_text);
         hmenu handle_NtUserCreatePopupMenu(const syscall_context& c);
-        BOOL handle_NtUserSetMenu();
+        BOOL handle_NtUserSetMenu(const syscall_context& c, hwnd hwnd, hmenu menu, BOOL redraw);
         BOOL handle_NtUserSetMenuDefaultItem(const syscall_context& c, hmenu menu, UINT item, UINT by_position);
         BOOL handle_NtUserEndMenu();
         BOOL handle_NtUserRemoveMenu(const syscall_context& c, hmenu menu, UINT position, UINT flags);
         BOOL handle_NtUserDestroyMenu(const syscall_context& c, hmenu menu);
         BOOL handle_NtUserDrawMenuBar(const syscall_context& c, hwnd hwnd);
-        BOOL handle_NtUserSetWindowCompositionAttribute(const syscall_context& c, hwnd hwnd, emulator_pointer data);
+        int32_t handle_NtUserEnableMenuItem(const syscall_context& c, hmenu menu, UINT item, UINT enable);
+        int32_t handle_NtUserCheckMenuItem(const syscall_context& c, hmenu menu, UINT item, UINT check);
         BOOL handle_NtUserCreateCaret();
         BOOL handle_NtUserDestroyCaret();
         BOOL handle_NtUserSetCaretPos(const syscall_context& c, int32_t x, int32_t y);
         BOOL handle_NtUserGetCaretPos(const syscall_context& c, emulator_pointer point_ptr);
         BOOL handle_NtUserShowCaret();
         BOOL handle_NtUserHideCaret();
-        BOOL handle_NtUserGetObjectInformation(const syscall_context& c, handle object, int index, uint64_t information, ULONG length,
-                                               emulator_object<ULONG> length_needed);
+        BOOL handle_NtUserGetObjectInformation(const syscall_context& c, handle object, int index, emulator_pointer information,
+                                               DWORD length, emulator_object<DWORD> needed);
+        BOOL handle_NtUserGetCurrentInputMessageSource(const syscall_context& c, emulator_pointer source);
         uint64_t handle_NtUserQueryWindow(const syscall_context& c, hwnd window_handle, uint32_t query_type);
         int handle_NtUserSetScrollInfo();
         BOOL handle_NtUserIsTouchWindow();
-        BOOL handle_NtUserGetWindowPlacement();
+        uint64_t handle_NtUserGetTopLevelWindow(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, hwnd window_handle, emulator_pointer placement_address);
         BOOL handle_NtUserTrackMouseEvent();
         BOOL handle_NtUserSetWindowRgn();
         BOOL handle_NtUserAlterWindowStyle();
         hwnd handle_NtUserSetActiveWindow(const syscall_context& c, hwnd hWnd);
-        BOOL handle_NtUserZapActiveAndFocus(const syscall_context& c);
         BOOL handle_NtUserShowScrollBar(const syscall_context& c, hwnd hWnd, uint32_t bar, BOOL show);
         BOOL handle_NtUserGetWindowBand(const syscall_context& c, hwnd hWnd, emulator_object<uint32_t> band);
         BOOL handle_NtUserRegisterPointerDeviceNotifications(const syscall_context& c, hwnd hWnd, BOOL notify_range);
         NTSTATUS handle_NtUserSelectPalette();
         BOOL handle_NtUserSwapMouseButton();
         hwnd handle_NtUserWindowFromPoint(const syscall_context& c, int32_t x, int32_t y);
-        hwnd handle_NtUserChildWindowFromPointEx(const syscall_context& c, hwnd parent, int32_t x, int32_t y, uint32_t flags);
+        hwnd handle_NtUserChildWindowFromPointEx(const syscall_context& c, hwnd parent, uint64_t point, uint32_t flags);
         hwnd handle_NtUserRealChildWindowFromPoint(const syscall_context& c, hwnd parent, int32_t x, int32_t y);
-        DWORD handle_NtUserGetMessagePos(const syscall_context& c);
         BOOL handle_NtUserGetKeyboardState(const syscall_context& c, emulator_pointer key_state);
         uint32_t handle_NtUserGetDoubleClickTime();
         uint32_t handle_NtUserGetCaretBlinkTime();
+        BOOL handle_NtUserFlashWindowEx();
         BOOL handle_NtUserModifyWindowTouchCapability();
+        BOOL handle_NtUserEnableMouseInPointer(const syscall_context&, BOOL enable);
         uint32_t handle_NtUserGetClipboardSequenceNumber();
         BOOL handle_NtUserOpenClipboard();
         BOOL handle_NtUserCloseClipboard();
         BOOL handle_NtUserEmptyClipboard();
+        BOOL handle_NtUserAddClipboardFormatListener(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserRemoveClipboardFormatListener(const syscall_context& c, hwnd window);
         uint64_t handle_NtUserGetClipboardData();
         uint64_t handle_NtUserConvertMemHandle();
         uint64_t handle_NtUserSetClipboardData();
         uint64_t handle_NtUserGetProcessDpiAwarenessContext();
-        NTSTATUS handle_NtUserSetProcessDpiAwarenessContext();
+        BOOL handle_NtUserSetProcessDpiAwarenessContext();
         BOOL handle_NtUserSetProcessLaunchForegroundPolicy();
+        uint32_t handle_NtUserSendInput(const syscall_context& c, uint32_t input_count, emulator_pointer inputs, int32_t input_size);
         uint32_t handle_NtUserMapVirtualKeyEx(const syscall_context& c, uint32_t code, uint32_t map_type, uint32_t keyboard_id,
                                               uint64_t keyboard_layout);
         int32_t handle_NtUserToUnicodeEx(const syscall_context& c, uint32_t virtual_key, uint32_t scan_code, emulator_pointer key_state,
@@ -839,12 +932,23 @@ namespace sogen
         uint64_t handle_NtUserAttachThreadInput();
         BOOL handle_NtUserRegisterTouchHitTestingWindow();
         BOOL handle_NtUserGetGUIThreadInfo(const syscall_context& c, uint32_t thread_id, emulator_pointer info);
-        BOOL handle_NtUserGetCurrentInputMessageSource(const syscall_context& c, emulator_pointer source);
         BOOL handle_NtUserSetWinEventHook();
         BOOL handle_NtUserUnhookWinEvent();
         BOOL handle_NtUserDisableThreadIme();
         BOOL handle_NtUserGetPointerDevices();
         BOOL handle_NtUserHwndQueryRedirectionInfo();
+        BOOL handle_NtUserSetImeHotKey();
+        int16_t handle_NtUserVkKeyScanEx();
+        BOOL handle_NtUserSetLayeredWindowAttributes();
+        BOOL handle_NtUserSetWindowFeedbackSetting();
+        BOOL handle_NtUserUpdateLayeredWindow(const syscall_context& c, hwnd window, hdc destination_dc, emulator_object<POINT> destination,
+                                              emulator_object<SIZE> size, hdc source_dc, emulator_object<POINT> source, COLORREF color_key,
+                                              emulator_pointer blend, DWORD flags, emulator_pointer dirty_rect);
+        BOOL handle_NtUserUpdateClientRect(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserRedrawFrame(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserThunkedMenuInfo(const syscall_context& c, hmenu menu, emulator_pointer menu_info);
+        BOOL handle_NtUserSetWindowPlacement(const syscall_context& c, hwnd window, emulator_pointer placement);
+        BOOL handle_NtUserIsChildWindowDpiMessageEnabled();
 
         // syscalls/gdi.cpp:
         NTSTATUS handle_NtDxgkIsFeatureEnabled();
@@ -852,6 +956,8 @@ namespace sogen
         NTSTATUS handle_NtGdiInit2(const syscall_context& c);
         uint32_t handle_NtGdiGetDeviceCaps(const syscall_context& c, hdc dc, uint32_t index);
         uint32_t handle_NtGdiGetDeviceCapsAll(const syscall_context& c, hdc dc, emulator_pointer caps);
+        COLORREF handle_NtGdiGetNearestColor(const syscall_context& c, hdc dc, COLORREF color);
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& c, hdc dc, emulator_pointer rect, uint32_t flags);
         uint32_t handle_NtGdiComputeXformCoefficients(const syscall_context& c, hdc dc);
         BOOL handle_NtGdiFlush(const syscall_context& c);
         uint64_t handle_NtGdiCreateSolidBrush(const syscall_context& c, uint32_t color, uint64_t unused);
@@ -861,6 +967,7 @@ namespace sogen
         uint64_t handle_NtGdiCreateHalftonePalette(const syscall_context& c);
         NTSTATUS handle_NtGdiDoPalette();
         uint64_t handle_NtGdiCreateCompatibleDC(const syscall_context& c, hdc dc);
+        DWORD handle_NtUserGetGuiResources(const syscall_context& c, handle process, DWORD flags);
         int32_t handle_NtGdiSaveDC(const syscall_context& c, hdc dc);
         BOOL handle_NtGdiRestoreDC(const syscall_context& c, hdc dc, int32_t saved_dc);
         uint64_t handle_NtGdiAddFontMemResourceEx(const syscall_context& c, emulator_pointer buffer, uint32_t buffer_size,
@@ -871,12 +978,13 @@ namespace sogen
         uint64_t handle_NtGdiCreateCompatibleBitmap(const syscall_context& c, hdc dc, uint32_t width, uint32_t height);
         uint64_t handle_NtGdiCreateBitmap(const syscall_context& c, uint32_t width, uint32_t height, uint32_t planes, uint32_t bits_pixel,
                                           emulator_pointer bits);
+        int32_t handle_NtGdiGetBitmapBits(const syscall_context& c, handle bitmap, int32_t count, emulator_pointer bits);
         uint64_t handle_NtGdiCreateDIBSection(const syscall_context& c, hdc dc, uint64_t section_app, uint32_t offset,
                                               emulator_pointer info, uint32_t usage, uint32_t header_size, uint32_t flags,
                                               uint64_t color_space, emulator_object<emulator_pointer> bits);
-        uint64_t handle_NtGdiCreateDIBitmapInternal(const syscall_context& c, hdc dc, uint32_t width, uint32_t height, uint32_t usage,
-                                                    emulator_pointer bits, emulator_pointer info, uint32_t info_header_size, uint32_t init,
-                                                    uint32_t offset, uint32_t cj, uint32_t i_usage);
+        uint64_t handle_NtGdiCreateDIBitmapInternal(const syscall_context& c, hdc dc, int32_t width, int32_t height, uint32_t init,
+                                                    emulator_pointer bits, emulator_pointer info, uint32_t usage, uint32_t max_info,
+                                                    uint32_t max_bits, uint32_t flags, uint64_t color_transform);
         int handle_NtGdiSetDIBitsToDeviceInternal(const syscall_context& c, hdc dc, int x_dest, int y_dest, uint32_t width, uint32_t height,
                                                   int x_src, int y_src, uint32_t start_scan, uint32_t scan_lines, emulator_pointer bits,
                                                   emulator_pointer info, uint32_t color_use, uint32_t max_bits, uint32_t max_info,
@@ -895,7 +1003,7 @@ namespace sogen
         uint64_t handle_NtGdiSelectFont(const syscall_context& c, hdc dc, uint64_t font);
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, handle bitmap);
         BOOL handle_NtGdiGetDCDword(const syscall_context& c, hdc dc, uint32_t index, emulator_pointer result);
-        BOOL handle_NtGdiGetAndSetDCDword(const syscall_context& c, hdc dc, uint32_t index, uint32_t value, emulator_pointer prev_value);
+        BOOL handle_NtGdiGetAndSetDCDword(const syscall_context& c, hdc dc, uint32_t method, uint32_t value, emulator_pointer result);
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, hdc dc, int x, int y, emulator_pointer prev);
         BOOL handle_NtGdiSetBitmapDimension(const syscall_context& c, handle bitmap, LONG width, LONG height, emulator_pointer prev_size);
         uint64_t handle_NtGdiHfontCreate(const syscall_context& c, emulator_pointer logfont, uint32_t angle);
@@ -909,16 +1017,15 @@ namespace sogen
                                              uint32_t file_count, uint32_t flags, uint32_t thread_id, emulator_pointer design_vector);
         uint32_t handle_NtGdiGetTextMetricsW(const syscall_context& c, hdc dc, emulator_pointer ptm, uint32_t cj);
         int32_t handle_NtGdiGetTextFaceW(const syscall_context& c, hdc dc, int32_t count, emulator_pointer face_name, BOOL alias_name);
-        NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& c, uint32_t action, uint32_t param, emulator_pointer pv_param,
-                                                   uint32_t win_ini);
-        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, uint32_t action, uint32_t param,
-                                                         emulator_pointer pv_param, uint32_t dpi);
+        uint32_t handle_NtGdiGetKerningPairs(const syscall_context& c, hdc dc, uint32_t pair_count, emulator_pointer pairs);
         uint32_t handle_NtGdiGetGlyphOutline(const syscall_context& c, hdc dc, UINT character, UINT format, emulator_pointer glyph_metrics,
                                              DWORD buffer_size, emulator_pointer buffer, emulator_pointer mat2);
         uint32_t handle_NtGdiGetOutlineTextMetricsInternalW(const syscall_context& c, hdc dc, uint32_t cj_copy, emulator_pointer metrics,
                                                             emulator_pointer unknown);
         BOOL handle_NtGdiGetTextExtent(const syscall_context& c, hdc dc, emulator_pointer text, int32_t char_count, emulator_pointer size,
                                        ULONG flags);
+        BOOL handle_NtGdiGetTextExtentExW(const syscall_context& c, hdc dc, emulator_pointer text, ULONG char_count, ULONG max_extent,
+                                          emulator_object<ULONG> fit, emulator_pointer extents, emulator_pointer size, ULONG flags);
         BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, hdc dc, UINT first_char, UINT char_count, emulator_pointer chars,
                                        UINT flags, emulator_pointer buffer);
         BOOL handle_NtGdiGetCharABCWidthsW(const syscall_context& c, hdc dc, UINT first_char, UINT char_count, emulator_pointer chars,
@@ -926,9 +1033,13 @@ namespace sogen
         NTSTATUS handle_NtGdiExtCreateRegion();
         BOOL handle_NtGdiTransparentBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int dst_width, int dst_height,
                                         hdc src_dc, int x_src, int y_src, int src_width, int src_height, COLORREF transparent_color);
+        BOOL handle_NtGdiAlphaBlend(const syscall_context& c, hdc dst_dc, LONG x_dst, LONG y_dst, LONG dst_width, LONG dst_height,
+                                    hdc src_dc, LONG x_src, LONG y_src, LONG src_width, LONG src_height, DWORD blend_function,
+                                    handle color_transform);
         uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, LONG x_left, LONG y_top, LONG x_right, LONG y_bottom);
         BOOL handle_NtGdiEqualRgn(const syscall_context& c, handle first_region, handle second_region);
-        int32_t handle_NtGdiCombineRgn(const syscall_context& c, handle destination, handle first, handle second, int32_t mode);
+        int32_t handle_NtGdiCombineRgn(const syscall_context& c, handle destination, handle first_source, handle second_source,
+                                       int32_t mode);
         int32_t handle_NtGdiGetRandomRgn(const syscall_context& c, hdc dc, uint64_t region, LONG index);
         uint32_t handle_NtGdiGetRegionData(const syscall_context& c, handle hrgn, ULONG buffer_size, emulator_pointer region_data);
         int32_t handle_NtGdiGetAppClipBox(const syscall_context& c, hdc dc, emulator_object<RECT> rect);
@@ -939,6 +1050,9 @@ namespace sogen
         int32_t handle_NtGdiExtSelectClipRgn(const syscall_context& c, hdc dc, uint64_t region, LONG mode);
         BOOL handle_NtGdiLineTo(const syscall_context& c, hdc dc, LONG x_end, LONG y_end);
         BOOL handle_NtGdiRectangle(const syscall_context& c, hdc dc, LONG left, LONG top, LONG right, LONG bottom);
+        uint32_t handle_NtGdiGetGlyphIndicesW(const syscall_context& c, hdc dc, emulator_pointer text, int32_t char_count,
+                                              emulator_pointer glyph_indices, uint32_t flags);
+        BOOL handle_NtGdiPolyPolyDraw();
         BOOL handle_NtGdiPatBlt(const syscall_context& c, hdc dc, LONG x, LONG y, LONG width, LONG height, DWORD rop);
         COLORREF handle_NtGdiSetPixel(const syscall_context& c, hdc dc, int x, int y, COLORREF color);
         COLORREF handle_NtGdiGetPixel(const syscall_context& c, hdc dc, int x, int y);
@@ -949,11 +1063,14 @@ namespace sogen
         BOOL handle_NtGdiPolyPatBlt(const syscall_context& c, hdc dc, DWORD rop, emulator_pointer poly, DWORD count, DWORD mode);
         BOOL handle_NtGdiExtTextOutW(const syscall_context& c, hdc dc, LONG x, LONG y, UINT options, emulator_pointer rect,
                                      emulator_pointer text, UINT count, emulator_pointer dx, DWORD code_page);
-        BOOL handle_NtGdiGetRealizationInfo(const syscall_context& c, hdc dc, emulator_pointer realization_info, uint64_t font);
+        BOOL handle_NtGdiGetRealizationInfo(const syscall_context& c, hdc dc, emulator_pointer realization_info);
+        BOOL handle_NtGdiFontIsLinked(const syscall_context& c, hdc dc);
+        uint32_t handle_NtGdiGetFontData(const syscall_context& c, hdc dc, uint32_t table, uint32_t offset, emulator_pointer buffer,
+                                         uint32_t size);
         NTSTATUS handle_NtGdiGetEntry(const syscall_context& c, uint32_t handle_value, emulator_pointer entry_ptr);
         int32_t handle_NtGdiSetIcmMode();
         NTSTATUS handle_NtGdiSetLayout();
-        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, hdc dc, uint32_t object_type);
+        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, hdc dc, int32_t object_type);
         BOOL handle_NtGdiUnrealizeObject(const syscall_context& c, handle h);
         BOOL handle_NtGdiMoveToEx(const syscall_context& c, hdc dc, LONG x, LONG y, emulator_pointer old_point_ptr);
         uint64_t handle_NtGdiSelectBrushLocal(const syscall_context& c, hdc dc, uint32_t brush, emulator_pointer old_brush_ptr);
@@ -1012,7 +1129,6 @@ namespace sogen
         NTSTATUS handle_NtDCompositionGetFrameStatistics(const syscall_context& c,
                                                          emulator_object<DCOMPOSITION_FRAME_STATISTICS> statistics,
                                                          emulator_pointer reserved);
-
         NTSTATUS handle_NtDCompositionCreateChannel(const syscall_context& c, emulator_object<handle> channel_handle,
                                                     emulator_object<uint64_t> section_size, emulator_object<uint64_t> section_base);
         NTSTATUS handle_NtDCompositionDestroyChannel(const syscall_context& c, handle channel_handle);
@@ -1069,7 +1185,6 @@ namespace sogen
                                                                   uint64_t a4, uint64_t a5, uint64_t a6);
         NTSTATUS handle_NtDCompositionSetChildRootVisual(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                                                          uint64_t a5, uint64_t a6);
-
         NTSTATUS handle_NtBindCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5,
                                                  uint64_t a6);
         NTSTATUS handle_NtUnBindCompositionSurface(const syscall_context& c, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -1217,7 +1332,12 @@ namespace sogen
                                               const ULONG input_buffer_length, const emulator_pointer output_buffer,
                                               const ULONG output_buffer_length)
         {
-            const auto resolved_file_handle = c.proc.resolve_object_pseudo_handle(file_handle, c.vcpu.active_thread);
+            auto resolved_file_handle = c.proc.resolve_object_pseudo_handle(file_handle, c.vcpu.active_thread);
+            if (file_handle == STDIN_HANDLE || file_handle == STDOUT_HANDLE)
+            {
+                resolved_file_handle = c.proc.console_handle;
+            }
+
             auto* device = c.proc.devices.get(resolved_file_handle);
             if (!device)
             {
@@ -1264,6 +1384,7 @@ namespace sogen
             }
 
             io_device_context context{c.emu};
+            context.source_handle = file_handle;
             context.event = event;
             context.apc_routine = apc_routine;
             context.apc_context = apc_context;
@@ -1274,6 +1395,15 @@ namespace sogen
             context.output_buffer = output_buffer;
             context.output_buffer_length = output_buffer_length;
             context.vcpu = &c.vcpu;
+
+            if (c.proc.is_wow64_process && io_status_block)
+            {
+                const auto native_iosb = io_status_block.read();
+                if (native_iosb.Pointer != 0)
+                {
+                    context.wow64_io_status_block.set_address(static_cast<emulator_pointer>(native_iosb.Pointer));
+                }
+            }
 
             try
             {
@@ -1295,8 +1425,35 @@ namespace sogen
             }
         }
 
-        NTSTATUS handle_NtQueryWnfStateData()
+        NTSTATUS handle_NtQueryWnfStateData(const syscall_context&, const emulator_object<uint64_t> state_name,
+                                            const emulator_pointer /*type_id*/, const emulator_pointer /*explicit_scope*/,
+                                            const emulator_object<ULONG> change_stamp, const emulator_pointer buffer,
+                                            const emulator_object<ULONG> buffer_size)
         {
+            const auto name = state_name.try_read();
+            if (!name)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            // External WNF state names are XORed with this key; the decoded low bits hold the version and the data scope.
+            constexpr uint64_t state_name_key = 0x41C64E6DA3BC0074;
+            constexpr uint64_t max_data_scope = 5;
+            const auto decoded = *name ^ state_name_key;
+            if ((decoded & 0xF) != 1 || ((decoded >> 6) & 0xF) > max_data_scope)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto size = buffer_size.try_read();
+            if (!change_stamp || !size || (!buffer && *size != 0))
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            // There is no WNF store, so every well-formed name reads like one that was never published.
+            change_stamp.write(0);
+            buffer_size.write(0);
             return STATUS_SUCCESS;
         }
 
@@ -1311,6 +1468,16 @@ namespace sogen
         {
             c.win_emu.yield_thread(c.vcpu, true);
             return STATUS_SUCCESS;
+        }
+
+        BOOL handle_NtUserSystemParametersInfo(const syscall_context& c, uint32_t action, uint32_t param, emulator_pointer value,
+                                               uint32_t win_ini);
+        BOOL handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, uint32_t action, uint32_t param, emulator_pointer value,
+                                                     uint32_t win_ini, uint32_t dpi);
+
+        BOOL handle_NtUserIsWindowBroadcastingDpiToChildren()
+        {
+            return FALSE;
         }
 
         NTSTATUS handle_NtUpdateWnfStateData()
@@ -1384,11 +1551,6 @@ namespace sogen
             }
 
             return STATUS_SUCCESS;
-        }
-
-        NTSTATUS handle_NtCreateDebugObject()
-        {
-            return STATUS_NOT_SUPPORTED;
         }
 
         NTSTATUS handle_NtAddAtomEx(const syscall_context& c, const uint64_t atom_name, const ULONG length,
@@ -1489,16 +1651,6 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetInformationDebugObject()
-        {
-            return STATUS_NOT_SUPPORTED;
-        }
-
-        NTSTATUS handle_NtRemoveProcessDebug()
-        {
-            return STATUS_NOT_SUPPORTED;
-        }
-
         NTSTATUS handle_NtNotifyChangeDirectoryFileEx()
         {
             return STATUS_NOT_SUPPORTED;
@@ -1516,6 +1668,40 @@ namespace sogen
                 l.LowPart = static_cast<std::uint32_t>(value);
                 l.HighPart = static_cast<std::int32_t>(value >> 32);
             });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAllocateUuids(const syscall_context& c, const emulator_object<ULARGE_INTEGER> time,
+                                        const emulator_object<ULONG> range, const emulator_object<ULONG> sequence,
+                                        const emulator_pointer seed)
+        {
+            const auto system_time = utils::convert_to_ksystem_time(c.win_emu.clock().system_now());
+            const uint64_t current_time = (static_cast<uint64_t>(static_cast<DWORD>(system_time.High1Time)) << 32) | system_time.LowPart;
+
+            if (c.proc.next_uuid_time == 0)
+            {
+                auto seed_value = current_time ^ c.win_emu.clock().timestamp_counter() ^ c.proc.ntdll_image_base;
+                for (auto& byte : c.proc.uuid_seed)
+                {
+                    seed_value ^= seed_value << 13;
+                    seed_value ^= seed_value >> 7;
+                    seed_value ^= seed_value << 17;
+                    byte = static_cast<uint8_t>(seed_value);
+                }
+
+                c.proc.uuid_seed[0] = static_cast<uint8_t>((c.proc.uuid_seed[0] | 0x02) & ~0x01);
+                c.proc.uuid_sequence = static_cast<uint32_t>(seed_value) & 0x3FFF;
+            }
+
+            constexpr ULONG uuid_range = 10000;
+            const uint64_t uuid_time = std::max(current_time, c.proc.next_uuid_time);
+            c.proc.next_uuid_time = uuid_time + uuid_range;
+
+            time.write(ULARGE_INTEGER{.QuadPart = uuid_time});
+            range.write(uuid_range);
+            sequence.write(c.proc.uuid_sequence);
+            c.emu.write_memory(seed, c.proc.uuid_seed.data(), c.proc.uuid_seed.size());
 
             return STATUS_SUCCESS;
         }
@@ -1550,9 +1736,41 @@ namespace sogen
             }
         }
 
-        NTSTATUS handle_NtNotifyChangeDirectoryFile()
+        // Directory changes are not tracked, so a watch stays pending, and so does the directory handle callers without an
+        // event wait on. Completing it at once reports a change that never happened, and watchers that rescan and watch
+        // again then spin forever.
+        NTSTATUS handle_NtNotifyChangeDirectoryFile(const syscall_context& c, const handle file_handle, const handle event_handle,
+                                                    const uint64_t /*apc_routine*/, const uint64_t /*apc_context*/,
+                                                    const uint64_t io_status_block)
         {
-            return STATUS_SUCCESS;
+            auto* directory = c.proc.files.get(file_handle);
+            if (!directory)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (!directory->is_directory())
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto* event = c.proc.events.get(event_handle);
+            if (event_handle != 0 && !event)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            directory->change_watches.push_back({
+                .thread_id = c.thread().id,
+                .event = event_handle.bits,
+                .io_status_block = io_status_block,
+            });
+            if (event)
+            {
+                event->set_signaled(false);
+            }
+
+            return STATUS_PENDING;
         }
 
     }
@@ -1576,10 +1794,13 @@ namespace sogen
         add_handler(NtQueryInformationProcess);
         add_handler(NtSetInformationProcess);
         add_handler(NtSetInformationVirtualMemory);
+        add_handler(NtGetWriteWatch);
+        add_handler(NtResetWriteWatch);
         add_handler(NtFreeVirtualMemory);
         add_handler(NtQueryVirtualMemory);
         add_handler(NtOpenThread);
         add_handler(NtOpenThreadToken);
+        add_handler(NtImpersonateAnonymousToken);
         add_handler(NtOpenThreadTokenEx);
         add_handler(NtQueryPerformanceCounter);
         add_handler(NtQuerySystemInformation);
@@ -1616,6 +1837,7 @@ namespace sogen
         add_handler(NtQueryVolumeInformationFile);
         add_handler(NtApphelpCacheControl);
         add_handler(NtCreateSection);
+        add_handler(NtCreateSectionEx);
         add_handler(NtQuerySection);
         add_handler(NtConnectPort);
         add_handler(NtSecureConnectPort);
@@ -1642,6 +1864,8 @@ namespace sogen
         add_handler(NtAssignProcessToJobObject);
         add_handler(NtSetInformationJobObject);
         add_handler(NtWriteFile);
+        add_handler(NtCancelIoFileEx);
+        add_handler(NtCancelIoFile);
         add_handler(NtCopyFileChunk);
         add_handler(NtLockFile);
         add_handler(NtUnlockFile);
@@ -1669,6 +1893,8 @@ namespace sogen
         add_handler(NtGdiInit);
         add_handler(NtGdiGetDeviceCaps);
         add_handler(NtGdiGetDeviceCapsAll);
+        add_handler(NtGdiGetNearestColor);
+        add_handler(NtGdiSetBoundsRect);
         add_handler(NtGdiComputeXformCoefficients);
         add_handler(NtGdiFlush);
         add_handler(NtGdiCreateSolidBrush);
@@ -1682,10 +1908,10 @@ namespace sogen
         add_handler(NtGdiGetBitmapDimension);
         add_handler(NtGdiCreateCompatibleBitmap);
         add_handler(NtGdiCreateBitmap);
+        add_handler(NtGdiGetBitmapBits);
         add_handler(NtGdiCreateDIBitmapInternal);
         add_handler(NtGdiSetDIBitsToDeviceInternal);
         add_handler(NtGdiGetDIBitsInternal);
-        add_handler(NtGdiGetBitmapBits);
         add_handler(NtGdiSetBitmapBits);
         add_handler(NtGdiStretchDIBitsInternal);
         add_handler(NtGdiDeleteObjectApp);
@@ -1704,10 +1930,13 @@ namespace sogen
         add_handler(NtGdiAddFontResourceW);
         add_handler(NtGdiGetTextMetricsW);
         add_handler(NtGdiGetTextFaceW);
+        add_handler(NtGdiGetKerningPairs);
         add_handler(NtGdiGetTextExtent);
+        add_handler(NtGdiGetTextExtentExW);
         add_handler(NtGdiGetCharWidthW);
         add_handler(NtGdiGetCharABCWidthsW);
         add_handler(NtGdiGetGlyphOutline);
+        add_handler(NtGdiGetGlyphIndicesW);
         add_handler(NtGdiCreateRectRgn);
         add_handler(NtGdiEqualRgn);
         add_handler(NtGdiCombineRgn);
@@ -1721,13 +1950,17 @@ namespace sogen
         add_handler(NtGdiExtSelectClipRgn);
         add_handler(NtGdiLineTo);
         add_handler(NtGdiRectangle);
+        add_handler(NtGdiPolyPolyDraw);
         add_handler(NtGdiPatBlt);
         add_handler(NtGdiBitBlt);
         add_handler(NtGdiStretchBlt);
         add_handler(NtGdiTransparentBlt);
+        add_handler(NtGdiAlphaBlend);
         add_handler(NtGdiPolyPatBlt);
         add_handler(NtGdiExtTextOutW);
         add_handler(NtGdiGetRealizationInfo);
+        add_handler(NtGdiFontIsLinked);
+        add_handler(NtGdiGetFontData);
         add_handler(NtGdiGetEntry);
         add_handler(NtGdiInit2);
         add_handler(NtGdiMoveToEx);
@@ -1789,6 +2022,7 @@ namespace sogen
         add_handler(NtDeleteKey);
         add_handler(NtDeleteValueKey);
         add_handler(NtNotifyChangeKey);
+        add_handler(NtNotifyChangeMultipleKeys);
         add_handler(NtCreateRegistryTransaction);
         add_handler(NtOpenRegistryTransaction);
         add_handler(NtGetCurrentProcessorNumberEx);
@@ -1800,6 +2034,7 @@ namespace sogen
         add_handler(NtWaitForMultipleObjects32);
         add_handler(NtCreateMutant);
         add_handler(NtReleaseMutant);
+        add_handler(NtQueryMutant);
         add_handler(NtCreatePrivateNamespace);
         add_handler(NtOpenPrivateNamespace);
         add_handler(NtDeletePrivateNamespace);
@@ -1815,15 +2050,16 @@ namespace sogen
         add_handler(NtQueryDirectoryFile);
         add_handler(NtUserSystemParametersInfo);
         add_handler(NtUserSystemParametersInfoForDpi);
+        add_handler(NtUserIsWindowBroadcastingDpiToChildren);
         add_handler(NtGetContextThread);
         add_handler(NtYieldExecution);
         add_handler(NtUserModifyUserStartupInfoFlags);
-        add_handler(NtUserCitSetInfo);
         add_handler(NtUserGetDCEx);
         add_handler(NtUserGetDC);
         add_handler(NtUserGetWindowDC);
         add_handler(NtUserWindowFromDC);
         add_handler(NtUserGetControlBrush);
+        add_handler(NtUserFillWindow);
         add_handler(NtUserGetOemBitmapSize);
         add_handler(NtUserSetCapture);
         add_handler(NtUserReleaseCapture);
@@ -1841,6 +2077,7 @@ namespace sogen
         add_handler(NtUserEndPaint);
         add_handler(NtUserGetDpiForCurrentProcess);
         add_handler(NtReleaseSemaphore);
+        add_handler(NtQuerySemaphore);
         add_handler(NtEnumerateKey);
         add_handler(NtEnumerateValueKey);
         add_handler(NtAlpcCreatePort);
@@ -1863,7 +2100,6 @@ namespace sogen
         add_handler(NtAlpcDeleteResourceReserve);
         add_handler(NtAlpcCreateSectionView);
         add_handler(NtAlpcDeleteSectionView);
-        add_handler(NtAlpcQueryInformationMessage);
         add_handler(NtGetNextThread);
         add_handler(NtSetInformationObject);
         add_handler(NtUserGetCursorPos);
@@ -1895,8 +2131,11 @@ namespace sogen
         add_handler(NtQueryDefaultLocale);
         add_handler(NtSetTimerResolution);
         add_handler(NtSuspendThread);
+        add_handler(NtCreateThreadStateChange);
+        add_handler(NtChangeThreadState);
         add_handler(NtResumeThread);
         add_handler(NtClearEvent);
+        add_handler(NtResetEvent);
         add_handler(NtTraceControl);
         add_handler(NtUserGetProcessUIContextInformation);
         add_handler(NtQueueApcThreadEx2);
@@ -1907,32 +2146,47 @@ namespace sogen
         add_handler(NtFsControlFile);
         add_handler(NtQueryFullAttributesFile);
         add_handler(NtFlushBuffersFile);
-        add_handler(NtCancelIoFile);
+        add_handler(NtGetCachedSigningLevel);
+        add_handler(NtSetCachedSigningLevel);
+        add_handler(NtCompareSigningLevels);
         add_handler(NtAreMappedFilesTheSame);
         add_handler(NtUserGetProcessWindowStation);
         add_handler(NtUserCreateWindowStation);
+        add_handler(NtUserSetProcessWindowStation);
         add_handler(NtUserCloseWindowStation);
+        add_handler(NtUserCreateDesktopEx);
+        add_handler(NtUserCloseDesktop);
         add_handler(NtUserCallHwndParam);
+        add_handler(NtUserCallHwndLock);
+        add_handler(NtUserCallHwnd);
+        add_handler(NtUserCallOneParam);
         add_handler(NtUserRegisterClassExWOW);
         add_handler(NtUserUnregisterClass);
         add_handler(NtUserSetWindowsHookEx);
         add_handler(NtUserUnhookWindowsHookEx);
+        add_handler(NtUserCallNextHookEx);
+
         add_handler(NtUserCreateWindowEx);
         add_handler(NtUserShowWindow);
         add_handler(NtUserShowOwnedPopups);
         add_handler(NtUserMessageCall);
+        add_handler(NtUserGetComboBoxInfo);
         add_handler(NtUserDispatchMessage);
         add_handler(NtUserTranslateMessage);
         add_handler(NtUserGetMessage);
+        add_handler(NtUserUpdateClientRect);
+        add_handler(NtUserScrollWindowEx);
         add_handler(NtUserPeekMessage);
         add_handler(NtUserWaitMessage);
         add_handler(NtUserInvalidateRect);
-        add_handler(NtUserScrollWindowEx);
         add_handler(NtUserValidateRect);
         add_handler(NtUserGetUpdateRect);
+        add_handler(NtUserGetUpdateRgn);
         add_handler(NtUserUpdateWindow);
+        add_handler(NtUserRedrawFrame);
         add_handler(NtUserGetCursorInfo);
         add_handler(NtUserMapVirtualKeyEx);
+        add_handler(NtUserSendInput);
         add_handler(NtUserToUnicodeEx);
         add_handler(NtUserSetProcessDpiAwarenessContext);
         add_handler(NtUserSetProcessLaunchForegroundPolicy);
@@ -1965,6 +2219,7 @@ namespace sogen
         add_handler(NtSetTimerEx);
         add_handler(NtCancelTimer);
         add_handler(NtCancelTimer2);
+        add_handler(NtQueryTimer);
         add_handler(NtAssociateWaitCompletionPacket);
         add_handler(NtCancelWaitCompletionPacket);
         add_handler(NtSetWnfProcessNotificationEvent);
@@ -1979,6 +2234,8 @@ namespace sogen
         add_handler(NtSetSecurityObject);
         add_handler(NtSetInformationDebugObject);
         add_handler(NtRemoveProcessDebug);
+        add_handler(NtWaitForDebugEvent);
+        add_handler(NtDebugContinue);
         add_handler(NtNotifyChangeDirectoryFileEx);
         add_handler(NtUserGetHDevName);
         add_handler(NtFlushInstructionCache);
@@ -1990,15 +2247,18 @@ namespace sogen
         add_handler(NtUserBeginDeferWindowPos);
         add_handler(NtUserDeferWindowPos);
         add_handler(NtUserEndDeferWindowPos);
+        add_handler(NtUserDeferWindowPosAndBand);
         add_handler(NtUserEndDeferWindowPosEx);
         add_handler(NtUserSetForegroundWindow);
         add_handler(NtUserGetForegroundWindow);
         add_handler(NtUserSetFocus);
+        add_handler(NtUserZapActiveAndFocus);
         add_handler(NtUserSetWindowLongPtr);
         add_handler(NtUserSetClassLongPtr);
         add_handler(NtUserSetWindowLong);
         add_handler(NtUserSetWindowWord);
         add_handler(NtUserGetAncestor);
+        add_handler(NtUserIsTopLevelWindow);
         add_handler(NtUserPostMessage);
         add_handler(NtUserPostThreadMessage);
         add_handler(NtUserRedrawWindow);
@@ -2006,6 +2266,8 @@ namespace sogen
         add_handler(NtUserSetWindowFNID);
         add_handler(NtUserSetDialogPointer);
         add_handler(NtUserSetDialogSystemMenu);
+        add_handler(NtUserSetSysMenu);
+        add_handler(NtUserSetSystemMenu);
         add_handler(NtUserSetMsgBox);
         add_handler(NtUserEnableWindow);
         add_handler(NtUserDeleteMenu);
@@ -2060,6 +2322,7 @@ namespace sogen
         add_handler(NtGdiDdDDICreateDCFromMemory);
         add_handler(NtGdiDdDDIDestroyDCFromMemory);
         add_handler(NtAllocateLocallyUniqueId);
+        add_handler(NtAllocateUuids);
         add_handler(NtUserAllowSetForegroundWindow);
         add_handler(NtGdiOpenDCW);
         add_handler(NtGdiDdDDIOpenAdapterFromLuid);
@@ -2130,12 +2393,12 @@ namespace sogen
         add_handler(NtUserMsgWaitForMultipleObjectsEx);
         add_handler(NtUserGetQueueStatusReadonly);
         add_handler(NtUserGetQueueStatus);
+        add_handler(NtUserThreadMessageQueueAttached);
         add_handler(NtUserScheduleDispatchNotification);
         add_handler(NtGdiExtCreateRegion);
         add_handler(NtUserSetWindowRgn);
         add_handler(NtUserAlterWindowStyle);
         add_handler(NtUserSetActiveWindow);
-        add_handler(NtUserZapActiveAndFocus);
         add_handler(NtUserShowScrollBar);
         add_handler(NtUserGetWindowBand);
         add_handler(NtUserRegisterPointerDeviceNotifications);
@@ -2147,7 +2410,9 @@ namespace sogen
         add_handler(NtGdiGetDCObject);
         add_handler(NtUserCreateMenu);
         add_handler(NtUserThunkedMenuItemInfo);
+        add_handler(NtUserThunkedMenuInfo);
         add_handler(NtUserIsTouchWindow);
+        add_handler(NtUserGetTopLevelWindow);
         add_handler(NtUserCreatePopupMenu);
         add_handler(NtUserSetMenu);
         add_handler(NtUserSetMenuDefaultItem);
@@ -2155,8 +2420,11 @@ namespace sogen
         add_handler(NtUserRemoveMenu);
         add_handler(NtUserDestroyMenu);
         add_handler(NtUserDrawMenuBar);
+        add_handler(NtUserEnableMenuItem);
+        add_handler(NtUserCheckMenuItem);
         add_handler(NtUserSetWindowCompositionAttribute);
         add_handler(NtUserGetWindowPlacement);
+        add_handler(NtUserSetWindowPlacement);
         add_handler(NtUserCreateCaret);
         add_handler(NtUserDestroyCaret);
         add_handler(NtUserSetCaretPos);
@@ -2164,6 +2432,7 @@ namespace sogen
         add_handler(NtUserShowCaret);
         add_handler(NtUserHideCaret);
         add_handler(NtUserGetObjectInformation);
+        add_handler(NtUserGetCurrentInputMessageSource);
         add_handler(NtUserQueryWindow);
         add_handler(NtUserSetScrollInfo);
         add_handler(NtUserTrackMouseEvent);
@@ -2182,14 +2451,18 @@ namespace sogen
         add_handler(NtUserSwapMouseButton);
         add_handler(NtUserGetDoubleClickTime);
         add_handler(NtUserGetCaretBlinkTime);
+        add_handler(NtUserFlashWindowEx);
         add_handler(NtGdiSetIcmMode);
         add_handler(NtUserGetKeyboardState);
         add_handler(NtUserSetKeyboardState);
         add_handler(NtUserModifyWindowTouchCapability);
+        add_handler(NtUserEnableMouseInPointer);
         add_handler(NtUserGetClipboardSequenceNumber);
         add_handler(NtUserOpenClipboard);
         add_handler(NtUserCloseClipboard);
         add_handler(NtUserEmptyClipboard);
+        add_handler(NtUserAddClipboardFormatListener);
+        add_handler(NtUserRemoveClipboardFormatListener);
         add_handler(NtUserGetClipboardData);
         add_handler(NtUserConvertMemHandle);
         add_handler(NtUserSetClipboardData);
@@ -2197,8 +2470,8 @@ namespace sogen
         add_handler(NtUserAttachThreadInput);
         add_handler(NtUserRegisterTouchHitTestingWindow);
         add_handler(NtUserActivateKeyboardLayout);
+        add_handler(NtUserLoadKeyboardLayoutEx);
         add_handler(NtUserGetGUIThreadInfo);
-        add_handler(NtUserGetCurrentInputMessageSource);
         add_handler(NtNotifyChangeDirectoryFile);
         add_handler(NtUserChangeWindowMessageFilter);
         add_handler(NtUserSetWinEventHook);
@@ -2206,17 +2479,23 @@ namespace sogen
         add_handler(NtUserDisableThreadIme);
         add_handler(NtUserGetPointerDevices);
         add_handler(NtUserHwndQueryRedirectionInfo);
+        add_handler(NtUserSetImeHotKey);
+        add_handler(NtUserVkKeyScanEx);
+        add_handler(NtUserSetLayeredWindowAttributes);
+        add_handler(NtUserSetWindowFeedbackSetting);
+        add_handler(NtUserUpdateLayeredWindow);
+        add_handler(NtUserIsChildWindowDpiMessageEnabled);
 
 #undef add_handler
     }
 
     void syscall_dispatcher::add_callbacks()
     {
-#define add_callback(syscall, completion_state)                                                                                      \
-    do                                                                                                                               \
-    {                                                                                                                                \
-        this->completion_handlers_[callback_id::syscall] = make_syscall_handler<syscalls::completion_##syscall>();                   \
-        syscall_dispatcher::completion_state_factories_[callback_id::syscall] = [] { return std::make_unique<completion_state>(); }; \
+#define add_callback(syscall, completion_state)                                                                                       \
+    do                                                                                                                                \
+    {                                                                                                                                 \
+        this->completion_handlers_[callback_id::syscall] = make_syscall_handler<syscalls::completion_##syscall>();                    \
+        syscall_dispatcher::completion_state_factories()[callback_id::syscall] = [] { return std::make_unique<completion_state>(); }; \
     } while (0)
 
 #define add_stateless_callback(syscall)                                                                            \
@@ -2229,12 +2508,18 @@ namespace sogen
         add_callback(NtUserCreateWindowEx, window_create_state);
         add_callback(NtUserDestroyWindow, window_destroy_state);
         add_callback(NtUserShowWindow, window_show_state);
+        add_callback(NtUserSetWindowPos, window_position_state);
+        add_callback(NtUserEndDeferWindowPosEx, deferred_window_position_state);
         add_callback(NtUserMessageCall, message_call_state);
+        add_callback(NtUserGetComboBoxInfo, message_call_state);
         add_callback(NtUserUpdateWindow, window_update_state);
+        add_callback(NtUserGetMessage, get_message_hook_state);
+        add_callback(NtUserPeekMessage, get_message_hook_state);
         add_stateless_callback(NtUserEnumDisplayMonitors);
-        add_callback(NtUserSetWindowPos, window_show_state);
-        add_callback(NtUserMoveWindow, window_show_state);
+        add_callback(NtUserMoveWindow, window_position_state);
         add_callback(NtUserSetFocus, focus_change_state);
+        add_stateless_callback(NtUserWaitMessage);
+        add_stateless_callback(NtUserMsgWaitForMultipleObjectsEx);
 
 #undef add_callback
 #undef add_stateless_callback

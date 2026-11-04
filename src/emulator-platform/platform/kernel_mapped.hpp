@@ -125,6 +125,11 @@
 #define PF_ARM_SME_FA64_INSTRUCTIONS_AVAILABLE     88
 #endif
 
+// MinGW's winnt.h predates this feature index.
+#ifndef PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE
+#define PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE 45
+#endif
+
 namespace sogen
 {
 
@@ -274,6 +279,15 @@ namespace sogen
         MemExtendedParameterMax
     } MEM_EXTENDED_PARAMETER_TYPE, *PMEM_EXTENDED_PARAMETER_TYPE;
 
+    typedef enum MEM_SECTION_EXTENDED_PARAMETER_TYPE
+    {
+        MemSectionExtendedParameterInvalidType = 0,
+        MemSectionExtendedParameterUserPhysicalFlags,
+        MemSectionExtendedParameterNumaNode,
+        MemSectionExtendedParameterSigningLevel,
+        MemSectionExtendedParameterMax
+    } MEM_SECTION_EXTENDED_PARAMETER_TYPE, *PMEM_SECTION_EXTENDED_PARAMETER_TYPE;
+
 #endif
 
     typedef struct _PEB_LDR_DATA64
@@ -393,9 +407,10 @@ namespace sogen
         ULONG DefaultThreadpoolCpuSetMaskCount;
         ULONG DefaultThreadpoolThreadMaximum;
         ULONG HeapMemoryTypeMask; // WIN11
+        std::uint64_t AttributeList;
     } RTL_USER_PROCESS_PARAMETERS64, *PRTL_USER_PROCESS_PARAMETERS64;
 
-    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS64) == 0x448);
+    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS64) == 0x450);
 
     union PEB_CROSS_PROCESS_FLAGS_UNION
     {
@@ -584,9 +599,10 @@ namespace sogen
         ULONG DefaultThreadpoolCpuSetMaskCount;
         ULONG DefaultThreadpoolThreadMaximum;
         ULONG HeapMemoryTypeMask; // WIN11
+        std::uint32_t AttributeList;
     } RTL_USER_PROCESS_PARAMETERS32, *PRTL_USER_PROCESS_PARAMETERS32;
 
-    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS32) == 708);
+    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS32) == 0x2C8);
 
     typedef struct _PEB64
     {
@@ -1186,7 +1202,12 @@ namespace sogen
 #if defined(OS_WINDOWS) && defined(_WIN64)
     inline TEB64* NtCurrentTeb64()
     {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        // ARM64 has no segment registers; the SDK's NtCurrentTeb() reads the TEB pointer from x18.
+        return reinterpret_cast<TEB64*>(NtCurrentTeb());
+#else
         return reinterpret_cast<TEB64*>(__readgsqword(FIELD_OFFSET(EMU_NT_TIB64, Self)));
+#endif
     }
 #endif
 
@@ -1732,6 +1753,12 @@ namespace sogen
         LARGE_INTEGER KernelTime;
         LARGE_INTEGER UserTime;
     } KERNEL_USER_TIMES, *PKERNEL_USER_TIMES;
+
+    typedef struct _THREAD_CYCLE_TIME_INFORMATION
+    {
+        ULONGLONG AccumulatedCycles;
+        ULONGLONG CurrentCycleCount;
+    } THREAD_CYCLE_TIME_INFORMATION, *PTHREAD_CYCLE_TIME_INFORMATION;
 
     typedef struct _GROUP_AFFINITY
     {

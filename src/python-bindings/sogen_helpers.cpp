@@ -158,21 +158,66 @@ namespace sogen::py
             return result;
         }
 
-        std::unordered_map<windows_path, std::filesystem::path> parse_path_mappings(const nb::object& object)
+        filesystem_mode parse_python_filesystem_mode(const std::string& name)
         {
-            std::unordered_map<windows_path, std::filesystem::path> result{};
+            const auto mode = parse_filesystem_mode(name);
+            if (!mode)
+            {
+                throw std::invalid_argument("Filesystem mode must be 'ro' or 'rw', not '" + name + "'");
+            }
+
+            return *mode;
+        }
+
+        void parse_path_mappings(const nb::object& object, std::vector<mount_spec>& mounts)
+        {
             if (object.is_none())
             {
-                return result;
+                return;
             }
 
             const auto dict = nb::cast<nb::dict>(object);
             for (const auto& item : dict)
             {
-                result.emplace(nb::cast<std::filesystem::path>(item.first), nb::cast<std::filesystem::path>(item.second));
+                mounts.push_back(mount_spec{
+                    .host_path = nb::cast<std::filesystem::path>(item.second),
+                    .guest_path = windows_path{nb::cast<std::filesystem::path>(item.first)},
+                });
+            }
+        }
+
+        void parse_mounts(const nb::object& object, std::vector<mount_spec>& mounts)
+        {
+            if (object.is_none())
+            {
+                return;
             }
 
-            return result;
+            for (const auto& item : nb::cast<nb::sequence>(object))
+            {
+                std::vector<nb::object> fields{};
+                for (const auto& field : nb::cast<nb::sequence>(item))
+                {
+                    fields.push_back(nb::borrow(field));
+                }
+
+                if (fields.size() != 2 && fields.size() != 3)
+                {
+                    throw std::invalid_argument("Mounts must be [(host_path, guest_path[, mode]), ...]");
+                }
+
+                mount_spec spec{
+                    .host_path = nb::cast<std::filesystem::path>(fields[0]),
+                    .guest_path = windows_path{nb::cast<std::filesystem::path>(fields[1])},
+                };
+
+                if (fields.size() == 3)
+                {
+                    spec.mode = parse_python_filesystem_mode(nb::cast<std::string>(fields[2]));
+                }
+
+                mounts.push_back(std::move(spec));
+            }
         }
 
         std::unordered_map<uint16_t, uint16_t> parse_port_mappings(const nb::object& object)
@@ -192,6 +237,22 @@ namespace sogen::py
             return result;
         }
 
+        network::network_mode get_network_mode(const nb::kwargs& kwargs)
+        {
+            if (!kwargs.contains("network"))
+            {
+                return network::network_mode::offline;
+            }
+
+            const nb::object value = kwargs["network"];
+            if (!nb::isinstance<nb::str>(value))
+            {
+                throw nb::type_error(R"(network must be a string: "offline" or "live")");
+            }
+
+            return network::parse_network_mode(nb::cast<std::string>(value));
+        }
+
         emulator_settings make_emulator_settings(const nb::kwargs& kwargs)
         {
             emulator_settings settings{};
@@ -200,10 +261,14 @@ namespace sogen::py
             settings.emulation_root = get_kwarg<std::filesystem::path>(kwargs, "emulation_root", {});
             settings.registry_directory =
                 get_kwarg<std::filesystem::path>(kwargs, "registry_directory", std::filesystem::path{"./registry"});
-            settings.path_mappings = parse_path_mappings(kwargs.contains("path_mappings") ? kwargs["path_mappings"] : nb::none());
+            settings.root_mode =
+                parse_python_filesystem_mode(get_kwarg<std::string>(kwargs, "root_mode", std::string(to_string(default_root_mode))));
+            parse_path_mappings(kwargs.contains("path_mappings") ? kwargs["path_mappings"] : nb::none(), settings.mounts);
+            parse_mounts(kwargs.contains("mounts") ? kwargs["mounts"] : nb::none(), settings.mounts);
             settings.port_mappings = parse_port_mappings(kwargs.contains("port_mappings") ? kwargs["port_mappings"] : nb::none());
             settings.fake_env.number_of_processors = get_kwarg<uint32_t>(kwargs, "number_of_processors", 4);
             settings.fake_env.nt_product_type = static_cast<uint8_t>(get_kwarg<uint32_t>(kwargs, "nt_product_type", 1));
+            settings.network = get_network_mode(kwargs);
             return settings;
         }
 
@@ -214,6 +279,10 @@ namespace sogen::py
             settings.working_directory = get_kwarg<std::filesystem::path>(kwargs, "working_directory", {});
             settings.arguments = parse_arguments(args);
             settings.environment = parse_environment(kwargs.contains("environment") ? kwargs["environment"] : nb::none());
+            if (kwargs.contains("command_line") && !kwargs["command_line"].is_none())
+            {
+                settings.command_line = u8_to_u16(nb::cast<std::string>(kwargs["command_line"]));
+            }
             return settings;
         }
 
@@ -221,18 +290,133 @@ namespace sogen::py
         {
             return get_kwarg<backend_type>(kwargs, "backend", backend_type::unicorn);
         }
+
+        std::unique_ptr<guest_machine> create_machine(const PEMachineType machine, const nb::kwargs& kwargs)
+        {
+            if (machine == PEMachineType::ARM64 && !kwargs.contains("backend"))
+            {
+                return create_emulator_for_machine(get_machine_type(machine));
+            }
+
+            return create_emulator_for_machine(get_machine_type(machine), get_backend_type(kwargs));
+        }
+
+        PEMachineType get_empty_machine(const nb::kwargs& kwargs)
+        {
+            const auto architecture = get_kwarg<std::string>(kwargs, "architecture", "x86_64");
+            if (architecture == "x86_64")
+            {
+                return PEMachineType::AMD64;
+            }
+            if (architecture == "arm64")
+            {
+                return PEMachineType::ARM64;
+            }
+
+            throw std::invalid_argument("architecture must be 'x86_64' or 'arm64'");
+        }
+
+        class python_dns_lookup : public network::dns_lookup
+        {
+          public:
+            python_dns_lookup(nb::object callback, std::unique_ptr<network::dns_lookup> fallback)
+                : callback_(std::move(callback)),
+                  fallback_(std::move(fallback))
+            {
+            }
+
+            std::vector<network::address> resolve_host(const std::string_view hostname, const std::optional<int> family) override
+            {
+                const std::string host_str(hostname);
+                std::vector<network::address> results{};
+                bool fall_back = false;
+
+                {
+                    nb::gil_scoped_acquire gil{};
+                    try
+                    {
+                        nb::object fam = family ? nb::cast(*family) : nb::none();
+                        nb::object ret = callback_(nb::str(host_str.c_str()), fam);
+                        if (ret.is_none())
+                        {
+                            fall_back = true;
+                        }
+                        else
+                        {
+                            for (auto item : ret)
+                            {
+                                const auto ip = nb::cast<std::string>(item);
+                                // Set the bytes via inet_pton; the address(string_view)
+                                // ctor re-resolves through the host getaddrinfo, which
+                                // would defeat the override.
+                                network::address addr{};
+                                in_addr v4{};
+                                in6_addr v6{};
+                                if (inet_pton(AF_INET, ip.c_str(), &v4) == 1)
+                                {
+                                    addr.set_ipv4(v4);
+                                    results.push_back(addr);
+                                }
+                                else if (inet_pton(AF_INET6, ip.c_str(), &v6) == 1)
+                                {
+                                    addr.set_ipv6(v6);
+                                    results.push_back(addr);
+                                }
+                            }
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::fprintf(stderr, "[sogen] dns_resolver failed for %s: %s\n", host_str.c_str(), e.what());
+                        fall_back = true;
+                    }
+                }
+
+                // Outside the GIL: in live mode the fallback blocks on the host
+                // getaddrinfo, and start() runs with the GIL released so a
+                // Python watchdog thread keeps moving during a slow lookup.
+                if (fall_back)
+                {
+                    return this->fallback_->resolve_host(hostname, family);
+                }
+                return results;
+            }
+
+          private:
+            nb::object callback_;
+            std::unique_ptr<network::dns_lookup> fallback_;
+        };
+
+        emulator_interfaces make_emulator_interfaces(const nb::kwargs& kwargs, const network::network_mode network_mode)
+        {
+            emulator_interfaces interfaces{};
+            if (kwargs.contains("dns_resolver"))
+            {
+                nb::object resolver = kwargs["dns_resolver"];
+                if (!resolver.is_none())
+                {
+                    interfaces.dns_lookup =
+                        std::make_unique<python_dns_lookup>(std::move(resolver), network::create_dns_lookup(network_mode));
+                }
+            }
+            return interfaces;
+        }
     }
 
     std::unique_ptr<windows_emulator> create_empty_emulator(const nb::kwargs& kwargs)
     {
-        return std::make_unique<windows_emulator>(create_x86_64_emulator(get_backend_type(kwargs)), make_emulator_settings(kwargs));
+        const auto settings = make_emulator_settings(kwargs);
+        return std::make_unique<windows_emulator>(create_machine(get_empty_machine(kwargs), kwargs), settings, emulator_callbacks{},
+                                                  make_emulator_interfaces(kwargs, settings.network));
     }
 
     std::unique_ptr<windows_emulator> create_application_emulator(const nb::object& application, const nb::object& args,
                                                                   const nb::kwargs& kwargs)
     {
         auto app_settings = make_application_settings(application, args, kwargs);
-        return std::make_unique<windows_emulator>(create_x86_64_emulator(get_backend_type(kwargs)), std::move(app_settings),
-                                                  make_emulator_settings(kwargs));
+        const auto settings = make_emulator_settings(kwargs);
+        auto machine = create_machine(get_application_machine(settings, app_settings), kwargs);
+        return std::make_unique<windows_emulator>(std::move(machine), std::move(app_settings), settings, emulator_callbacks{},
+                                                  make_emulator_interfaces(kwargs, settings.network));
     }
 }

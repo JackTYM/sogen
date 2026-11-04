@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <string_view>
 #include <array>
+#include <algorithm>
+#include <bit>
 
 #include "../../common/utils/finally.hpp"
 
@@ -29,6 +31,7 @@
 #include <combaseapi.h>
 #include <knownfolders.h>
 #include <sddl.h>
+#include <bcrypt.h>
 #include <wincrypt.h>
 
 using namespace std::literals;
@@ -184,6 +187,52 @@ namespace
         return successes == thread_count;
     }
 
+#ifdef _WIN64
+    DWORD WINAPI context_original_start(LPVOID)
+    {
+        return 1;
+    }
+
+    DWORD WINAPI context_redirected_start(LPVOID argument)
+    {
+        return static_cast<DWORD>(reinterpret_cast<uintptr_t>(argument));
+    }
+
+    bool test_thread_context()
+    {
+        auto* const thread = CreateThread(nullptr, 0, context_original_start, nullptr, CREATE_SUSPENDED, nullptr);
+        if (!thread)
+        {
+            return false;
+        }
+
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_FULL;
+        bool success = GetThreadContext(thread, &context) != FALSE;
+
+        // A new thread starts in RtlUserThreadStart(start routine, argument); redirect both.
+#if defined(_M_ARM64)
+        success = success && context.X0 == reinterpret_cast<DWORD64>(&context_original_start);
+        context.X0 = reinterpret_cast<DWORD64>(&context_redirected_start);
+        context.X1 = 42;
+#else
+        success = success && context.Rcx == reinterpret_cast<DWORD64>(&context_original_start);
+        context.Rcx = reinterpret_cast<DWORD64>(&context_redirected_start);
+        context.Rdx = 42;
+#endif
+
+        success = success && SetThreadContext(thread, &context) != FALSE;
+        ResumeThread(thread);
+        WaitForSingleObject(thread, INFINITE);
+
+        DWORD exit_code{};
+        success = success && GetExitCodeThread(thread, &exit_code) != FALSE && exit_code == 42;
+        CloseHandle(thread);
+
+        return success;
+    }
+#endif
+
     bool test_env()
     {
         const auto computername = read_env("COMPUTERNAME");
@@ -192,7 +241,39 @@ namespace
 
         const auto blub = read_env("BLUB");
 
-        return !computername.empty() && blub == "LUL";
+        const auto profile = read_env("USERPROFILE");
+        const auto app_data = read_env("APPDATA");
+        const auto local_app_data = read_env("LOCALAPPDATA");
+        const auto has_profile_directories =
+            !profile.empty() && app_data == profile + "\\AppData\\Roaming" && local_app_data == profile + "\\AppData\\Local";
+
+        return !computername.empty() && blub == "LUL" && has_profile_directories && !read_env("ProgramData").empty() &&
+               !read_env("ProgramFiles").empty();
+    }
+
+    bool test_critical_section_timeout()
+    {
+#if defined(_M_ARM64)
+        constexpr size_t peb_critical_section_timeout_offset = 0xC0;
+        const auto* peb = reinterpret_cast<const uint8_t*>(__readx18qword(0x60));
+#elif defined(_WIN64)
+        constexpr size_t peb_critical_section_timeout_offset = 0xC0;
+        const auto* peb = reinterpret_cast<const uint8_t*>(__readgsqword(0x60));
+#else
+        constexpr size_t peb_critical_section_timeout_offset = 0x70;
+        const auto* peb = reinterpret_cast<const uint8_t*>(__readfsdword(0x30));
+#endif
+
+        int64_t timeout{};
+        memcpy(&timeout, peb + peb_critical_section_timeout_offset, sizeof(timeout));
+
+        if (timeout >= 0)
+        {
+            puts("PEB CriticalSectionTimeout is not a relative timeout");
+            return false;
+        }
+
+        return true;
     }
 
     bool test_lookup_account_sid()
@@ -747,6 +828,21 @@ namespace
             return false;
         }
 
+        SYSTEM_INFO native_info{};
+        GetNativeSystemInfo(&native_info);
+#if defined(_M_ARM64)
+        if (native_info.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_ARM64 ||
+            !IsProcessorFeaturePresent(PF_ARM_V8_INSTRUCTIONS_AVAILABLE))
+        {
+            return false;
+        }
+#elif defined(_M_AMD64)
+        if (native_info.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
+        {
+            return false;
+        }
+#endif
+
         // TODO: This currently doesn't work.
         /*
         char username[256];
@@ -802,6 +898,19 @@ namespace
         }
 
         return validate_primary_monitor(mi);
+    }
+
+    bool test_display_config_buffer_sizes()
+    {
+        UINT32 num_paths = 0;
+        UINT32 num_modes = 0;
+
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &num_paths, &num_modes) != ERROR_SUCCESS)
+        {
+            return false;
+        }
+
+        return num_paths >= 1 && num_modes >= num_paths;
     }
 
     BOOL CALLBACK monitor_enum_proc(HMONITOR hMonitor, HDC, LPRECT, LPARAM dwData)
@@ -1071,7 +1180,10 @@ namespace
         auto* old = SetUnhandledExceptionFilter([](struct _EXCEPTION_POINTERS* info) -> LONG {
             caught = true;
 
-#ifdef _WIN64
+#if defined(_M_ARM64)
+            // DebugBreak is BRK #0xF000; ARM64 Windows reports the exception at the BRK itself.
+            info->ContextRecord->Pc += 4;
+#elif defined(_WIN64)
             info->ContextRecord->Rip += 1;
 #else
             info->ContextRecord->Eip += 1;
@@ -1094,7 +1206,13 @@ namespace
             return false;
         }
 
+#if defined(_M_ARM64)
+        constexpr uint32_t undefined_instruction = 0x00000000; // udf #0
+        memcpy(address, &undefined_instruction, sizeof(undefined_instruction));
+        FlushInstructionCache(GetCurrentProcess(), address, sizeof(undefined_instruction));
+#else
         memcpy(address, "\x0F\x0B", 2); // ud2
+#endif
 
         const auto res = test_ud2_exception(address);
 
@@ -1199,11 +1317,76 @@ namespace
         return success;
     }
 
+#if defined(_M_ARM64)
+    bool test_divide_by_zero_exception()
+    {
+        static volatile int zero = 0;
+        __try
+        {
+            volatile int result = 10 / zero;
+            (void)result;
+            return false;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return GetExceptionCode() == STATUS_INTEGER_DIVIDE_BY_ZERO;
+        }
+    }
+#endif
+
+#ifdef _WIN64
+    bool test_debug_print()
+    {
+        using dbg_print_t = ULONG(__cdecl*)(PCSTR format, ...);
+        const auto dbg_print = reinterpret_cast<dbg_print_t>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "DbgPrint"));
+        if (!dbg_print)
+        {
+            return false;
+        }
+
+        __try
+        {
+            dbg_print("test-sample\n");
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+#endif
+
+#if defined(_M_ARM64)
+    template <int Immediate>
+    bool test_brk_exception(const DWORD expected_code)
+    {
+        __try
+        {
+            __break(Immediate);
+            return false;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return GetExceptionCode() == expected_code;
+        }
+    }
+#endif
+
     bool test_native_exceptions()
     {
         return test_access_violation_exception()       //
                && test_illegal_instruction_exception() //
                && test_unhandled_exception()           //
+#if defined(_M_ARM64)
+               && test_divide_by_zero_exception() //
+#endif
+#ifdef _WIN64
+               && test_debug_print() //
+#endif
+#if defined(_M_ARM64)
+               && test_brk_exception<0xF001>(STATUS_ASSERTION_FAILURE)   //
+               && test_brk_exception<0x1234>(STATUS_ILLEGAL_INSTRUCTION) //
+#endif
 #ifdef _WIN64
                && test_guard_page_exception();
 #else
@@ -1212,6 +1395,60 @@ namespace
     }
 #endif
 
+#if defined(_M_ARM64)
+    thread_local bool single_step_cleared = false;
+    thread_local int single_step_count = 0;
+    thread_local DWORD64 single_step_pc = 0;
+    constexpr DWORD SOFTWARE_STEP_MASK = 0x200000;
+
+    LONG NTAPI single_step_handler(PEXCEPTION_POINTERS exception_info)
+    {
+        if (exception_info->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP)
+        {
+            ++single_step_count;
+            single_step_cleared = (exception_info->ContextRecord->Cpsr & SOFTWARE_STEP_MASK) == 0;
+            single_step_pc = exception_info->ContextRecord->Pc;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    bool test_interrupts()
+    {
+        // ARM64 has no trap flag; a continued context with PSTATE.SS set steps exactly one instruction.
+        using nt_continue_t = NTSTATUS(NTAPI*)(PCONTEXT, BOOLEAN);
+        const auto nt_continue = reinterpret_cast<nt_continue_t>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtContinue"));
+        if (!nt_continue)
+        {
+            return false;
+        }
+
+        single_step_cleared = false;
+        single_step_count = 0;
+        single_step_pc = 0;
+
+        PVOID veh_handle = AddVectoredExceptionHandler(1, single_step_handler);
+        if (!veh_handle)
+        {
+            return false;
+        }
+
+        CONTEXT context{};
+        volatile bool resumed = false;
+        RtlCaptureContext(&context);
+        if (!resumed)
+        {
+            resumed = true;
+            context.Cpsr |= SOFTWARE_STEP_MASK;
+            nt_continue(&context, FALSE);
+        }
+
+        RemoveVectoredExceptionHandler(veh_handle);
+
+        return single_step_count == 1 && single_step_cleared && single_step_pc == context.Pc + 4;
+    }
+#else
     thread_local bool trap_flag_cleared = false;
     constexpr DWORD TRAP_FLAG_MASK = 0x100;
 
@@ -1249,6 +1486,7 @@ namespace
 
         return trap_flag_cleared;
     }
+#endif
 
     void print_time()
     {
@@ -1303,9 +1541,157 @@ namespace
         return executions == 2;
     }
 
+    bool test_apc_wait()
+    {
+        int executions = 0;
+
+        PAPCFUNC apc_func = [](const ULONG_PTR param) {
+            *reinterpret_cast<int*>(param) += 1; //
+        };
+
+        const auto event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!event)
+        {
+            return false;
+        }
+
+        QueueUserAPC(apc_func, GetCurrentThread(), reinterpret_cast<ULONG_PTR>(&executions));
+
+        if (WaitForSingleObjectEx(event, 0, FALSE) != WAIT_TIMEOUT || executions != 0)
+        {
+            CloseHandle(event);
+            return false;
+        }
+
+        using nt_wait_for_single_object = LONG(NTAPI*)(HANDLE, BOOLEAN, PLARGE_INTEGER);
+        const auto nt_wait =
+            std::bit_cast<nt_wait_for_single_object>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtWaitForSingleObject"));
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        LARGE_INTEGER expired{};
+        expired.LowPart = now.dwLowDateTime;
+        expired.HighPart = static_cast<LONG>(now.dwHighDateTime);
+        expired.QuadPart -= 10'000'000;
+
+        if (!nt_wait || nt_wait(event, TRUE, &expired) != static_cast<LONG>(STATUS_USER_APC) || executions != 1)
+        {
+            CloseHandle(event);
+            return false;
+        }
+
+        QueueUserAPC(apc_func, GetCurrentThread(), reinterpret_cast<ULONG_PTR>(&executions));
+        SetEvent(event);
+
+        const auto signaled = WaitForSingleObjectEx(event, 0, FALSE) == WAIT_OBJECT_0;
+        SleepEx(1, TRUE);
+        CloseHandle(event);
+
+        return signaled && executions == 2;
+    }
+
+    bool test_window_geometry()
+    {
+        WNDCLASSEXA wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpszClassName = "TestWindowNonclientClass";
+        wc.hInstance = GetModuleHandleA(nullptr);
+        wc.lpfnWndProc = DefWindowProcA;
+
+        if (!RegisterClassExA(&wc))
+        {
+            puts("Failed to register window class");
+            return false;
+        }
+
+        const auto unregister_class = sogen::utils::finally([&] { UnregisterClassA(wc.lpszClassName, wc.hInstance); });
+
+        struct window_case
+        {
+            DWORD style;
+            DWORD ex_style;
+        };
+
+        constexpr std::array cases = {
+            window_case{.style = WS_POPUP | WS_THICKFRAME, .ex_style = 0},
+            window_case{.style = WS_POPUP | WS_CAPTION, .ex_style = 0},
+            window_case{.style = WS_POPUP | WS_DLGFRAME, .ex_style = 0},
+            window_case{.style = WS_POPUP, .ex_style = WS_EX_CLIENTEDGE},
+        };
+
+        for (const auto& test : cases)
+        {
+            constexpr LONG expected_client_height = 123;
+            constexpr LONG expected_client_width = 321;
+
+            RECT adjusted_rect{0, 0, expected_client_width, expected_client_height};
+            const BOOL adjusted = test.ex_style ? AdjustWindowRectEx(&adjusted_rect, test.style, FALSE, test.ex_style)
+                                                : AdjustWindowRect(&adjusted_rect, test.style, FALSE);
+            if (!adjusted)
+            {
+                puts("Failed to calculate nonclient insets");
+                return false;
+            }
+
+            const auto adjusted_width = adjusted_rect.right - adjusted_rect.left;
+            const auto adjusted_height = adjusted_rect.bottom - adjusted_rect.top;
+
+            const HWND hwnd = CreateWindowExA(test.ex_style, wc.lpszClassName, nullptr, test.style, 0, 0, adjusted_width, adjusted_height,
+                                              nullptr, nullptr, wc.hInstance, nullptr);
+            if (!hwnd)
+            {
+                puts("Failed to create test window");
+                return false;
+            }
+
+            const auto destroy_window = sogen::utils::finally([&] { DestroyWindow(hwnd); });
+
+            RECT window_rect{};
+            RECT client_rect{};
+            if (!GetWindowRect(hwnd, &window_rect) || !GetClientRect(hwnd, &client_rect))
+            {
+                return false;
+            }
+
+            const auto window_width = window_rect.right - window_rect.left;
+            const auto window_height = window_rect.bottom - window_rect.top;
+            const auto client_width = client_rect.right - client_rect.left;
+            const auto client_height = client_rect.bottom - client_rect.top;
+
+            if (window_width != adjusted_width || window_height != adjusted_height)
+            {
+                puts("Window size does not match AdjustWindowRect result");
+                return false;
+            }
+
+            if (client_width != expected_client_width || client_height != expected_client_height)
+            {
+                puts("AdjustWindowRect round-trip failed");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool test_desktop_window_text()
+    {
+        auto* const desktop = GetDesktopWindow();
+        if (desktop == nullptr)
+        {
+            return false;
+        }
+
+        std::array<char, 32> text{};
+        text.fill('x');
+
+        return GetWindowTextA(desktop, text.data(), static_cast<int>(text.size())) == 0 && text.front() == '\0' &&
+               GetWindowTextLengthA(desktop) == 0;
+    }
+
     bool test_message_queue()
     {
-        static thread_local UINT wnd_proc_num = 0;
+        thread_local UINT wnd_proc_num = 0;
+        thread_local UINT destroy_count = 0;
         static const UINT wnd_msg_id = WM_APP + 2;
 
         WNDCLASSEXA wc = {};
@@ -1329,6 +1715,19 @@ namespace
                     return 777;
                 }
             }
+            else if (msg == WM_CLOSE)
+            {
+                wnd_proc_num += 1;
+                if (wnd_proc_num == 2)
+                {
+                    return 0;
+                }
+            }
+            else if (msg == WM_DESTROY)
+            {
+                ++destroy_count;
+                PostQuitMessage(42);
+            }
             return DefWindowProcA(hwnd, msg, wp, lp);
         };
 
@@ -1338,22 +1737,23 @@ namespace
             return false;
         }
 
+        const auto unregister_class = sogen::utils::finally([&] { UnregisterClassA(wc.lpszClassName, wc.hInstance); });
+
         HWND hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance,
                                     reinterpret_cast<void*>(0x1337));
         if (!hwnd || wnd_proc_num != 1)
         {
             puts("Failed to create message window");
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
+
+        const auto destroy_window = sogen::utils::finally([&] { DestroyWindow(hwnd); });
 
         const LRESULT send_res = SendMessageA(hwnd, wnd_msg_id, 123, 456);
 
         if (send_res != 777 || wnd_proc_num != 2)
         {
             puts("SendMessage failed");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -1361,8 +1761,6 @@ namespace
         if (!PostMessageA(hwnd, wnd_msg_id, 123, 456))
         {
             puts("PostMessage failed");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -1370,16 +1768,12 @@ namespace
         if (GetMessageA(&msg, hwnd, 0, 0) <= 0)
         {
             puts("GetMessage failed or returned WM_QUIT unexpectedly");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
         if (msg.message != wnd_msg_id)
         {
             puts("Retrieved message is not the expected custom message");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
@@ -1389,51 +1783,89 @@ namespace
         if (wnd_proc_num != 1)
         {
             puts("Posted window message did not execute WndProc");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
-        constexpr int quit_code = 42;
-        PostQuitMessage(quit_code);
+        SendMessageA(hwnd, WM_CLOSE, 0, 0);
+        if (!IsWindow(hwnd) || destroy_count != 0)
+        {
+            puts("WndProc unexpectedly destroyed the window on cancelled WM_CLOSE");
+            return false;
+        }
+
+        SendMessageA(hwnd, WM_CLOSE, 0, 0);
+        if (IsWindow(hwnd) || destroy_count != 1)
+        {
+            puts("DefWindowProc did not destroy the window on WM_CLOSE");
+            return false;
+        }
+        hwnd = nullptr;
 
         const BOOL quit_result = GetMessageA(&msg, nullptr, 0, 0);
         if (quit_result != 0)
         {
             puts("GetMessage did not return 0 for WM_QUIT");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
         if (msg.message != WM_QUIT)
         {
             puts("Message is not WM_QUIT");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
-        if (msg.wParam != quit_code)
+        if (msg.wParam != 42)
         {
             puts("WM_QUIT exit code mismatch");
-            DestroyWindow(hwnd);
-            UnregisterClassA(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
-        DestroyWindow(hwnd);
-        UnregisterClassA(wc.lpszClassName, wc.hInstance);
         return true;
     }
 
     bool test_paint_message_queue()
     {
+        struct paint_state
+        {
+            HWND window{};
+            int ncpaint{};
+            int erase{};
+            int paint{};
+        };
+
+        thread_local paint_state* active_paint_state{};
+
         WNDCLASSEXA wc = {};
         wc.cbSize = sizeof(wc);
         wc.lpszClassName = "TestPaintMsgQueueClass";
         wc.hInstance = GetModuleHandleA(nullptr);
-        wc.lpfnWndProc = DefWindowProcA;
+        wc.lpfnWndProc = [](const HWND hwnd, const UINT message, const WPARAM w_param, const LPARAM l_param) -> LRESULT {
+            if (active_paint_state && hwnd == active_paint_state->window)
+            {
+                if (message == WM_NCPAINT)
+                {
+                    ++active_paint_state->ncpaint;
+                }
+                else if (message == WM_ERASEBKGND)
+                {
+                    ++active_paint_state->erase;
+                    RECT client_rect{};
+                    GetClientRect(hwnd, &client_rect);
+                    FillRect(reinterpret_cast<HDC>(w_param), &client_rect, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+                    return TRUE;
+                }
+                else if (message == WM_PAINT)
+                {
+                    ++active_paint_state->paint;
+                    PAINTSTRUCT paint{};
+                    BeginPaint(hwnd, &paint);
+                    EndPaint(hwnd, &paint);
+                    return 0;
+                }
+            }
+
+            return DefWindowProcA(hwnd, message, w_param, l_param);
+        };
 
         if (!RegisterClassExA(&wc))
         {
@@ -1443,8 +1875,8 @@ namespace
 
         const auto unregister_class = sogen::utils::finally([&] { UnregisterClassA(wc.lpszClassName, wc.hInstance); });
 
-        const HWND hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, nullptr, nullptr,
-                                          wc.hInstance, nullptr);
+        const HWND hwnd =
+            CreateWindowExA(0, wc.lpszClassName, nullptr, WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
         if (!hwnd)
         {
             puts("Failed to create paint window");
@@ -1453,7 +1885,29 @@ namespace
 
         const auto destroy_window = sogen::utils::finally([&] { DestroyWindow(hwnd); });
 
-        UpdateWindow(hwnd);
+        paint_state state{.window = hwnd};
+        active_paint_state = &state;
+        const auto clear_paint_state = sogen::utils::finally([&] { active_paint_state = nullptr; });
+
+        ShowWindow(hwnd, SW_SHOWDEFAULT);
+
+        RECT update_rect{};
+        if (state.ncpaint != 1 || state.erase != 1)
+        {
+            puts("ShowWindow did not synthesize nonclient and background paint");
+            return false;
+        }
+        if (state.paint != 0 || !GetUpdateRect(hwnd, &update_rect, FALSE))
+        {
+            puts("ShowWindow background paint unexpectedly validated the window");
+            return false;
+        }
+        if (!UpdateWindow(hwnd) || state.paint != 1 || GetUpdateRect(hwnd, &update_rect, FALSE))
+        {
+            puts("UpdateWindow did not paint and validate the window after ShowWindow");
+            return false;
+        }
+
         RedrawWindow(hwnd, nullptr, nullptr, RDW_NOINTERNALPAINT | RDW_VALIDATE);
         ValidateRect(hwnd, nullptr);
 
@@ -1497,6 +1951,7 @@ namespace
         }
 
         ValidateRect(hwnd, nullptr);
+
         return true;
     }
 
@@ -1762,6 +2217,7 @@ namespace
         auto* ctx = CreateActCtxW(&actctx);
         if (ctx == INVALID_HANDLE_VALUE)
         {
+            printf("CreateActCtxA failed: %lu\n", GetLastError());
             return false;
         }
 
@@ -2000,6 +2456,111 @@ namespace
                bits_written;
     }
 
+    bool test_open_named_section()
+    {
+        constexpr auto* name = "sogen-open-named-section";
+
+        auto* const creator = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 0x1000, name);
+        if (!creator)
+        {
+            puts("CreateFileMappingA failed");
+            return false;
+        }
+
+        auto* const opener = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
+        if (!opener)
+        {
+            puts("OpenFileMappingA failed");
+            CloseHandle(creator);
+            return false;
+        }
+
+        CloseHandle(creator);
+
+        auto* const view = MapViewOfFile(opener, FILE_MAP_ALL_ACCESS, 0, 0, 0x1000);
+        if (!view)
+        {
+            puts("MapViewOfFile failed");
+            CloseHandle(opener);
+            return false;
+        }
+
+        UnmapViewOfFile(view);
+        CloseHandle(opener);
+
+        return true;
+    }
+
+    bool test_handle_tag_bits()
+    {
+        using nt_close_t = LONG(NTAPI*)(HANDLE);
+        const auto nt_close =
+            reinterpret_cast<nt_close_t>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtClose")));
+        if (!nt_close)
+        {
+            puts("ntdll!NtClose not found");
+            return false;
+        }
+
+        const auto open_file = [](const char* path) {
+            return CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        };
+
+        const auto is_open = [](const HANDLE file) {
+            char byte{};
+            DWORD read{};
+            return ReadFile(file, &byte, sizeof(byte), &read, nullptr) != FALSE;
+        };
+
+        bool valid = true;
+
+        for (uint32_t tag = 0; tag < 4; ++tag)
+        {
+            const HANDLE before = open_file(R"(C:\Windows\System32\ntdll.dll)");
+            const HANDLE target = open_file(R"(C:\Windows\System32\kernel32.dll)");
+            const HANDLE after = open_file(R"(C:\Windows\System32\kernelbase.dll)");
+
+            if (before == INVALID_HANDLE_VALUE || target == INVALID_HANDLE_VALUE || after == INVALID_HANDLE_VALUE)
+            {
+                puts("Failed to open the probe files");
+                return false;
+            }
+
+            auto* const tagged = reinterpret_cast<HANDLE>((reinterpret_cast<ULONG_PTR>(target) & ~ULONG_PTR{3}) | tag);
+            const auto status = nt_close(tagged);
+
+            if (status != 0 || !is_open(before) || is_open(target) || !is_open(after))
+            {
+                printf("NtClose(%p) with tag %u did not close exactly %p (status 0x%08lX)\n", tagged, tag, target, status);
+                valid = false;
+                CloseHandle(target);
+            }
+
+            CloseHandle(before);
+            CloseHandle(after);
+        }
+
+        return valid;
+    }
+
+    bool test_unicode_case_mapping()
+    {
+        using rtl_case_unicode_char_t = WCHAR(NTAPI*)(WCHAR);
+        auto* const ntdll = GetModuleHandleA("ntdll.dll");
+        const auto upcase =
+            reinterpret_cast<rtl_case_unicode_char_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlUpcaseUnicodeChar")));
+        const auto downcase =
+            reinterpret_cast<rtl_case_unicode_char_t>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlDowncaseUnicodeChar")));
+        if (!upcase || !downcase)
+        {
+            puts("ntdll case mapping functions not found");
+            return false;
+        }
+
+        return upcase(L'a') == L'A' && upcase(0x00E4) == 0x00C4 && upcase(0x0430) == 0x0410 && downcase(0x00C4) == 0x00E4 &&
+               downcase(0x0410) == 0x0430;
+    }
+
     bool test_gdi()
     {
         const wchar_t* cursor_path = L"C:\\Windows\\Cursors\\aero_arrow.cur";
@@ -2048,23 +2609,6 @@ namespace
         char in_place[sizeof(oem)]{};
         memcpy(in_place, oem, sizeof(oem));
         return OemToCharA(in_place, in_place) && strcmp(in_place, ansi) == 0;
-    }
-
-    bool test_critical_section_timeout()
-    {
-        constexpr int64_t thirty_days = -2592000LL * 10000000LL;
-
-#ifdef _WIN64
-        const auto* peb = reinterpret_cast<const uint8_t*>(__readgsqword(0x60));
-        constexpr size_t timeout_offset = 0xC0;
-#else
-        const auto* peb = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(__readfsdword(0x30)));
-        constexpr size_t timeout_offset = 0x70;
-#endif
-
-        int64_t timeout{};
-        memcpy(&timeout, peb + timeout_offset, sizeof(timeout));
-        return timeout == thirty_days;
     }
 
     struct lpc_unicode_string
@@ -2257,6 +2801,129 @@ namespace
         return server_ok && child_code && *child_code == 0;
     }
 
+    namespace
+    {
+        INT_PTR CALLBACK dialog_table_proc(const HWND hwnd, const UINT msg, const WPARAM wp, const LPARAM lp)
+        {
+            (void)hwnd;
+            (void)msg;
+            (void)wp;
+            (void)lp;
+            return FALSE;
+        }
+    }
+
+    bool test_dialog_table()
+    {
+        alignas(DWORD) static const std::array<uint8_t, 28> template_bytes = {
+            0x00, 0x00, 0xC8, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x64, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+
+        const HWND hwnd = CreateDialogIndirectParamW(GetModuleHandleW(nullptr), reinterpret_cast<const DLGTEMPLATE*>(template_bytes.data()),
+                                                     nullptr, dialog_table_proc, 0);
+        if (!hwnd)
+        {
+            puts("CreateDialogIndirectParamW failed");
+            return false;
+        }
+
+        DestroyWindow(hwnd);
+        return true;
+    }
+
+    bool test_ansi_oem_translation()
+    {
+        std::array<char, 256> source{};
+        std::array<char, 256> converted{};
+        for (size_t i = 0; i < source.size(); ++i)
+        {
+            source[i] = static_cast<char>(i);
+        }
+        if (!CharToOemBuffA(source.data(), converted.data(), static_cast<DWORD>(source.size())))
+        {
+            return false;
+        }
+        for (size_t i = 0; i < source.size(); ++i)
+        {
+            wchar_t wide{};
+            char expected{};
+            if (!MultiByteToWideChar(CP_ACP, 0, &source[i], 1, &wide, 1) ||
+                !WideCharToMultiByte(CP_OEMCP, 0, &wide, 1, &expected, 1, nullptr, nullptr) || converted[i] != expected)
+            {
+                return false;
+            }
+        }
+        auto inplace = std::to_array("shell-arguments");
+        return CharToOemA(inplace.data(), inplace.data()) && std::string_view{inplace.data()} == "shell-arguments";
+    }
+
+    bool test_bcrypt_random()
+    {
+        std::array<UCHAR, 8192> first{};
+        std::array<UCHAR, 8192> second{};
+        const auto status = BCryptGenRandom(nullptr, first.data(), static_cast<ULONG>(first.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (!BCRYPT_SUCCESS(status))
+        {
+            printf("BCryptGenRandom failed: 0x%08lX\n", status);
+            return false;
+        }
+
+        BCRYPT_ALG_HANDLE algorithm{};
+        const auto open_status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_RNG_ALGORITHM, nullptr, 0);
+        if (!BCRYPT_SUCCESS(open_status))
+        {
+            printf("BCryptOpenAlgorithmProvider(RNG) failed: 0x%08lX\n", open_status);
+            return false;
+        }
+        const auto close_algorithm = sogen::utils::finally([&] { BCryptCloseAlgorithmProvider(algorithm, 0); });
+        const auto second_status = BCryptGenRandom(algorithm, second.data(), static_cast<ULONG>(second.size()), 0);
+        return BCRYPT_SUCCESS(second_status) && first != second && std::ranges::any_of(first, [](UCHAR value) { return value != 0; });
+    }
+
+    bool test_bcrypt_hash()
+    {
+        struct hash_vector
+        {
+            const wchar_t* algorithm;
+            std::vector<UCHAR> digest;
+        };
+
+        const std::array<hash_vector, 2> vectors{{
+            {.algorithm = BCRYPT_MD5_ALGORITHM,
+             .digest = {0x90, 0x01, 0x50, 0x98, 0x3c, 0xd2, 0x4f, 0xb0, 0xd6, 0x96, 0x3f, 0x7d, 0x28, 0xe1, 0x7f, 0x72}},
+            {.algorithm = BCRYPT_SHA256_ALGORITHM,
+             .digest = {0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+                        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad}},
+        }};
+
+        std::array<UCHAR, 3> input{'a', 'b', 'c'};
+
+        for (const auto& vector : vectors)
+        {
+            BCRYPT_ALG_HANDLE algorithm{};
+            const auto open_status = BCryptOpenAlgorithmProvider(&algorithm, vector.algorithm, nullptr, 0);
+            if (!BCRYPT_SUCCESS(open_status))
+            {
+                printf("BCryptOpenAlgorithmProvider(%ls) failed: 0x%08lX\n", vector.algorithm, open_status);
+                return false;
+            }
+
+            const auto close_algorithm = sogen::utils::finally([&] { BCryptCloseAlgorithmProvider(algorithm, 0); });
+
+            std::vector<UCHAR> digest(vector.digest.size());
+            const auto hash_status = BCryptHash(algorithm, nullptr, 0, input.data(), static_cast<ULONG>(input.size()), digest.data(),
+                                                static_cast<ULONG>(digest.size()));
+            if (!BCRYPT_SUCCESS(hash_status) || digest != vector.digest)
+            {
+                printf("BCryptHash(%ls) failed: 0x%08lX\n", vector.algorithm, hash_status);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     bool test_crypt_protect()
     {
         auto roundtrip = [](const std::vector<BYTE>& plain, const std::vector<BYTE>& entropy, const LPCWSTR descr) {
@@ -2342,6 +3009,101 @@ namespace
 
         return true;
     }
+
+    bool test_dib_blits()
+    {
+        constexpr int width = 4;
+        constexpr int height = 1;
+
+        struct
+        {
+            BITMAPINFOHEADER header;
+            std::array<RGBQUAD, 4> colors;
+        } info{};
+
+        info.header.biSize = sizeof(BITMAPINFOHEADER);
+        info.header.biWidth = width;
+        info.header.biHeight = -height;
+        info.header.biPlanes = 1;
+        info.header.biCompression = BI_RGB;
+        info.header.biClrUsed = 4;
+        info.colors[0] = {.rgbBlue = 0, .rgbGreen = 0, .rgbRed = 255, .rgbReserved = 0};
+        info.colors[1] = {.rgbBlue = 0, .rgbGreen = 255, .rgbRed = 0, .rgbReserved = 0};
+        info.colors[2] = {.rgbBlue = 255, .rgbGreen = 0, .rgbRed = 0, .rgbReserved = 0};
+        info.colors[3] = {.rgbBlue = 255, .rgbGreen = 255, .rgbRed = 255, .rgbReserved = 0};
+
+        const std::array<COLORREF, 4> palette = {RGB(255, 0, 0), RGB(0, 255, 0), RGB(0, 0, 255), RGB(255, 255, 255)};
+
+        struct dib
+        {
+            WORD bpp;
+            std::array<uint8_t, 8> bits;
+            std::array<uint8_t, width> expected_index;
+        };
+
+        const std::array<dib, 4> dibs = {
+            dib{.bpp = 1, .bits = {0x50}, .expected_index = {0, 1, 0, 1}},
+            dib{.bpp = 4, .bits = {0x01, 0x23}, .expected_index = {0, 1, 2, 3}},
+            dib{.bpp = 8, .bits = {0, 1, 2, 3}, .expected_index = {0, 1, 2, 3}},
+            dib{.bpp = 16, .bits = {0x00, 0x7C, 0xE0, 0x03, 0x1F, 0x00, 0xFF, 0x7F}, .expected_index = {0, 1, 2, 3}},
+        };
+
+        const HDC dc = CreateCompatibleDC(nullptr);
+        const HBITMAP bitmap = CreateBitmap(width, height, 1, 32, nullptr);
+        const HGDIOBJ previous = SelectObject(dc, bitmap);
+        const auto cleanup = sogen::utils::finally([&] {
+            SelectObject(dc, previous);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+        });
+
+        const auto* bitmap_info = reinterpret_cast<const BITMAPINFO*>(&info);
+        const auto check = [&](const char* function, const dib& d, const auto& blit) {
+            for (int x = 0; x < width; ++x)
+            {
+                SetPixel(dc, x, 0, RGB(0, 0, 0));
+            }
+
+            const int copied = blit();
+            if (copied != height)
+            {
+                printf("%s(%ubpp) copied %d scanlines\n", function, d.bpp, copied);
+                return false;
+            }
+
+            for (int x = 0; x < width; ++x)
+            {
+                const COLORREF actual = GetPixel(dc, x, 0);
+                const COLORREF expected = palette[d.expected_index[x]];
+                if (actual != expected)
+                {
+                    printf("%s(%ubpp) pixel %d is %06lX, expected %06lX\n", function, d.bpp, x, static_cast<unsigned long>(actual),
+                           static_cast<unsigned long>(expected));
+                    return false;
+                }
+            }
+
+            return true;
+        };
+
+        for (const auto& d : dibs)
+        {
+            info.header.biBitCount = d.bpp;
+
+            const bool set_bits_ok = check("SetDIBitsToDevice", d, [&] {
+                return SetDIBitsToDevice(dc, 0, 0, width, height, 0, 0, 0, height, d.bits.data(), bitmap_info, DIB_RGB_COLORS);
+            });
+            const bool stretch_ok = check("StretchDIBits", d, [&] {
+                return StretchDIBits(dc, 0, 0, width, height, 0, 0, width, height, d.bits.data(), bitmap_info, DIB_RGB_COLORS, SRCCOPY);
+            });
+            if (!set_bits_ok || !stretch_ok)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
 
 #define RUN_TEST(func, name)                 \
@@ -2365,6 +3127,18 @@ int main(const int argc, const char* argv[])
         return run_lpc_client() ? 0 : 1;
     }
 
+    if (argc == 2 && argv[1] == "-fail-fast"sv)
+    {
+        EXCEPTION_RECORD record{};
+        record.ExceptionCode = 0xE0001234;
+        RaiseFailFastException(&record, nullptr, 0);
+    }
+
+    if (argc == 2 && argv[1] == "-fastfail"sv)
+    {
+        __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+    }
+
     bool valid = true;
 
 #ifdef _WIN64
@@ -2383,10 +3157,15 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_registry, "Registry")
     RUN_TEST(test_system_info, "System Info")
     RUN_TEST(test_monitor_info, "Monitor Info")
+    RUN_TEST(test_display_config_buffer_sizes, "Display Config Buffer Sizes")
     RUN_TEST(test_time_zone, "Time Zone")
     RUN_TEST(test_threads, "Threads")
     RUN_TEST(test_threads_winapi, "Threads WinAPI")
+#ifdef _WIN64
+    RUN_TEST(test_thread_context, "Thread Context")
+#endif
     RUN_TEST(test_env, "Environment")
+    RUN_TEST(test_critical_section_timeout, "Critical Section Timeout")
     RUN_TEST(test_lookup_account_sid, "LSA")
     RUN_TEST(test_exceptions, "Exceptions")
 #ifndef __MINGW64__
@@ -2399,12 +3178,18 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_tls, "TLS")
     RUN_TEST(test_socket, "Socket")
     RUN_TEST(test_apc, "APC")
+    RUN_TEST(test_apc_wait, "APC Wait")
+    RUN_TEST(test_desktop_window_text, "Desktop Window Text")
+    RUN_TEST(test_window_geometry, "Window Geometry")
     RUN_TEST(test_user_callback, "User Callback")
     RUN_TEST(test_mutable_callbacks, "Mutable User Callback")
     RUN_TEST(test_message_queue, "Message Queue (General)")
     RUN_TEST(test_paint_message_queue, "Message Queue (Paint)")
     RUN_TEST(test_settimer, "User Timer")
     RUN_TEST(test_private_namespace, "Private Namespace")
+    RUN_TEST(test_open_named_section, "Open Named Section")
+    RUN_TEST(test_handle_tag_bits, "Handle Tag Bits")
+    RUN_TEST(test_unicode_case_mapping, "Unicode Case Mapping")
     RUN_TEST(test_actctx, "Activation Context")
     RUN_TEST(test_executable_heap_growth, "Executable Heap Growth")
     RUN_TEST(test_recommitted_memory_is_zeroed, "Recommitted Memory Is Zeroed")
@@ -2414,10 +3199,14 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_gdi, "GDI")
     RUN_TEST(test_dib_section, "DIB Section")
     RUN_TEST(test_oem_conversion, "OEM Conversion")
-    RUN_TEST(test_crypt_protect, "CryptProtect")
-    RUN_TEST(test_critical_section_timeout, "Critical Section Timeout")
     RUN_TEST(test_ksec_queued_function_call, "KsecDD Queued Function Call")
     RUN_TEST(test_lpc_port, "LPC Port (Two Processes)")
+    RUN_TEST(test_dialog_table, "Dialog Table")
+    RUN_TEST(test_bcrypt_hash, "BCrypt Hash")
+    RUN_TEST(test_bcrypt_random, "BCrypt Random")
+    RUN_TEST(test_ansi_oem_translation, "ANSI/OEM Translation")
+    RUN_TEST(test_crypt_protect, "CryptProtect")
+    RUN_TEST(test_dib_blits, "GDI DIB")
 
     return valid ? 0 : 1;
 }

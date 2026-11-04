@@ -1,30 +1,38 @@
 #include "../std_include.hpp"
 #include "security_support_provider.hpp"
+#include "security_support_provider_data.hpp"
 
 #include "../ksec_memory_crypt.hpp"
 #include "../windows_emulator.hpp"
-
-#include <utils/string.hpp>
 
 namespace sogen
 {
 
     namespace
     {
-        // Partial layout of the KsecDD ioctl 0x390400 request, observed via a live capture against
-        // real ntdll/KsecDD traffic. Covers the two fields the handler consumes: the operation
-        // selector and the requested algorithm name.
-        struct ksec_algorithm_request
-        {
-            std::array<uint8_t, 6> reserved0;
-            uint16_t operation;
-            std::array<uint8_t, 0x28> reserved1;
-            std::array<char16_t, 8> algorithm_name;
-        };
+        constexpr std::size_t ksec_operation_offset = 0x06;
+        constexpr std::size_t ksec_interface_offset = 0x10;
+        constexpr uint32_t ksec_rng_interface = 6;
+        constexpr std::size_t ksec_algorithm_name_offset = 0x30;
+        constexpr std::size_t ksec_algorithm_request_min_size = ksec_algorithm_name_offset;
 
-        static_assert(offsetof(ksec_algorithm_request, operation) == 6);
-        static_assert(offsetof(ksec_algorithm_request, algorithm_name) == 0x30);
-        static_assert(sizeof(ksec_algorithm_request) == 0x40);
+        std::u16string read_ksec_algorithm_name(const std::span<const uint8_t> request)
+        {
+            std::u16string name;
+            for (size_t offset = ksec_algorithm_name_offset; offset + sizeof(char16_t) <= request.size(); offset += sizeof(char16_t))
+            {
+                const auto character =
+                    static_cast<char16_t>(static_cast<uint16_t>(request[offset]) | (static_cast<uint16_t>(request[offset + 1]) << 8));
+                if (character == u'\0')
+                {
+                    break;
+                }
+
+                name.push_back(character);
+            }
+
+            return name;
+        }
 
         struct security_support_provider : stateless_device
         {
@@ -43,6 +51,38 @@ namespace sogen
                  0x70, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x73, 0x00,
                  0x2E, 0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+            // Microsoft SSL Protocol Provider -> ncryptsslp.dll (native KsecDD capture)
+            // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+            std::uint8_t ssl_provider_output_data[192] = //
+                {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00, 0x72, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+                 0xFF, 0xFF, 0xFF, 0xFF, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                 0x4D, 0x00, 0x69, 0x00, 0x63, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x73, 0x00, 0x6F, 0x00, 0x66, 0x00, 0x74, 0x00, 0x20, 0x00,
+                 0x53, 0x00, 0x53, 0x00, 0x4C, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x74, 0x00, 0x6F, 0x00, 0x63, 0x00,
+                 0x6F, 0x00, 0x6C, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x76, 0x00, 0x69, 0x00, 0x64, 0x00, 0x65, 0x00,
+                 0x72, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x6E, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00, 0x70, 0x00, 0x74, 0x00, 0x73, 0x00, 0x73, 0x00, 0x6C, 0x00, 0x70, 0x00,
+                 0x2E, 0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+            // AES Microsoft Primitive Provider (native KsecDD capture)
+            // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+            std::uint8_t aes_output_data[280] = //
+                {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x53, 0x00, 0x00, 0x00, 0x98, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0xD8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                 0x41, 0x00, 0x45, 0x00, 0x53, 0x00, 0x00, 0x00, 0x4D, 0x00, 0x69, 0x00, 0x63, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x73, 0x00,
+                 0x6F, 0x00, 0x66, 0x00, 0x74, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00,
+                 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x76, 0x00, 0x69, 0x00, 0x64, 0x00,
+                 0x65, 0x00, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xD0, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x4B, 0x00, 0x65, 0x00, 0x79, 0x00, 0x4C, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x67, 0x00, 0x74, 0x00,
+                 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00,
+                 0x70, 0x00, 0x74, 0x00, 0x70, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00,
+                 0x65, 0x00, 0x73, 0x00, 0x2E, 0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
             // SHA256 Microsoft Primitive Provider
             // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
             std::uint8_t sha256_output_data[224] = //
@@ -58,6 +98,131 @@ namespace sogen
                  0x00, 0x00, 0x00, 0x00, 0x00, 0x62, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00, 0x70, 0x00, 0x74, 0x00, 0x70, 0x00,
                  0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x73, 0x00, 0x2E,
                  0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+            std::array<std::uint8_t, 296> ecdsa_p256_output_data = {
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x44, 0x00, 0x53, 0x00, 0xa8, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0x45, 0x00, 0x43, 0x00, 0x44, 0x00, 0x53, 0x00, 0x41, 0x00, 0x5f, 0x00, 0x50, 0x00, 0x32, 0x00, 0x35, 0x00, 0x36, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x4d, 0x00, 0x69, 0x00, 0x63, 0x00, 0x72, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x66, 0x00,
+                0x74, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6d, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00,
+                0x65, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x6f, 0x00, 0x76, 0x00, 0x69, 0x00, 0x64, 0x00, 0x65, 0x00, 0x72, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x4b, 0x00, 0x65, 0x00, 0x79, 0x00, 0x4c, 0x00, 0x65, 0x00, 0x6e, 0x00, 0x67, 0x00, 0x74, 0x00, 0x68, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00, 0x70, 0x00, 0x74, 0x00,
+                0x70, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6d, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x73, 0x00,
+                0x2e, 0x00, 0x64, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+            // MD5 Microsoft Primitive Provider (shared layout for the MD family)
+            // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+            std::uint8_t md5_output_data[216] = //
+                {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+                 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x35, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+                 0xFF, 0xFF, 0xFF, 0xFF, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                 0x4D, 0x00, 0x44, 0x00, 0x35, 0x00, 0x00, 0x00, 0x4D, 0x00, 0x69, 0x00, 0x63, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x73, 0x00,
+                 0x6F, 0x00, 0x66, 0x00, 0x74, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00,
+                 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x20, 0x00, 0x50, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x76, 0x00, 0x69, 0x00, 0x64, 0x00,
+                 0x65, 0x00, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00, 0x70, 0x00, 0x74, 0x00,
+                 0x70, 0x00, 0x72, 0x00, 0x69, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x74, 0x00, 0x69, 0x00, 0x76, 0x00, 0x65, 0x00, 0x73, 0x00,
+                 0x2E, 0x00, 0x64, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+            // Offsets into a provider response. The algorithm name is a fixed-width
+            // field rather than a packed string, and 0x34 holds a two-character
+            // abbreviation of it that BCrypt cross-checks.
+            static constexpr std::size_t response_interface_offset = 0x18;
+            static constexpr std::size_t response_name_offset = 0x50;
+            static constexpr std::size_t response_abbreviation_offset = 0x34;
+            static constexpr std::size_t response_abbreviation_size = 0x04;
+            static constexpr std::size_t response_key_length_offset = 0xD0;
+
+            struct provider_algorithm
+            {
+                std::u16string_view name;
+                // Third and fourth characters of the name: "SHA1" -> A1, "MD5" -> 5.
+                std::u16string_view abbreviation;
+                std::span<const std::uint8_t> response;
+                // The provider name follows the algorithm name directly, so the
+                // field is only as wide as the longest name sharing the template.
+                std::size_t name_size;
+                std::uint32_t interface_id;
+                std::uint32_t key_length{};
+                std::size_t key_length_offset{response_key_length_offset};
+            };
+
+            std::optional<provider_algorithm> find_provider_algorithm(const std::u16string_view name)
+            {
+                const std::array<provider_algorithm, 11> algorithms{{
+                    {.name = u"SHA1", .abbreviation = u"A1", .response = sha256_output_data, .name_size = 0x10, .interface_id = 2},
+                    {.name = u"SHA256", .abbreviation = u"A2", .response = sha256_output_data, .name_size = 0x10, .interface_id = 2},
+                    {.name = u"SHA384", .abbreviation = u"A3", .response = sha256_output_data, .name_size = 0x10, .interface_id = 2},
+                    {.name = u"SHA512", .abbreviation = u"A5", .response = sha256_output_data, .name_size = 0x10, .interface_id = 2},
+                    {.name = u"ECDSA_P256",
+                     .abbreviation = u"DS",
+                     .response = ecdsa_p256_output_data,
+                     .name_size = 0x18,
+                     .interface_id = 5,
+                     .key_length = 256,
+                     .key_length_offset = 0xe0},
+                    {.name = u"ECDSA_P384",
+                     .abbreviation = u"DS",
+                     .response = ecdsa_p256_output_data,
+                     .name_size = 0x18,
+                     .interface_id = 5,
+                     .key_length = 384,
+                     .key_length_offset = 0xe0},
+                    {.name = u"DSA",
+                     .abbreviation = u"A",
+                     .response = aes_output_data,
+                     .name_size = 0x08,
+                     .interface_id = 5,
+                     .key_length = 1024},
+                    {.name = u"RSA",
+                     .abbreviation = u"A",
+                     .response = aes_output_data,
+                     .name_size = 0x08,
+                     .interface_id = 3,
+                     .key_length = 1024},
+                    {.name = u"MD2", .abbreviation = u"2", .response = md5_output_data, .name_size = 0x08, .interface_id = 2},
+                    {.name = u"MD4", .abbreviation = u"4", .response = md5_output_data, .name_size = 0x08, .interface_id = 2},
+                    {.name = u"MD5", .abbreviation = u"5", .response = md5_output_data, .name_size = 0x08, .interface_id = 2},
+                }};
+
+                for (const auto& algorithm : algorithms)
+                {
+                    if (algorithm.name == name)
+                    {
+                        return algorithm;
+                    }
+                }
+
+                return std::nullopt;
+            }
+
+            static void patch_algorithm_response(std::vector<std::uint8_t>& response, const provider_algorithm& algorithm)
+            {
+                const auto write_utf16 = [&](const std::size_t offset, const std::u16string_view text) {
+                    for (std::size_t i = 0; i < text.size(); ++i)
+                    {
+                        response[offset + (i * 2)] = static_cast<std::uint8_t>(text[i] & 0xFF);
+                        response[offset + (i * 2) + 1] = static_cast<std::uint8_t>(text[i] >> 8);
+                    }
+                };
+                std::memcpy(response.data() + response_interface_offset, &algorithm.interface_id, sizeof(algorithm.interface_id));
+                if (algorithm.key_length != 0)
+                {
+                    std::memcpy(response.data() + algorithm.key_length_offset, &algorithm.key_length, sizeof(algorithm.key_length));
+                }
+
+                std::fill_n(response.begin() + response_name_offset, algorithm.name_size, std::uint8_t{});
+                std::fill_n(response.begin() + response_abbreviation_offset, response_abbreviation_size, std::uint8_t{});
+                write_utf16(response_name_offset, algorithm.name);
+                write_utf16(response_abbreviation_offset, algorithm.abbreviation);
+            }
 
             // The header holds offsets to the name (0x20), description (0x28) and provider DLL list (0x40), and the
             // list holds an offset to the DLL name. A name longer than the slot between the name and the description
@@ -158,14 +323,22 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                std::vector<uint8_t> data(length);
-                win_emu.emu().read_memory(source, data.data(), data.size());
-                xor_ksec_memory(data);
-                win_emu.emu().write_memory(dest, data.data(), data.size());
+                std::array<uint8_t, 0x1000> chunk{};
+                static_assert(chunk.size() % k_ksec_memory_crypt_key.size() == 0);
+
+                for (size_t offset = 0; offset < length; offset += chunk.size())
+                {
+                    const auto count = std::min(chunk.size(), length - offset);
+                    const std::span<uint8_t> bytes{chunk.data(), count};
+                    win_emu.emu().read_memory(source + offset, bytes.data(), bytes.size());
+                    xor_ksec_memory(bytes);
+                    win_emu.emu().write_memory(dest + offset, bytes.data(), bytes.size());
+                }
+
                 if (c.io_status_block)
                 {
                     IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
-                    block.Information = data.size();
+                    block.Information = length;
                     c.io_status_block.write(block);
                 }
 
@@ -196,23 +369,23 @@ namespace sogen
                 // Other KsecDD clients issue 0x390400 in-place (same input/output pointer) with a small
                 // buffer and expect DeviceIoControl to succeed with a NTSTATUS in the first dword.
                 const bool in_place = c.input_buffer != 0 && c.input_buffer == c.output_buffer;
-                // The request's algorithm-name tail after the fixed 0x30-byte header varies in length with
-                // the requested algorithm name, so only require enough of the buffer to read `operation`;
-                // the algorithm_name read below is bounded to whatever the guest actually sent.
-                constexpr size_t min_request_size = offsetof(ksec_algorithm_request, operation) + sizeof(uint16_t);
-                if (!c.input_buffer || c.input_buffer_length < min_request_size ||
+                if (!c.input_buffer || c.input_buffer_length < ksec_algorithm_request_min_size ||
                     (in_place && c.output_buffer_length < sizeof(rng_output_data)))
                 {
                     return complete_status_ioctl(win_emu, c, STATUS_SUCCESS);
                 }
 
-                const auto operation = win_emu.emu().read_memory<uint16_t>(c.input_buffer + offsetof(ksec_algorithm_request, operation));
+                const auto request_size = std::min<size_t>(c.input_buffer_length, 0x1000);
+                std::vector<uint8_t> request(request_size);
+                win_emu.emu().read_memory(c.input_buffer, request.data(), request.size());
+
+                uint16_t operation{};
+                std::memcpy(&operation, request.data() + ksec_operation_offset, sizeof(operation));
 
                 if (operation == 1)
                 {
-                    // Precedes the op=2 provider-descriptor fetch below. The guest only ever asks for an
-                    // 8-byte reply here; a value of 0 reads as "no matching provider" and would abort the
-                    // lookup before op=2 is ever issued, so report a single matching provider instead.
+                    // Precedes the op=2 provider-descriptor fetch. A count of 0 reads as "no matching provider" and
+                    // aborts the lookup before op=2 is issued.
                     if (c.output_buffer && c.output_buffer_length >= sizeof(uint64_t))
                     {
                         constexpr uint64_t provider_count = 1;
@@ -229,111 +402,144 @@ namespace sogen
                     return STATUS_SUCCESS;
                 }
 
+                std::u16string algorithm_name;
                 if (operation == 2)
                 {
-                    // algorithm_name is guest-controlled, may be shorter than the fixed array (see above -
-                    // the guest only packs as many bytes as the name actually needs), and may not be
-                    // NUL-terminated; read only what the guest declared, zero-fill the rest, and let the
-                    // util bound the view to the fixed array so we never scan past it for a terminator.
-                    constexpr size_t name_offset = offsetof(ksec_algorithm_request, algorithm_name);
-                    std::array<char16_t, 8> algorithm_name_buffer{};
-                    if (c.input_buffer_length > name_offset)
+                    algorithm_name = read_ksec_algorithm_name(std::span<const uint8_t>{request});
+                }
+
+                if (operation != 2)
+                {
+                    return STATUS_SUCCESS;
+                }
+
+                const auto write_response = [&](const auto& output_data) -> NTSTATUS {
+                    if (!c.output_buffer || c.output_buffer_length < sizeof(output_data))
                     {
-                        const size_t available = c.input_buffer_length - name_offset;
-                        const size_t to_read = std::min(available, sizeof(algorithm_name_buffer));
-                        win_emu.emu().try_read_memory(c.input_buffer + name_offset, algorithm_name_buffer.data(), to_read);
+                        return STATUS_BUFFER_TOO_SMALL;
                     }
-                    const auto algorithm_name = utils::string::to_string_view<char16_t>(algorithm_name_buffer);
 
-                    // The response record is a fixed size, but real callers can (and do, e.g. MW2's WOW64
-                    // boot querying SHA1/RSA) pass an output buffer larger than that - the extra bytes are
-                    // reserved fields real KsecDD still initializes. Leaving them as whatever the guest
-                    // buffer already held (uninitialized stack contents) let bcryptprimitives.dll read
-                    // garbage there and abort its own init with STATUS_DLL_INIT_FAILED, so zero the full
-                    // caller-declared length before writing the known prefix.
-                    const auto write_response = [&](const auto& output_data) -> NTSTATUS {
-                        if (!c.output_buffer || c.output_buffer_length < sizeof(output_data))
-                        {
-                            return STATUS_BUFFER_TOO_SMALL;
-                        }
+                    // Callers (e.g. bcryptprimitives during WoW64 boot) pass buffers larger than the record and read the
+                    // reserved tail, which real KsecDD initializes; stale bytes there fail their DLL init.
+                    win_emu.emu().set_memory(c.output_buffer, 0, c.output_buffer_length);
+                    win_emu.emu().write_memory(c.output_buffer, output_data);
 
-                        win_emu.emu().set_memory(c.output_buffer, 0, c.output_buffer_length);
-                        win_emu.emu().write_memory(c.output_buffer, output_data);
+                    if (c.io_status_block)
+                    {
+                        IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                        block.Information = sizeof(output_data);
+                        c.io_status_block.write(block);
+                    }
 
+                    return STATUS_SUCCESS;
+                };
+
+                if (algorithm_name.empty())
+                {
+                    uint32_t interface_id{};
+                    std::memcpy(&interface_id, request.data() + ksec_interface_offset, sizeof(interface_id));
+                    if (interface_id == ksec_rng_interface)
+                    {
+                        return write_response(rng_output_data);
+                    }
+
+                    constexpr std::array<std::uint32_t, 2> overflow_response{
+                        static_cast<std::uint32_t>(STATUS_BUFFER_TOO_SMALL),
+                        static_cast<std::uint32_t>(ksecdd_data::provider_enumeration_response.size()),
+                    };
+                    if (!c.output_buffer || c.output_buffer_length < sizeof(overflow_response))
+                    {
+                        return STATUS_BUFFER_TOO_SMALL;
+                    }
+                    if (c.output_buffer_length < ksecdd_data::provider_enumeration_response.size())
+                    {
+                        win_emu.emu().write_memory(c.output_buffer, overflow_response);
                         if (c.io_status_block)
                         {
                             IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
-                            block.Information = c.output_buffer_length;
+                            block.Information = sizeof(overflow_response);
                             c.io_status_block.write(block);
                         }
-
-                        return STATUS_SUCCESS;
-                    };
-
-                    if (algorithm_name == u"SHA256")
-                    {
-                        return write_response(sha256_output_data);
+                        return STATUS_BUFFER_OVERFLOW;
                     }
 
-                    // AES-CMAC is a keyed hash in the primitive provider, so bcrypt expects it on the hash interface too.
-                    if (algorithm_name == u"SHA1" || algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2" ||
-                        algorithm_name == u"AES-CMAC")
-                    {
-                        return write_response(make_descriptor(sha256_output_data, 0x02, algorithm_name));
-                    }
-
-                    // BCRYPT_CIPHER_INTERFACE = 1 and BCRYPT_SECRET_AGREEMENT_INTERFACE = 4, per bcrypt.h.
-                    if (algorithm_name == u"3DES")
-                    {
-                        return write_response(make_descriptor(rng_output_data, 0x01, algorithm_name));
-                    }
-
-                    if (algorithm_name == u"DH")
-                    {
-                        return write_response(make_descriptor(rng_output_data, 0x04, algorithm_name));
-                    }
-
-                    if (algorithm_name == u"RSA")
-                    {
-                        // BCRYPT_ASYMMETRIC_ENCRYPTION_INTERFACE = 3, per bcrypt.h.
-                        // rng_output_data has an 8-byte name slot at 0x50 ("RNG\0") — safe for 3-char names.
-                        std::array<std::uint8_t, sizeof(rng_output_data)> rsa_output_data{};
-                        std::ranges::copy(rng_output_data, rsa_output_data.begin());
-                        rsa_output_data[0x18] = 0x03;
-                        constexpr std::array<char16_t, 4> rsa_name{u'R', u'S', u'A', u'\0'};
-                        std::memcpy(rsa_output_data.data() + 0x50, rsa_name.data(), rsa_name.size() * sizeof(char16_t));
-
-                        return write_response(rsa_output_data);
-                    }
-
-                    if (algorithm_name == u"DSA")
-                    {
-                        // BCRYPT_SIGNATURE_INTERFACE = 5, per bcrypt.h.
-                        std::array<std::uint8_t, sizeof(rng_output_data)> sig_output_data{};
-                        std::ranges::copy(rng_output_data, sig_output_data.begin());
-                        sig_output_data[0x18] = 0x05;
-                        constexpr std::array<char16_t, 4> dsa_name{u'D', u'S', u'A', u'\0'};
-                        std::memcpy(sig_output_data.data() + 0x50, dsa_name.data(), dsa_name.size() * sizeof(char16_t));
-
-                        return write_response(sig_output_data);
-                    }
-
-                    if (algorithm_name == u"AES" || algorithm_name == u"DES" || algorithm_name == u"RC2" || algorithm_name == u"RC4")
-                    {
-                        // BCRYPT_CIPHER_INTERFACE = 1, per bcrypt.h.
-                        std::array<std::uint8_t, sizeof(rng_output_data)> cipher_output_data{};
-                        std::ranges::copy(rng_output_data, cipher_output_data.begin());
-                        cipher_output_data[0x18] = 0x01;
-                        std::ranges::fill_n(cipher_output_data.begin() + 0x50, 0x08, std::uint8_t{0});
-                        std::memcpy(cipher_output_data.data() + 0x50, algorithm_name.data(), algorithm_name.size() * sizeof(char16_t));
-
-                        return write_response(cipher_output_data);
-                    }
-
-                    return write_response(rng_output_data);
+                    return write_response(ksecdd_data::provider_enumeration_response);
                 }
 
-                return STATUS_SUCCESS;
+                if (algorithm_name == u"Microsoft Primitive Provider")
+                {
+                    if (!c.output_buffer || c.output_buffer_length < sizeof(NTSTATUS))
+                    {
+                        return STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    const NTSTATUS provider_status = STATUS_NOT_FOUND;
+                    win_emu.emu().write_memory(c.output_buffer, provider_status);
+                    if (c.io_status_block)
+                    {
+                        IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                        block.Information = sizeof(provider_status);
+                        c.io_status_block.write(block);
+                    }
+
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                if (algorithm_name == u"KEY_STORAGE")
+                {
+                    return write_response(ksecdd_data::key_storage_provider_response);
+                }
+
+                if (algorithm_name == u"Microsoft SSL Protocol Provider")
+                {
+                    return write_response(ssl_provider_output_data);
+                }
+
+                if (algorithm_name == u"AES")
+                {
+                    return write_response(aes_output_data);
+                }
+
+                if (const auto algorithm = find_provider_algorithm(algorithm_name))
+                {
+                    if (!c.output_buffer || c.output_buffer_length < algorithm->response.size())
+                    {
+                        return STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    std::vector<std::uint8_t> response{algorithm->response.begin(), algorithm->response.end()};
+                    patch_algorithm_response(response, *algorithm);
+
+                    win_emu.emu().write_memory(c.output_buffer, response.data(), response.size());
+
+                    if (c.io_status_block)
+                    {
+                        IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                        block.Information = response.size();
+                        c.io_status_block.write(block);
+                    }
+
+                    return STATUS_SUCCESS;
+                }
+
+                // AES-CMAC is a keyed hash in the primitive provider, so bcrypt expects it on the hash interface.
+                if (algorithm_name == u"AES-CMAC")
+                {
+                    return write_response(make_descriptor(sha256_output_data, 0x02, algorithm_name));
+                }
+
+                // BCRYPT_CIPHER_INTERFACE = 1 and BCRYPT_SECRET_AGREEMENT_INTERFACE = 4, per bcrypt.h.
+                if (algorithm_name == u"3DES" || algorithm_name == u"DES" || algorithm_name == u"RC2" || algorithm_name == u"RC4")
+                {
+                    return write_response(make_descriptor(rng_output_data, 0x01, algorithm_name));
+                }
+
+                if (algorithm_name == u"DH")
+                {
+                    return write_response(make_descriptor(rng_output_data, 0x04, algorithm_name));
+                }
+
+                return write_response(rng_output_data);
             }
         };
     }

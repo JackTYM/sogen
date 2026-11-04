@@ -521,8 +521,7 @@ namespace sogen::test
 
         const std::vector<std::byte> content = {std::byte{'h'}, std::byte{'i'}, std::byte{'!'}};
 
-        auto source = section::from_pagefile_backing(content.size(), PAGE_READWRITE, SEC_COMMIT, 0x000F001F,
-                                                     shared_backing::create_from_content(content));
+        const auto source = section::from_pagefile_storage(content.size(), PAGE_READWRITE, SEC_COMMIT, 0x000F001F, 0);
         utils::buffer_serializer serialized{};
         source.serialize_object(serialized);
 
@@ -545,9 +544,18 @@ namespace sogen::test
 
         auto* const section_entry = b.process.sections.get(minted);
         ASSERT_NE(section_entry, nullptr);
-        ASSERT_NE(section_entry->object->backing, nullptr);
-        ASSERT_GE(section_entry->object->backing->size(), content.size());
-        ASSERT_TRUE(std::equal(content.begin(), content.end(), section_entry->object->backing->data()));
+        std::vector<std::byte> adopted_content(content.size());
+        if (const auto memory = b.process.section_views.storage_memory(section_entry->object->view_storage_id))
+        {
+            ASSERT_GE(memory->size(), content.size());
+            std::copy_n(memory->data(), content.size(), adopted_content.begin());
+        }
+        else
+        {
+            ASSERT_NE(section_entry->object->backing_address, 0u);
+            ASSERT_TRUE(b.memory.try_read_memory(section_entry->object->backing_address, adopted_content.data(), adopted_content.size()));
+        }
+        ASSERT_EQ(adopted_content, content);
         ASSERT_EQ(section_entry->object->maximum_size, content.size());
         ASSERT_EQ(section_entry->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
@@ -559,7 +567,7 @@ namespace sogen::test
         loopback_process_control_channel channel{b};
 
         shared_object_description description{};
-        ASSERT_EQ(describe_shareable_object(a.process, a.process.tokens.store({}), description), STATUS_SUCCESS);
+        ASSERT_EQ(describe_shareable_object(a, a.process.tokens.store({}), description), STATUS_SUCCESS);
 
         process_control_request request{};
         write_description_to_request(description, request);
@@ -580,7 +588,7 @@ namespace sogen::test
         parent.register_child_control_channel(record_id, std::make_unique<loopback_process_control_channel>(child));
 
         shared_object_description description{};
-        ASSERT_EQ(describe_shareable_object(parent.process, parent.process.tokens.store({}), description), STATUS_SUCCESS);
+        ASSERT_EQ(describe_shareable_object(parent, parent.process.tokens.store({}), description), STATUS_SUCCESS);
 
         process_control_request request{};
         write_description_to_request(description, request);

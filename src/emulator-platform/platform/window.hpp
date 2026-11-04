@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kernel_mapped.hpp"
+#include "gdi.hpp"
 
 // NOLINTBEGIN(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)
 
@@ -165,6 +166,28 @@ namespace sogen
         uint8_t rgbReserved[32];
     };
 
+    struct EMU_NONCLIENTMETRICS
+    {
+        DWORD cbSize;
+        LONG iBorderWidth;
+        LONG iScrollWidth;
+        LONG iScrollHeight;
+        LONG iCaptionWidth;
+        LONG iCaptionHeight;
+        EMU_LOGFONTW lfCaptionFont;
+        LONG iSmCaptionWidth;
+        LONG iSmCaptionHeight;
+        EMU_LOGFONTW lfSmCaptionFont;
+        LONG iMenuWidth;
+        LONG iMenuHeight;
+        EMU_LOGFONTW lfMenuFont;
+        EMU_LOGFONTW lfStatusFont;
+        EMU_LOGFONTW lfMessageFont;
+        LONG iPaddedBorderWidth;
+    };
+
+    static_assert(sizeof(EMU_NONCLIENTMETRICS) == 0x1F8);
+
     struct EMU_MENUITEMINFO
     {
         UINT cbSize;
@@ -181,6 +204,16 @@ namespace sogen
         hbitmap hbmpItem;
     };
 
+    struct EMU_WINDOWPLACEMENT
+    {
+        DWORD length;
+        DWORD flags;
+        DWORD showCmd;
+        POINT ptMinPosition;
+        POINT ptMaxPosition;
+        RECT rcNormalPosition;
+    };
+
 #define EMU_HWND_MESSAGE ((hwnd) - 3)
 
 #define SWP_NOCLIENTSIZE 0x0800
@@ -192,9 +225,11 @@ namespace sogen
 #define WS_POPUP                    0x80000000L
 #define WS_CHILD                    0x40000000L
 #define WS_VISIBLE                  0x10000000L
+#define WS_MINIMIZE                 0x20000000L
 #define WS_DISABLED                 0x08000000L
 #define WS_CLIPSIBLINGS             0x04000000L
 #define WS_CLIPCHILDREN             0x02000000L
+#define WS_MAXIMIZE                 0x01000000L
 #define WS_CAPTION                  0x00C00000L
 #define WS_BORDER                   0x00800000L
 #define WS_DLGFRAME                 0x00400000L
@@ -204,15 +239,28 @@ namespace sogen
 #define WS_MAXIMIZEBOX              0x00010000L
 
 #define WS_EX_NOPARENTNOTIFY        0x00000004L
+#define WS_EX_TRANSPARENT           0x00000020L
+#define WS_EX_TOOLWINDOW            0x00000080L
+#define WS_EX_LAYERED               0x00080000L
+#define WS_EX_CLIENTEDGE            0x00000200L
+#define WS_EX_NOACTIVATE            0x08000000L
+
+#define SIZE_RESTORED               0
+#define SIZE_MAXIMIZED              2
 
 #define SWP_NOSIZE                  0x0001
 #define SWP_NOMOVE                  0x0002
 #define SWP_NOZORDER                0x0004
 #define SWP_NOREDRAW                0x0008
 #define SWP_NOACTIVATE              0x0010
+#define SWP_FRAMECHANGED            0x0020
 #define SWP_SHOWWINDOW              0x0040
 #define SWP_HIDEWINDOW              0x0080
+#define SWP_NOSENDCHANGING          0x0400
 
+#define SW_SHOWNORMAL               1
+#define SW_SHOWMINIMIZED            2
+#define SW_SHOWMAXIMIZED            3
 #define SW_SHOWNOACTIVATE           4
 #define SW_SHOWMINNOACTIVE          7
 #define SW_SHOWNA                   8
@@ -267,11 +315,13 @@ namespace sogen
 #define WM_COMMAND                  0x0111
 #define WM_TIMER                    0x0113
 #define WM_HOTKEY                   0x0312
+#define WM_DWMNCRENDERINGCHANGED    0x031F
 #define WM_WINDOWPOSCHANGING        0x0046
 #define WM_WINDOWPOSCHANGED         0x0047
 #define WM_NCCREATE                 0x0081
 #define WM_NCDESTROY                0x0082
 #define WM_NCCALCSIZE               0x0083
+#define WM_NCPAINT                  0x0085
 #define WM_NCACTIVATE               0x0086
 #define WM_NCMOUSEMOVE              0x00A0
 #define WM_NCLBUTTONDOWN            0x00A1
@@ -404,6 +454,12 @@ namespace sogen
 #define VK_F12                      0x7B
 #define VK_NUMLOCK                  0x90
 #define VK_SCROLL                   0x91
+#define VK_LSHIFT                   0xA0
+#define VK_RSHIFT                   0xA1
+#define VK_LCONTROL                 0xA2
+#define VK_RCONTROL                 0xA3
+#define VK_LMENU                    0xA4
+#define VK_RMENU                    0xA5
 #define VK_OEM_1                    0xBA
 #define VK_OEM_PLUS                 0xBB
 #define VK_OEM_COMMA                0xBC
@@ -416,6 +472,7 @@ namespace sogen
 #define VK_OEM_6                    0xDD
 #define VK_OEM_7                    0xDE
 #define VK_OEM_102                  0xE2
+#define VK_PACKET                   0xE7
 
 #define IDOK                        1
 #define IDCANCEL                    2
@@ -461,6 +518,8 @@ namespace sogen
 #define GWLP_WNDPROC                (-4)
 #define GWLP_HINSTANCE              (-6)
 #define GWLP_HWNDPARENT             (-8)
+#define GWL_STYLE                   (-16)
+#define GWL_EXSTYLE                 (-20)
 #define GWLP_USERDATA               (-21)
 #define GWLP_ID                     (-12)
 
@@ -482,6 +541,12 @@ namespace sogen
 
 #define MF_BYCOMMAND                0x0000
 #define MF_BYPOSITION               0x0400
+
+#define MF_UNCHECKED                0x00000000L
+#define MF_CHECKED                  0x00000008L
+#define MF_ENABLED                  0x00000000L
+#define MF_GRAYED                   0x00000001L
+#define MF_DISABLED                 0x00000002L
 #endif
 
 #define WM_UAHDESTROYWINDOW 0x0090

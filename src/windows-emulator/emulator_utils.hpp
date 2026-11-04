@@ -10,6 +10,8 @@
 #include "segment_utils.hpp"
 
 #include <utils/time.hpp>
+#include <algorithm>
+#include <array>
 #include <type_traits>
 #include <vector>
 
@@ -55,15 +57,17 @@ namespace sogen
 
     class windows_emulator;
     class module_manager;
+    class file_system;
     struct process_context;
 
     using clock_wrapper = object_wrapper<utils::clock>;
-    using x64_emulator_wrapper = object_wrapper<x86_64_emulator>;
+    using guest_machine_wrapper = object_wrapper<guest_machine>;
     using memory_manager_wrapper = object_wrapper<memory_manager>;
     using module_manager_wrapper = object_wrapper<module_manager>;
     using process_context_wrapper = object_wrapper<process_context>;
     using windows_emulator_wrapper = object_wrapper<windows_emulator>;
     using socket_factory_wrapper = object_wrapper<network::socket_factory>;
+    using file_system_wrapper = object_wrapper<file_system>;
 
     template <typename T>
     class emulator_object
@@ -71,7 +75,7 @@ namespace sogen
       public:
         using value_type = T;
 
-        emulator_object(const x64_emulator_wrapper& wrapper, const uint64_t address = 0)
+        emulator_object(const guest_machine_wrapper& wrapper, const uint64_t address = 0)
             : emulator_object(wrapper.get(), address)
         {
         }
@@ -159,6 +163,7 @@ namespace sogen
         {
             if constexpr (sizeof(T) < 0x4000)
             {
+                // NOLINTNEXTLINE(bugprone-invalid-enum-default-initialization)
                 T obj{};
                 this->access_object(accessor, obj, index);
             }
@@ -384,6 +389,20 @@ namespace sogen
         }
 
         return result;
+    }
+
+    inline bool is_memory_readable(const memory_interface& memory, const uint64_t address, const uint64_t size)
+    {
+        std::array<std::byte, 0x1000> chunk{};
+        for (uint64_t offset = 0; offset < size; offset += chunk.size())
+        {
+            const auto chunk_size = static_cast<size_t>(std::min<uint64_t>(chunk.size(), size - offset));
+            if (!memory.try_read_memory(address + offset, chunk.data(), chunk_size))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     inline std::u16string read_unicode_string(const memory_interface& emu, const UNICODE_STRING<EmulatorTraits<Emu64>> ucs)

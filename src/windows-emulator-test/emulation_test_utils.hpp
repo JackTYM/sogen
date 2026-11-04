@@ -50,6 +50,7 @@ namespace sogen::test
     struct sample_configuration
     {
         bool print_time{false};
+        bool fail_fast{false};
     };
 
     namespace
@@ -108,6 +109,11 @@ namespace sogen::test
             settings.arguments.emplace_back(u"-time");
         }
 
+        if (config.fail_fast)
+        {
+            settings.arguments.emplace_back(u"-fail-fast");
+        }
+
         return settings;
     }
 
@@ -125,8 +131,11 @@ namespace sogen::test
 
         settings.emulation_root = get_emulator_root();
 
-        settings.path_mappings["C:\\a.txt"] =
-            std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt");
+        settings.mounts.push_back(mount_spec{
+            .host_path = std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt"),
+            .guest_path = windows_path{'c', {u"a.txt"}},
+            .mode = filesystem_mode::read_write,
+        });
 
         if (!interfaces.socket_factory)
         {
@@ -164,8 +173,11 @@ namespace sogen::test
 
         settings.emulation_root = get_emulator_root();
 
-        settings.path_mappings["C:\\a.txt"] =
-            std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt");
+        settings.mounts.push_back(mount_spec{
+            .host_path = std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt"),
+            .guest_path = windows_path{'c', {u"a.txt"}},
+            .mode = filesystem_mode::read_write,
+        });
 
         if (!interfaces.socket_factory)
         {
@@ -275,7 +287,7 @@ namespace sogen::test
 
         (void)get_state_for_count(static_cast<size_t>(lower_bound));
 
-        const auto rip = emu.emu().read_instruction_pointer();
+        const auto rip = emu.x64_emu().read_instruction_pointer();
 
         printf("Diff detected after 0x%" PRIx64 " instructions at 0x%" PRIx64 " (%s)\n", lower_bound, rip, emu.mod_manager.find_name(rip));
     }
