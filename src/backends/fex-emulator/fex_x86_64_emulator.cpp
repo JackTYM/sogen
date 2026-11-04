@@ -51,10 +51,8 @@
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <mach/arm/thread_status.h>
 #include <libkern/OSCacheControl.h>
-#include <libproc.h>
 #endif
 
 #include <atomic>
@@ -1121,9 +1119,9 @@ namespace sogen::fex
             // pthread_jit_write_protect_np is per-thread and exclusive with execute permission on this
             // thread's MAP_JIT pages: leaving it disabled past this call would fault the next guest
             // instruction fetch on this thread, not just widen an otherwise-harmless window.
-            ::pthread_jit_write_protect_np(0);
+            FEXCore::Allocator::SetJITWriteProtect(false);
             const uint64_t result = real(frame, record);
-            ::pthread_jit_write_protect_np(1);
+            FEXCore::Allocator::SetJITWriteProtect(true);
             return result;
         }
 
@@ -2243,7 +2241,7 @@ namespace sogen::fex
 
             // Every 64-bit Mach-O executable reserves a __PAGEZERO segment spanning at least [0, 4GB),
             // an OS/linker convention enforced at the mmap syscall level rather than a listed VM region
-            // mach_vm_region reports: its first real hit starts well above 4GB (ASLR-dependent), yet
+            // vm_region_64 reports: its first real hit starts well above 4GB (ASLR-dependent), yet
             // mapping guest memory anywhere in the gap below still fails. So the whole gap up to the
             // scan's first real region is reserved rather than guessing a fixed size.
             //
@@ -2259,16 +2257,16 @@ namespace sogen::fex
                 ranges.push_back({.address = arena_base, .size = arena.size()});
             }
 
-            mach_vm_address_t address = 0;
+            vm_address_t address = 0;
             bool first_region = true;
             while (true)
             {
-                mach_vm_size_t size = 0;
+                vm_size_t size = 0;
                 vm_region_basic_info_data_64_t info{};
                 mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
                 mach_port_t object_name = MACH_PORT_NULL;
-                const kern_return_t result = mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64,
-                                                            reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+                const kern_return_t result = vm_region_64(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64,
+                                                          reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
                 if (result != KERN_SUCCESS)
                 {
                     break;
@@ -2298,7 +2296,7 @@ namespace sogen::fex
                 // skipped - in instrumented builds only.
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
-                constexpr mach_vm_size_t asan_shadow_region_threshold = 0x100000000ULL; // 4 GiB
+                constexpr vm_size_t asan_shadow_region_threshold = 0x100000000ULL; // 4 GiB
                 if (size >= asan_shadow_region_threshold)
                 {
                     address += size;
@@ -2315,7 +2313,7 @@ namespace sogen::fex
 
         std::vector<host_reserved_range> reserved_host_ranges_in(uint64_t address, size_t size) const override
         {
-            // mach_vm_region's start-address parameter lets the kernel skip straight to the first region
+            // vm_region_64's start-address parameter lets the kernel skip straight to the first region
             // at or above the window, so this visits only regions actually inside it (usually none),
             // instead of re-walking every region in the process - a count that grows unbounded over a
             // long session. The arena and the __PAGEZERO gap are captured by the first full scan at
@@ -2323,19 +2321,19 @@ namespace sogen::fex
             // a foreign mapping in a gap an earlier guest unmap returned to the OS.
             std::vector<host_reserved_range> ranges;
 
-            const mach_vm_address_t window_start = address;
-            const mach_vm_address_t window_end = window_start + size;
+            const vm_address_t window_start = address;
+            const vm_address_t window_end = window_start + size;
 
-            mach_vm_address_t probe = window_start;
+            vm_address_t probe = window_start;
             while (probe < window_end)
             {
-                mach_vm_address_t region_addr = probe;
-                mach_vm_size_t region_size = 0;
+                vm_address_t region_addr = probe;
+                vm_size_t region_size = 0;
                 vm_region_basic_info_data_64_t info{};
                 mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
                 mach_port_t object_name = MACH_PORT_NULL;
-                if (mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
-                                   reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name) != KERN_SUCCESS)
+                if (vm_region_64(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+                                 reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name) != KERN_SUCCESS)
                 {
                     break;
                 }
@@ -2600,12 +2598,12 @@ namespace sogen::fex
                 this->claim_host_range(claim_start, claim_size);
             }
 
-            mach_vm_address_t target_address = host_address;
+            vm_address_t target_address = host_address;
             vm_prot_t cur_protection = VM_PROT_NONE;
             vm_prot_t max_protection = VM_PROT_NONE;
-            const kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-                                                         mach_task_self(), reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE,
-                                                         &cur_protection, &max_protection, VM_INHERIT_NONE);
+            const kern_return_t result =
+                ::vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                           reinterpret_cast<vm_address_t>(host_pointer), FALSE, &cur_protection, &max_protection, VM_INHERIT_NONE);
             if (result != KERN_SUCCESS || target_address != host_address)
             {
                 throw std::runtime_error("FEX backend failed to alias host memory into the guest");
@@ -3093,8 +3091,8 @@ namespace sogen::fex
                 }
 
 #ifdef __APPLE__
-                mach_vm_address_t target = host_address;
-                const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, span_size, VM_FLAGS_FIXED);
+                vm_address_t target = host_address;
+                const kern_return_t result = ::vm_allocate(mach_task_self(), &target, span_size, VM_FLAGS_FIXED);
                 if (result == KERN_NO_SPACE)
                 {
                     throw host_memory_collision{};
@@ -3105,7 +3103,7 @@ namespace sogen::fex
                 }
                 if (::mprotect(reinterpret_cast<void*>(host_address), span_size, PROT_NONE) != 0)
                 {
-                    ::mach_vm_deallocate(mach_task_self(), target, span_size);
+                    ::vm_deallocate(mach_task_self(), target, span_size);
                     throw std::runtime_error("FEX backend failed to protect a guest address reservation");
                 }
 #else
@@ -4199,7 +4197,7 @@ namespace sogen::fex
             if (this->context_ && this->context_->IsAddressInCodeBuffer(vcpu.thread_, pc))
             {
 #ifdef __APPLE__
-                ::pthread_jit_write_protect_np(0);
+                FEXCore::Allocator::SetJITWriteProtect(false);
                 auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
 #else
                 auto* gprs = reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs);
@@ -4207,7 +4205,7 @@ namespace sogen::fex
                 const auto skip = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
                     vcpu.thread_, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc, gprs);
 #ifdef __APPLE__
-                ::pthread_jit_write_protect_np(1);
+                FEXCore::Allocator::SetJITWriteProtect(true);
 #endif
                 if (skip)
                 {
@@ -4418,7 +4416,7 @@ namespace sogen::fex
                     const auto host_pc = get_host_pc(uctx);
                     if (fault_addr == host_pc && this->host_pc_in_dispatcher(host_pc))
                     {
-                        ::pthread_jit_write_protect_np(1);
+                        FEXCore::Allocator::SetJITWriteProtect(true);
                         return true;
                     }
                 }
@@ -4468,7 +4466,7 @@ namespace sogen::fex
                     if (retry_count < max_write_protect_retries)
                     {
                         ++retry_count;
-                        ::pthread_jit_write_protect_np(0);
+                        FEXCore::Allocator::SetJITWriteProtect(false);
                         return true;
                     }
                 }
@@ -4534,7 +4532,7 @@ namespace sogen::fex
                         ++retry_count;
                         const uint64_t faulting_pc = get_host_pc(uctx);
                         const bool is_instruction_fetch = (faulting_pc == fault_addr_u64);
-                        ::pthread_jit_write_protect_np(is_instruction_fetch ? 1 : 0);
+                        FEXCore::Allocator::SetJITWriteProtect(is_instruction_fetch);
                         return true;
                     }
                 }
@@ -4778,7 +4776,7 @@ namespace sogen::fex
             // Invalidating a range can synchronously delink already-linked call sites (AddBlockLink's
             // delinker callbacks), writing into a MAP_JIT buffer - the same per-thread write-protect
             // requirement as exit_function_link_jit_write_wrapper.
-            ::pthread_jit_write_protect_np(0);
+            FEXCore::Allocator::SetJITWriteProtect(false);
 #endif
             context->InvalidateCodeBuffersCodeRange(address, size);
             if (thread != nullptr)
@@ -4786,7 +4784,7 @@ namespace sogen::fex
                 context->InvalidateThreadCachedCodeRange(thread, address, size);
             }
 #ifdef __APPLE__
-            ::pthread_jit_write_protect_np(1);
+            FEXCore::Allocator::SetJITWriteProtect(true);
 #endif
         }
 

@@ -8,7 +8,9 @@ Silicon** and **Android on AArch64** — [FEX](https://fex-emu.com) only JITs x8
 
 Working on Darwin/Apple Silicon: `test-sample.exe` runs to completion, matching the Unicorn
 backend's behavior. Android/AArch64 is now a functional target and currently requires a 4KB host
-page. Other AArch64 Linux hosts have build coverage only and are not expected to run.
+page. Other AArch64 Linux hosts have build coverage only and are not expected to run. The iOS
+Simulator runs it like macOS. On an iOS device it builds and links, but FEXCore cannot allocate
+executable memory there, so it does not run.
 
 ## Security / address-space model
 
@@ -74,6 +76,8 @@ No special setup needed, unlike the KVM backend (which requires a Docker-on-Wind
 build or run at all): from an ARM64 Clang host (Apple Silicon macOS or ARM64 Linux), the ordinary
 `cmake --preset=release` picks this backend up automatically once `deps/FEX` is checked out (see the
 root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requires a 4KB host page.
+For iOS, configure with `-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/ios-simulator.cmake` (Simulator) or
+`cmake/toolchain/ios.cmake` (device); FEXCore is then linked statically.
 
 ## Known limitations
 
