@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "activation_context_request.hpp"
 #include "activation_context.hpp"
+#include "emulated_sxs.hpp"
 #include <address_utils.hpp>
 #include <utils/finally.hpp>
 #include "../windows_emulator.hpp"
@@ -69,6 +70,17 @@ namespace sogen::sxs
             return file->handle.seek_to(0) && file->handle.read(contents) == contents.size();
         }
 
+        // BASE_CREATEPROCESS_MSG as the 64-bit csrss receives it (WoW64 callers are thunked to this layout):
+        // ProcessHandle first, the embedded BASE_SXS_CREATEPROCESS_MSG at +0x38. kernelbase reads the
+        // compatibility csrss derived from the child's manifest back out of that message: the newest
+        // supported OS as a {major, minor} WORD pair at Sxs+0xA4 and maxversiontested at Sxs+0xB8.
+        constexpr uint64_t csr_return_value_offset = 0x0C;
+        constexpr uint64_t create_process_handle_offset = csr_header_size;
+        constexpr uint64_t create_process_sxs_offset = csr_header_size + 0x38;
+        constexpr uint64_t sxs_supported_os_offset = create_process_sxs_offset + 0xA4;
+        constexpr uint64_t sxs_max_version_tested_offset = create_process_sxs_offset + 0xB8;
+        constexpr uint64_t create_process_minimum_size = sxs_max_version_tested_offset + sizeof(uint64_t);
+
         bool read_string(const memory_manager& memory, const unicode_string& string, std::u16string& value)
         {
             if (string.Length > string.MaximumLength || string.Length % sizeof(char16_t) != 0)
@@ -78,6 +90,36 @@ namespace sogen::sxs
             value.resize(string.Length / sizeof(char16_t));
             return value.empty() || memory.try_read_memory(string.Buffer, value.data(), string.Length);
         }
+    }
+
+    lpc_request_result handle_create_process(windows_emulator& win_emu, const lpc_request_context& request)
+    {
+        if (request.send_buffer_length < create_process_minimum_size || request.recv_buffer_length < create_process_minimum_size)
+        {
+            return {STATUS_INVALID_PARAMETER, lpc_request_result::reply_in_place};
+        }
+
+        const auto process_handle = win_emu.emu().read_memory<handle>(request.send_buffer + create_process_handle_offset);
+        const auto record = process_handle.value.is_pseudo && process_handle.value.type == handle_types::process
+                                ? win_emu.process.child_processes.find(static_cast<uint32_t>(process_handle.value.id))
+                                : win_emu.process.child_processes.end();
+
+        if (record != win_emu.process.child_processes.end())
+        {
+            const auto manifest_data = read_image_file_manifest(win_emu.file_sys, record->second.image_path);
+            const auto parsed = manifest_data ? parse_manifest(*manifest_data) : std::nullopt;
+            const auto compatibility = parsed ? query_process_compatibility(*parsed) : std::nullopt;
+
+            if (compatibility)
+            {
+                const uint16_t supported_os[]{compatibility->os_major, compatibility->os_minor};
+                win_emu.emu().write_memory(request.recv_buffer + sxs_supported_os_offset, supported_os, sizeof(supported_os));
+                win_emu.emu().write_memory(request.recv_buffer + sxs_max_version_tested_offset, compatibility->max_version_tested);
+            }
+        }
+
+        win_emu.emu().write_memory(request.recv_buffer + csr_return_value_offset, STATUS_SUCCESS);
+        return {STATUS_SUCCESS, lpc_request_result::reply_in_place};
     }
 
     lpc_request_result handle_create_activation_context(windows_emulator& win_emu, const lpc_request_context& request)

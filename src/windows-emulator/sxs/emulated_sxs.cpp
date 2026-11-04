@@ -5,6 +5,8 @@
 
 #include <platform/win_pefile.hpp>
 
+#include <functional>
+
 namespace sogen::sxs
 {
     namespace
@@ -20,73 +22,213 @@ namespace sogen::sxs
             uint32_t offset{};
         };
 
-        std::optional<uint32_t> find_resource_entry(windows_emulator& win_emu, const uint64_t resource_root,
+        using rva_reader = std::function<bool(uint64_t rva, void* destination, size_t length)>;
+
+        template <typename T>
+        std::optional<T> read_value(const rva_reader& read_rva, const uint64_t rva)
+        {
+            T value{};
+            if (!read_rva(rva, &value, sizeof(value)))
+            {
+                return std::nullopt;
+            }
+
+            return value;
+        }
+
+        std::optional<uint32_t> find_resource_entry(const rva_reader& read_rva, const uint64_t resource_root,
                                                     const uint32_t directory_offset, const std::optional<uint32_t> id)
         {
             const auto directory = resource_root + directory_offset;
-            const auto named_entries = win_emu.emu().read_memory<uint16_t>(directory + 12);
-            const auto id_entries = win_emu.emu().read_memory<uint16_t>(directory + 14);
-
-            for (uint32_t i = 0; i < static_cast<uint32_t>(named_entries + id_entries); ++i)
+            const auto named_entries = read_value<uint16_t>(read_rva, directory + 12);
+            const auto id_entries = read_value<uint16_t>(read_rva, directory + 14);
+            if (!named_entries || !id_entries)
             {
-                const auto entry =
-                    win_emu.emu().read_memory<resource_directory_entry>(directory + 16 + i * sizeof(resource_directory_entry));
-                if (!id || (i >= named_entries && entry.name == *id))
+                return std::nullopt;
+            }
+
+            for (uint32_t i = 0; i < static_cast<uint32_t>(*named_entries + *id_entries); ++i)
+            {
+                const auto entry = read_value<resource_directory_entry>(read_rva, directory + 16 + i * sizeof(resource_directory_entry));
+                if (!entry)
                 {
-                    return entry.offset;
+                    return std::nullopt;
+                }
+
+                if (!id || (i >= *named_entries && entry->name == *id))
+                {
+                    return entry->offset;
                 }
             }
 
             return std::nullopt;
         }
 
-        std::optional<std::vector<std::byte>> read_manifest_resource(windows_emulator& win_emu, const mapped_module& executable)
+        std::optional<std::vector<std::byte>> read_manifest_resource(const rva_reader& read_rva, const uint32_t resource_rva)
         {
-            const auto image = executable.image_base;
-            const auto nt_headers = image + win_emu.emu().read_memory<uint32_t>(image + 0x3C);
-            const auto optional_header = nt_headers + 0x18;
-            const auto magic = win_emu.emu().read_memory<uint16_t>(optional_header);
-            const auto data_directories = optional_header + (magic == 0x20B ? 112 : 96);
-            const auto resource_rva = win_emu.emu().read_memory<uint32_t>(data_directories + IMAGE_DIRECTORY_ENTRY_RESOURCE * 8);
             if (resource_rva == 0)
             {
                 return std::nullopt;
             }
 
-            const auto root = image + resource_rva;
-            const auto type = find_resource_entry(win_emu, root, 0, rt_manifest);
+            const uint64_t root = resource_rva;
+            const auto type = find_resource_entry(read_rva, root, 0, rt_manifest);
             if (!type || !(*type & resource_subdirectory_flag))
             {
                 return std::nullopt;
             }
 
-            const auto name = find_resource_entry(win_emu, root, *type & ~resource_subdirectory_flag, createprocess_manifest_resource_id);
+            const auto name = find_resource_entry(read_rva, root, *type & ~resource_subdirectory_flag, createprocess_manifest_resource_id);
             if (!name || !(*name & resource_subdirectory_flag))
             {
                 return std::nullopt;
             }
 
-            const auto language = find_resource_entry(win_emu, root, *name & ~resource_subdirectory_flag, std::nullopt);
+            const auto language = find_resource_entry(read_rva, root, *name & ~resource_subdirectory_flag, std::nullopt);
             if (!language || (*language & resource_subdirectory_flag))
             {
                 return std::nullopt;
             }
 
-            const auto data_rva = win_emu.emu().read_memory<uint32_t>(root + *language);
-            const auto size = win_emu.emu().read_memory<uint32_t>(root + *language + 4);
-            if (size == 0 || size > maximum_manifest_size)
+            const auto data_rva = read_value<uint32_t>(read_rva, root + *language);
+            const auto size = read_value<uint32_t>(read_rva, root + *language + 4);
+            if (!data_rva || !size || *size == 0 || *size > maximum_manifest_size)
             {
                 return std::nullopt;
             }
 
-            std::vector<std::byte> data(size);
-            if (!win_emu.memory.try_read_memory(image + data_rva, data.data(), data.size()))
+            std::vector<std::byte> data(*size);
+            if (!read_rva(*data_rva, data.data(), data.size()))
             {
                 return std::nullopt;
             }
 
             return data;
         }
+
+        std::optional<std::vector<std::byte>> read_manifest_resource(windows_emulator& win_emu, const mapped_module& executable)
+        {
+            const auto image = executable.image_base;
+            const rva_reader read_rva = [&](const uint64_t rva, void* destination, const size_t length) {
+                return win_emu.memory.try_read_memory(image + rva, destination, length);
+            };
+
+            const auto nt_headers = read_value<uint32_t>(read_rva, 0x3C);
+            if (!nt_headers)
+            {
+                return std::nullopt;
+            }
+
+            const auto optional_header = *nt_headers + 0x18;
+            const auto magic = read_value<uint16_t>(read_rva, optional_header);
+            if (!magic)
+            {
+                return std::nullopt;
+            }
+
+            const auto data_directories = optional_header + (*magic == 0x20B ? 112 : 96);
+            const auto resource_rva = read_value<uint32_t>(read_rva, data_directories + IMAGE_DIRECTORY_ENTRY_RESOURCE * 8);
+            return resource_rva ? read_manifest_resource(read_rva, *resource_rva) : std::nullopt;
+        }
+
+        template <typename T>
+        std::optional<T> read_file_value(const std::vector<std::byte>& file, const size_t offset)
+        {
+            if (offset > file.size() || file.size() - offset < sizeof(T))
+            {
+                return std::nullopt;
+            }
+
+            T value{};
+            std::memcpy(&value, file.data() + offset, sizeof(value));
+            return value;
+        }
+
+        std::optional<std::vector<std::byte>> read_manifest_resource_from_file(const std::vector<std::byte>& file)
+        {
+            const auto nt_headers = read_file_value<uint32_t>(file, 0x3C);
+            if (!nt_headers)
+            {
+                return std::nullopt;
+            }
+
+            const auto section_count = read_file_value<uint16_t>(file, *nt_headers + 6);
+            const auto optional_header_size = read_file_value<uint16_t>(file, *nt_headers + 20);
+            const auto magic = read_file_value<uint16_t>(file, *nt_headers + 0x18);
+            if (!section_count || !optional_header_size || !magic)
+            {
+                return std::nullopt;
+            }
+
+            const auto data_directories = *nt_headers + 0x18 + (*magic == 0x20B ? 112 : 96);
+            const auto resource_rva = read_file_value<uint32_t>(file, data_directories + IMAGE_DIRECTORY_ENTRY_RESOURCE * 8);
+            if (!resource_rva)
+            {
+                return std::nullopt;
+            }
+
+            struct section_header
+            {
+                uint32_t virtual_size{};
+                uint32_t virtual_address{};
+                uint32_t raw_size{};
+                uint32_t raw_offset{};
+            };
+
+            std::vector<section_header> sections{};
+            const size_t table = static_cast<size_t>(*nt_headers) + 0x18 + *optional_header_size;
+            for (uint32_t i = 0; i < *section_count; ++i)
+            {
+                const auto entry = table + i * 40;
+                const auto virtual_size = read_file_value<uint32_t>(file, entry + 8);
+                const auto virtual_address = read_file_value<uint32_t>(file, entry + 12);
+                const auto raw_size = read_file_value<uint32_t>(file, entry + 16);
+                const auto raw_offset = read_file_value<uint32_t>(file, entry + 20);
+                if (!virtual_size || !virtual_address || !raw_size || !raw_offset)
+                {
+                    return std::nullopt;
+                }
+
+                sections.push_back({*virtual_size, *virtual_address, *raw_size, *raw_offset});
+            }
+
+            const rva_reader read_rva = [&](const uint64_t rva, void* destination, const size_t length) {
+                for (const auto& section : sections)
+                {
+                    const auto extent = std::max(section.virtual_size, section.raw_size);
+                    if (rva >= section.virtual_address && rva + length <= static_cast<uint64_t>(section.virtual_address) + extent)
+                    {
+                        const auto offset = static_cast<size_t>(section.raw_offset + (rva - section.virtual_address));
+                        if (offset > file.size() || file.size() - offset < length)
+                        {
+                            return false;
+                        }
+
+                        std::memcpy(destination, file.data() + offset, length);
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            return read_manifest_resource(read_rva, *resource_rva);
+        }
+
+        struct known_operating_system
+        {
+            std::u16string_view guid;
+            uint16_t major;
+            uint16_t minor;
+        };
+
+        constexpr std::array known_operating_systems{
+            known_operating_system{u"{e2011457-1546-43c5-a5fe-008deee3d3f0}", 6, 0},
+            known_operating_system{u"{35138b9a-5d96-4fbd-8e2d-a2440225f93a}", 6, 1},
+            known_operating_system{u"{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}", 6, 2},
+            known_operating_system{u"{1f676c76-80e1-4239-95bb-83d0f6d0da78}", 6, 3},
+            known_operating_system{u"{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}", 10, 0},
+        };
     }
 
     emulated_assembly_store::emulated_assembly_store(const file_system& file_sys)
@@ -217,5 +359,54 @@ namespace sogen::sxs
         {
             win_emu.process.peb32->access([&](PEB32& peb) { peb.ActivationContextData = static_cast<uint32_t>(base); });
         }
+    }
+}
+
+namespace sogen::sxs
+{
+    std::optional<std::vector<std::byte>> read_image_file_manifest(const file_system& file_sys, const windows_path& image)
+    {
+        std::vector<std::byte> file{};
+        return file_sys.read_file(image, &file) ? read_manifest_resource_from_file(file) : std::nullopt;
+    }
+
+    std::optional<process_compatibility> query_process_compatibility(const manifest& content)
+    {
+        std::optional<process_compatibility> result{};
+
+        for (const auto& element : content.compatibility)
+        {
+            if (element.type == compatibility_element_type::max_version_tested)
+            {
+                if (!result)
+                {
+                    result = process_compatibility{};
+                }
+
+                result->max_version_tested = std::max(result->max_version_tested, element.max_version_tested);
+                continue;
+            }
+
+            for (const auto& system : known_operating_systems)
+            {
+                if (parse_guid(system.guid) != element.id)
+                {
+                    continue;
+                }
+
+                if (!result)
+                {
+                    result = process_compatibility{};
+                }
+
+                if (std::pair{system.major, system.minor} > std::pair{result->os_major, result->os_minor})
+                {
+                    result->os_major = system.major;
+                    result->os_minor = system.minor;
+                }
+            }
+        }
+
+        return result;
     }
 }

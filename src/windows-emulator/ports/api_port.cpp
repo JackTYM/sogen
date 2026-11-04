@@ -17,6 +17,7 @@ namespace sogen
         }
 
         constexpr uint32_t k_base_srv_nls_get_user_info_api = 0x0001001b;
+        constexpr uint32_t k_base_srv_create_process_api = 0x0001001d;
         constexpr uint32_t k_base_srv_sxs_create_activation_context_api = 0x0001001e;
 
         bool is_api_request(windows_emulator& win_emu, const lpc_request_context& c, const uint32_t expected_api)
@@ -78,6 +79,19 @@ namespace sogen
             }
 
             return true;
+        }
+
+        lpc_request_result reply_csr_success(windows_emulator& win_emu, const lpc_request_context& c)
+        {
+            constexpr uint64_t csr_return_value_offset = 0x0C;
+
+            if (c.recv_buffer_length >= csr_return_value_offset + sizeof(NTSTATUS))
+            {
+                const NTSTATUS status = STATUS_SUCCESS;
+                (void)win_emu.memory.try_write_memory(c.recv_buffer + csr_return_value_offset, &status, sizeof(status));
+            }
+
+            return {STATUS_SUCCESS, lpc_request_result::reply_in_place};
         }
 
         bool try_read_reply_server_dll_index(windows_emulator& win_emu, const lpc_request_context& c, uint32_t& server_dll_index)
@@ -150,6 +164,11 @@ namespace sogen
                     return {STATUS_NOT_SUPPORTED, lpc_request_result::reply_in_place};
                 }
 
+                if (is_api_request(win_emu, c, k_base_srv_create_process_api))
+                {
+                    return sxs::handle_create_process(win_emu, c);
+                }
+
                 wow64_userconnect_payload payload{};
                 if (try_read_wow64_payload(win_emu, c, payload))
                 {
@@ -174,7 +193,7 @@ namespace sogen
                 if (!try_read_reply_server_dll_index(win_emu, c, server_dll_index) ||
                     server_dll_index != win32k_userconnect::k_user_server_dll_index)
                 {
-                    return {STATUS_SUCCESS, lpc_request_result::reply_in_place};
+                    return reply_csr_success(win_emu, c);
                 }
 
                 uint64_t base{};

@@ -25,6 +25,8 @@ namespace sogen::sxs
         constexpr uint32_t section_dll_redirection = 2;
         constexpr uint32_t section_window_class_redirection = 3;
         constexpr uint32_t section_application_settings = 10;
+        constexpr uint32_t section_compatibility_info = 11;
+        constexpr uint32_t section_format_unspecified = 0;
 
         class byte_writer
         {
@@ -346,6 +348,28 @@ namespace sogen::sxs
         }
     }
 
+    namespace
+    {
+        // ACTIVATION_CONTEXT_COMPATIBILITY_INFORMATION as ntdll's Sb* shim code reads it: an element count padded to
+        // 8 bytes, then 32-byte COMPATIBILITY_CONTEXT_ELEMENTs (GUID, type, 8-aligned MaxVersionTested).
+        std::vector<std::byte> build_compatibility_info(const std::vector<compatibility_element>& elements)
+        {
+            constexpr size_t header_size = 8;
+            byte_writer out{};
+            out.append_u32(static_cast<uint32_t>(elements.size()));
+            out.reserve(header_size - sizeof(uint32_t));
+            for (const auto& element : elements)
+            {
+                out.append(element.id.data(), element.id.size());
+                out.append_u32(static_cast<uint32_t>(element.type));
+                out.append_u32(0);
+                out.append_u64(element.max_version_tested);
+            }
+
+            return std::move(out.bytes());
+        }
+    }
+
     uint32_t hash_section_key(const std::u16string_view key)
     {
         uint32_t hash = 0;
@@ -420,6 +444,7 @@ namespace sogen::sxs
         {
             uint32_t id{};
             string_section_builder::layout layout{};
+            uint32_t format{section_format_string_table};
         };
 
         std::vector<section> sections{};
@@ -435,6 +460,12 @@ namespace sogen::sxs
         if (application_settings.entry_count() != 0)
         {
             sections.push_back({section_application_settings, application_settings.finish()});
+        }
+        if (!input.assemblies.empty() && !input.assemblies.front().content.compatibility.empty())
+        {
+            sections.push_back({section_compatibility_info,
+                                {build_compatibility_info(input.assemblies.front().content.compatibility), {}, {}},
+                                section_format_unspecified});
         }
 
         constexpr uint32_t header_size = 0x20;
@@ -467,7 +498,7 @@ namespace sogen::sxs
             out.patch_u32(entry_offset + 0, sections[i].id);
             out.patch_u32(entry_offset + 4, section_offsets[i]);
             out.patch_u32(entry_offset + 8, static_cast<uint32_t>(sections[i].layout.bytes.size()));
-            out.patch_u32(entry_offset + 12, section_format_string_table);
+            out.patch_u32(entry_offset + 12, sections[i].format);
         }
 
         out.patch_u32(toc_offset + 0, toc_header_size);
