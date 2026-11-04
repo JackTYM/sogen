@@ -950,6 +950,7 @@ namespace sogen::sxs
             if (!equal_insensitive(candidate.name, requested.name) ||
                 (!requested.public_key_token.empty() && !equal_insensitive(candidate.public_key_token, requested.public_key_token)) ||
                 (!requested.processor_architecture.empty() && requested.processor_architecture != "*" &&
+                 !candidate.processor_architecture.empty() &&
                  !equal_insensitive(candidate.processor_architecture, requested.processor_architecture)) ||
                 (!requested.type.empty() && !equal_insensitive(candidate.type, requested.type)) ||
                 (!requested.language.empty() && requested.language != "*" && !equal_insensitive(candidate.language, requested.language)))
