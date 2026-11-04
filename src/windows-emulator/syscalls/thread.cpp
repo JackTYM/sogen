@@ -710,8 +710,8 @@ namespace sogen
                     i.TebBaseAddress = thread->teb64->value();
                     i.ClientId = thread->teb64->read().ClientId;
                     i.AffinityMask = affinity_mask;
-                    i.Priority = 8; // THREAD_PRIORITY_NORMAL's KPRIORITY value
-                    i.BasePriority = 8;
+                    i.Priority = 8;     // THREAD_PRIORITY_NORMAL's KPRIORITY value
+                    i.BasePriority = 0; // increment relative to the process base priority (THREAD_PRIORITY_NORMAL)
                 });
 
                 return STATUS_SUCCESS;
