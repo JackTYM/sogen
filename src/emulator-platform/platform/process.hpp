@@ -1496,5 +1496,14 @@ namespace sogen
         uint64_t Callback;
     };
 
+    constexpr ULONG PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
+
+    struct POWER_THROTTLING_PROCESS_STATE
+    {
+        ULONG Version;
+        ULONG ControlMask;
+        ULONG StateMask;
+    };
+
     // NOLINTEND(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)
 } // namespace sogen

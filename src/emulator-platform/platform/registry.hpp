@@ -104,6 +104,13 @@ namespace sogen
         ULONG NameLength;
     } KEY_CACHED_INFORMATION, *PKEY_CACHED_INFORMATION;
 
+    struct KEY_FLAGS_INFORMATION
+    {
+        ULONG Wow64Flags;
+        ULONG KeyFlags;
+        ULONG ControlFlags;
+    };
+
     struct KEY_HANDLE_TAGS_INFORMATION
     {
         ULONG HandleTags;

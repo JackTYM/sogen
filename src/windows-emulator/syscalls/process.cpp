@@ -1400,6 +1400,17 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ProcessPowerThrottlingState)
+            {
+                if (process_information_length != sizeof(POWER_THROTTLING_PROCESS_STATE))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto state = c.emu.read_memory<POWER_THROTTLING_PROCESS_STATE>(process_information);
+                return state.Version == PROCESS_POWER_THROTTLING_CURRENT_VERSION ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
             if (info_class == ProcessSchedulerSharedData                     //
                 || info_class == ProcessConsoleHostProcess                   //
                 || info_class == ProcessFaultInformation                     //

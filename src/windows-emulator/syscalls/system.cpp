@@ -1044,6 +1044,15 @@ namespace sogen
                 return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
             }
 
+            case SystemCpuQuotaInformation:
+                return STATUS_QUOTA_NOT_ENABLED;
+
+            case SystemEnergyEstimationConfigInformation: {
+                const auto status = handle_query<uint8_t>(c.emu, system_information, system_information_length, return_length,
+                                                          [](uint8_t& enabled) { enabled = 0; });
+                return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
+            }
+
             default:
                 c.win_emu.log.error("Unsupported system info class: 0x%X\n", info_class);
                 c.emu.stop();
