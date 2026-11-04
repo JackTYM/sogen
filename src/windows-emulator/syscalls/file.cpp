@@ -3200,6 +3200,7 @@ namespace sogen
             context.apc_routine = apc_routine;
             context.apc_context = apc_context;
             context.io_status_block = io_status_block;
+            context.wow64_io_status_block.set_address(wow64_io_status_block_address(c, io_status_block));
             context.io_control_code = fs_control_code;
             context.input_buffer = input_buffer;
             context.input_buffer_length = input_buffer_length;

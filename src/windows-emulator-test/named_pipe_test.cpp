@@ -309,6 +309,34 @@ namespace sogen::test
         EXPECT_EQ(STATUS_PIPE_CONNECTED, server.io_control(*this->emu, context));
     }
 
+    // A WoW64 thunk passes the native call a status block on its own stack and has returned by the time a pending
+    // request completes, so the completion may only reach the caller's 32-bit status block.
+    TEST_F(NamedPipeTest, PendingListenOfAWow64CallerCompletesOnlyIntoItsOwnStatusBlock)
+    {
+        auto& server = this->pipe(this->reader);
+        server.unopened_peer = this->pipe(this->writer).endpoint;
+        const auto completion = this->emu->process.io_completions.store(io_completion{});
+        ASSERT_EQ(STATUS_SUCCESS, this->emu->process.devices.get(this->reader)
+                                      ->set_completion_association(this->emu->process, this->emu->vcpu(0).active_thread, completion, 42));
+        auto context = this->request(this->reader, 0);
+        context.io_control_code = FSCTL_PIPE_LISTEN;
+        context.wow64_io_status_block.set_address(this->storage + 0x200);
+        ASSERT_EQ(STATUS_PENDING, this->emu->process.devices.get(this->reader)->execute_ioctl(*this->emu, context));
+
+        constexpr IO_STATUS_BLOCK<EmulatorTraits<Emu64>> reused_stack{.Status = 0x11111111, .Information = 0x2222222222222222};
+        context.io_status_block.write(reused_stack);
+
+        auto client = std::move(server.unopened_peer);
+        server.work(*this->emu);
+
+        EXPECT_EQ(reused_stack.Status, context.io_status_block.read().Status);
+        EXPECT_EQ(reused_stack.Information, context.io_status_block.read().Information);
+        EXPECT_EQ(STATUS_SUCCESS, context.wow64_io_status_block.read().Status);
+        io_completion_message message{};
+        ASSERT_TRUE(io_completion_wait::dequeue_io_completion_message(*this->emu, completion, message));
+        EXPECT_EQ(STATUS_SUCCESS, message.io_status_block.Status);
+    }
+
     TEST_F(NamedPipeTest, CancellingPendingListenSignalsCompletion)
     {
         auto& server = this->pipe(this->reader);

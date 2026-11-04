@@ -254,6 +254,15 @@ namespace sogen
 
     void io_device::queue_io_completion(windows_emulator& win_emu, const io_device_context& context)
     {
+        if (context.io_status_block)
+        {
+            queue_io_completion(win_emu, context, context.io_status_block.read());
+        }
+    }
+
+    void io_device::queue_io_completion(windows_emulator& win_emu, const io_device_context& context,
+                                        const IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& io_status)
+    {
         if (!context.completion_port.bits || !context.io_status_block || context.suppresses_completion_packet())
         {
             return;
@@ -268,7 +277,7 @@ namespace sogen
         io_completion_message message{};
         message.key_context = context.completion_key;
         message.apc_context = context.apc_context;
-        message.io_status_block = context.io_status_block.read();
+        message.io_status_block = io_status;
         completion->enqueue(message);
         win_emu.wake_idle_vcpu();
     }

@@ -160,6 +160,8 @@ namespace sogen
         }
 
         static void queue_io_completion(windows_emulator& win_emu, const io_device_context& context);
+        static void queue_io_completion(windows_emulator& win_emu, const io_device_context& context,
+                                        const IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& io_status);
 
         virtual void release_references(process_context& process)
         {

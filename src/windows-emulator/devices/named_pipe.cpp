@@ -341,8 +341,17 @@ namespace sogen
         {
             win_emu.memory.write_memory(context.output_buffer, operation.operation->data().data(), result.transferred);
         }
-        context.io_status_block.write({.Status = status, .Information = result.transferred});
-        write_io_status(context, status);
+        if (was_pending && context.wow64_io_status_block && !this->is_synchronous())
+        {
+            context.wow64_io_status_block.write(
+                {.Status = status, .Information = static_cast<EmulatorTraits<Emu32>::ULONG_PTR>(result.transferred)});
+        }
+        else
+        {
+            context.io_status_block.write({.Status = status, .Information = result.transferred});
+            write_io_status(context, status);
+        }
+
         if (auto* event = win_emu.process.events.get(context.event))
         {
             event->set_signaled(true);
@@ -371,7 +380,7 @@ namespace sogen
         }
         else if (was_pending || !NT_SUCCESS(status) || !(context.completion_notification_flags & 1))
         {
-            io_device::queue_io_completion(win_emu, context);
+            io_device::queue_io_completion(win_emu, context, {.Status = status, .Information = result.transferred});
         }
 
         win_emu.wake_idle_vcpu();
