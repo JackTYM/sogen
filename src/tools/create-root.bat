@@ -182,6 +182,12 @@ CALL :collect msvcp140d.dll
 CALL :collect msvcp60.dll
 CALL :collect msvcp_win.dll
 CALL :collect msvcr120_clr0400.dll
+CALL :collect msvcp120_clr0400.dll
+CALL :collect msvcp140_clr0400.dll
+CALL :collect msvcr100_clr0400.dll
+CALL :collect ucrtbase_clr0400.dll
+CALL :collect vcruntime140_clr0400.dll
+CALL :collect vcruntime140_1_clr0400.dll
 CALL :collect msvcrt.dll
 CALL :collect msvfw32.dll
 CALL :collect mswsock.dll
