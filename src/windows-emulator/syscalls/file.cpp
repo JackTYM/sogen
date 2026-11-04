@@ -1032,6 +1032,41 @@ namespace sogen
                 return ret(STATUS_INFO_LENGTH_MISMATCH);
             }
 
+            if (info_class == FileNetworkOpenInformation)
+            {
+                constexpr auto required_length = sizeof(FILE_NETWORK_OPEN_INFORMATION);
+
+                if (length < required_length)
+                {
+                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                }
+
+                struct compat_stat file_stat{};
+                if (f->handle && !read_file_stat(f->handle, file_stat))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                const bool is_directory = f->handle ? (file_stat.st_mode & S_IFDIR) != 0 : f->is_directory();
+
+                FILE_NETWORK_OPEN_INFORMATION i{};
+                i.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
+                i.ChangeTime = i.LastWriteTime;
+                i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+
+                if (f->handle)
+                {
+                    i.EndOfFile.QuadPart = f->handle.size();
+                    i.AllocationSize.QuadPart = static_cast<LONGLONG>(align_up(i.EndOfFile.QuadPart, 512));
+                }
+
+                c.emu.write_memory(file_information, i);
+
+                return ret(STATUS_SUCCESS, required_length);
+            }
+
             if (info_class == FileBasicInformation || all_info)
             {
                 constexpr auto required_length = sizeof(FILE_BASIC_INFORMATION);
@@ -2283,7 +2318,7 @@ namespace sogen
             const auto io_device_name = get_io_device_name(filename);
             if (io_device_name.has_value())
             {
-                if (*io_device_name == u"DeviceApi\\Dev\\Query")
+                if (*io_device_name == u"DeviceApi\\Dev\\Query" || *io_device_name == u"IPT")
                 {
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
@@ -2456,7 +2491,7 @@ namespace sogen
                 mode = u"rb";
             }
 
-            if (mode.empty() && (desired_access & DELETE))
+            if (mode.empty() && (desired_access & (DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER)))
             {
                 mode = u"rb";
             }
