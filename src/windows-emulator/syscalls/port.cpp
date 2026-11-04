@@ -504,9 +504,8 @@ namespace sogen
             return port->get_internal_port()->disconnect() ? STATUS_SUCCESS : STATUS_PORT_DISCONNECTED;
         }
 
-        // The emulator has no per-thread impersonation context (see NtSetInformationThread's ThreadImpersonationToken
-        // case), so the calling thread keeps its own identity. Like FSCTL_PIPE_IMPERSONATE, success is what a server
-        // that impersonates its client to check the caller can observe.
+        // Tokens carry no identity of their own, so the calling thread impersonates a token of the default identity;
+        // servers then see a thread token when they check the caller's access.
         NTSTATUS handle_NtAlpcImpersonateClientOfPort(const syscall_context& c, const handle port_handle,
                                                       const emulator_pointer /*message*/, const ULONG /*flags*/)
         {
@@ -515,6 +514,7 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            c.vcpu.active_thread->set_impersonation_token(DUMMY_IMPERSONATION_TOKEN);
             return STATUS_SUCCESS;
         }
 
