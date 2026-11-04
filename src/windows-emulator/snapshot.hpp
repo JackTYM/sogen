@@ -34,6 +34,12 @@ namespace sogen
             std::string error{};
         };
 
+        enum class after_save
+        {
+            stop,
+            keep_running,
+        };
+
         // Saves the running emulator when asked to from any thread. A process that presents frames is stopped after its
         // next present, or where it is if none comes within two seconds. A failed save keeps the process running.
         class controller
@@ -49,14 +55,23 @@ namespace sogen
             controller(controller&&) = delete;
             controller& operator=(controller&&) = delete;
 
-            // An empty destination picks a new file in the directory. Returns false while another request is pending.
-            bool request(std::filesystem::path destination = {});
+            // An empty destination picks a new file in the directory. Returns false while another request is pending or once the
+            // run ended; otherwise the outcome is reported to on_outcome as well.
+            bool request(std::filesystem::path destination = {}, after_save after = after_save::stop, outcome_callback on_outcome = {});
             void stop();
 
             // Runs the emulator until the process exits, is stopped, or was saved, which returns true.
             bool run();
 
           private:
+            struct pending_request
+            {
+                std::filesystem::path destination{};
+                after_save after{after_save::stop};
+                outcome_callback on_outcome{};
+            };
+
+            bool run_until_done();
             void watch();
             std::filesystem::path next_snapshot_path() const;
 
@@ -70,7 +85,8 @@ namespace sogen
             bool watching_{true};
             bool running_{};
             bool stop_requested_{};
-            std::optional<std::filesystem::path> pending_{};
+            bool finished_{};
+            std::optional<pending_request> pending_{};
             bool suspend_requested_{};
             std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
             std::thread watcher_{};

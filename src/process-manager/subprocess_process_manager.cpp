@@ -47,6 +47,10 @@ namespace sogen
         constexpr uint32_t maximum_payload_size = 64U << 20;
         constexpr auto response_timeout = std::chrono::seconds(5);
         constexpr auto exit_notification_timeout = std::chrono::milliseconds(250);
+        constexpr auto connection_timeout = std::chrono::seconds(30);
+        // A restored process connects only once it loaded its snapshot, and a process saves at its next safe point.
+        constexpr auto restore_timeout = std::chrono::minutes(10);
+        constexpr auto save_timeout = std::chrono::minutes(10);
 
         template <typename T>
         bool send_message(network::tcp_client_socket& socket, T payload)
@@ -219,6 +223,7 @@ namespace sogen
             result.standard_output = request.standard_output;
             result.standard_error = request.standard_error;
             result.debugged = request.debugged;
+            result.snapshot = request.snapshot;
             std::unordered_map<uint64_t, std::pair<uint16_t, std::string>> exported_files;
             for (const auto& pipe : request.inherited_pipes)
             {
@@ -268,6 +273,7 @@ namespace sogen
             result.standard_output = request.standard_output;
             result.standard_error = request.standard_error;
             result.debugged = request.debugged;
+            result.snapshot = std::move(request.snapshot);
             std::unordered_map<uint64_t, std::shared_ptr<utils::host_pipe>> imported_files;
             for (const auto& pipe : request.inherited_pipes)
             {
@@ -385,6 +391,8 @@ namespace sogen
         reproc::process process{};
         network::tcp_client_socket control{};
         std::vector<utils::host_pipe_transfer> pipe_transfers{};
+        uint32_t process_id{};
+        uint32_t thread_id{};
         std::thread output_thread{};
         mutable std::mutex control_mutex{};
         mutable std::mutex state_mutex{};
@@ -468,7 +476,10 @@ namespace sogen
             return false;
         }
 
-        this->control_thread_ = std::thread([this, &target] { (void)this->handle_messages(target, false); });
+        this->control_thread_ = std::thread([this, &target] {
+            (void)this->handle_messages(target, false);
+            this->notify_parent_lost();
+        });
         return true;
     }
 
@@ -644,6 +655,17 @@ namespace sogen
                 }
                 break;
             }
+            case ProcessProtocol::MessagePayload_SaveProcessRequest: {
+                const auto result = this->save(message->payload.AsSaveProcessRequest()->snapshot);
+                ProcessProtocol::SaveProcessResponseT response{};
+                response.error = encode_error(result.error);
+                response.message = result.message;
+                if (!this->send(std::move(response)))
+                {
+                    return false;
+                }
+                break;
+            }
             default:
                 return false;
             }
@@ -669,6 +691,37 @@ namespace sogen
         }
         this->disconnect();
         return sent;
+    }
+
+    void managed_process_connection::set_save_handler(save_handler handler)
+    {
+        const std::scoped_lock lock(this->save_mutex_);
+        this->save_handler_ = std::move(handler);
+    }
+
+    void managed_process_connection::set_parent_lost_handler(std::function<void()> handler)
+    {
+        const std::scoped_lock lock(this->save_mutex_);
+        this->parent_lost_handler_ = std::move(handler);
+    }
+
+    void managed_process_connection::notify_parent_lost()
+    {
+        const std::scoped_lock lock(this->save_mutex_);
+        if (this->parent_lost_handler_)
+        {
+            this->parent_lost_handler_();
+        }
+    }
+
+    process_save_result managed_process_connection::save(const std::string& snapshot_file)
+    {
+        const std::scoped_lock lock(this->save_mutex_);
+        if (!this->save_handler_)
+        {
+            return {.error = process_error::unavailable, .message = "The process is not running"};
+        }
+        return this->save_handler_(snapshot_file);
     }
 
     void managed_process_connection::disconnect()
@@ -744,6 +797,13 @@ namespace sogen
             handle.value = this->next_process_++;
         }
 
+        return this->start_process(handle, std::move(request), process_ids::assign, connection_timeout);
+    }
+
+    process_create_result subprocess_process_manager::start_process(const managed_process handle, process_create_request request,
+                                                                    const process_ids ids,
+                                                                    const std::chrono::steady_clock::duration startup_timeout)
+    {
         network::tcp_server_socket server{AF_INET};
         if (!server.bind(network::address{"127.0.0.1", 0}))
         {
@@ -787,8 +847,13 @@ namespace sogen
             std::ignore = entry->process.wait(reproc::infinite);
             return {.error = process_error::internal_failure};
         }
-        request.process_id = static_cast<uint32_t>(host_process_id) * 2;
-        request.thread_id = request.process_id + 1;
+        if (ids == process_ids::assign)
+        {
+            request.process_id = static_cast<uint32_t>(host_process_id) * 2;
+            request.thread_id = request.process_id + 1;
+        }
+        entry->process_id = request.process_id;
+        entry->thread_id = request.thread_id;
 
         entry->output_thread = std::thread([process = entry.get()] {
             std::array<uint8_t, 4096> buffer{};
@@ -848,8 +913,7 @@ namespace sogen
             }
         });
 
-        constexpr auto connection_timeout = std::chrono::seconds(30);
-        const auto deadline = std::chrono::steady_clock::now() + connection_timeout;
+        const auto deadline = std::chrono::steady_clock::now() + startup_timeout;
         while (std::chrono::steady_clock::now() < deadline)
         {
             if (!server.is_ready(true))
@@ -1067,9 +1131,95 @@ namespace sogen
         return decode_memory_result(*response->payload.AsProcessMemoryResponse());
     }
 
+    bool subprocess_process_manager::reserve_handle(const managed_process handle)
+    {
+        const std::scoped_lock lock(this->mutex_);
+        if (this->stopping_ || !handle || this->processes_.contains(handle.value) || handle.value == UINT64_MAX)
+        {
+            return false;
+        }
+        this->next_process_ = std::max(this->next_process_, handle.value + 1);
+        return true;
+    }
+
+    std::vector<managed_process_record> subprocess_process_manager::list_processes() const
+    {
+        std::vector<std::pair<uint64_t, std::shared_ptr<process_entry>>> processes{};
+        {
+            const std::scoped_lock lock(this->mutex_);
+            processes.assign(this->processes_.begin(), this->processes_.end());
+        }
+
+        std::vector<managed_process_record> records{};
+        records.reserve(processes.size());
+        for (const auto& [handle, entry] : processes)
+        {
+            const managed_process process{handle};
+            records.push_back({.process = process,
+                               .process_id = entry->process_id,
+                               .thread_id = entry->thread_id,
+                               .exit = this->exit_status(process).status});
+        }
+        return records;
+    }
+
+    process_save_result subprocess_process_manager::save_process(const managed_process process, const std::string& snapshot_file)
+    {
+        ProcessProtocol::SaveProcessRequestT request{};
+        request.snapshot = snapshot_file;
+        auto response = this->exchange(process, std::move(request), ProcessProtocol::MessagePayload_SaveProcessResponse, save_timeout);
+        if (!response)
+        {
+            return {.error = process_error::communication_failure, .message = "The process did not answer"};
+        }
+        auto& result = *response->payload.AsSaveProcessResponse();
+        return {.error = decode_error(result.error), .message = std::move(result.message)};
+    }
+
+    process_error subprocess_process_manager::restore_process(const managed_process_record& record, const std::string& snapshot_file)
+    {
+        if (!this->reserve_handle(record.process))
+        {
+            return process_error::invalid_process;
+        }
+
+        process_create_request request{.process_id = record.process_id, .thread_id = record.thread_id, .snapshot = snapshot_file};
+        const auto result = this->start_process(record.process, std::move(request), process_ids::keep, restore_timeout);
+        if (!result)
+        {
+            return result.error;
+        }
+        return this->resume_process(record.process);
+    }
+
+    process_error subprocess_process_manager::restore_exited_process(const managed_process_record& record)
+    {
+        if (!record.exit || !this->reserve_handle(record.process))
+        {
+            return process_error::invalid_process;
+        }
+
+        const auto entry = std::make_shared<process_entry>();
+        entry->process_id = record.process_id;
+        entry->thread_id = record.thread_id;
+        entry->exit = record.exit;
+
+        const std::scoped_lock lock(this->mutex_);
+        this->processes_.emplace(record.process.value, entry);
+        return process_error::none;
+    }
+
     template <typename Request>
     std::optional<ProcessProtocol::MessageT> subprocess_process_manager::exchange(const managed_process process, Request request,
                                                                                   const uint8_t response_type) const
+    {
+        return this->exchange(process, std::move(request), response_type, response_timeout);
+    }
+
+    template <typename Request>
+    std::optional<ProcessProtocol::MessageT> subprocess_process_manager::exchange(const managed_process process, Request request,
+                                                                                  const uint8_t response_type,
+                                                                                  const std::chrono::steady_clock::duration timeout) const
     {
         const auto entry = this->find_process(process);
         if (!entry)
@@ -1082,7 +1232,7 @@ namespace sogen
         {
             return std::nullopt;
         }
-        auto response = entry->receive_response(expected, std::chrono::steady_clock::now() + response_timeout);
+        auto response = entry->receive_response(expected, std::chrono::steady_clock::now() + timeout);
         if (!response || response->payload.type != expected)
         {
             return std::nullopt;

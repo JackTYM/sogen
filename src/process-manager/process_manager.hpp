@@ -110,6 +110,8 @@ namespace sogen
         uint64_t standard_error{};
         std::vector<process_inherited_pipe> inherited_pipes{};
         bool debugged{};
+        // Resumes this snapshot instead of starting the application.
+        std::string snapshot{};
     };
 
     struct process_create_result
@@ -122,6 +124,25 @@ namespace sogen
         uint64_t native_parameters{};
         uint64_t compatibility_parameters{};
         process_error error{process_error::none};
+
+        explicit operator bool() const
+        {
+            return this->error == process_error::none;
+        }
+    };
+
+    struct managed_process_record
+    {
+        managed_process process{};
+        uint32_t process_id{};
+        uint32_t thread_id{};
+        std::optional<process_exit> exit{};
+    };
+
+    struct process_save_result
+    {
+        process_error error{process_error::none};
+        std::string message{};
 
         explicit operator bool() const
         {
@@ -309,6 +330,28 @@ namespace sogen
         virtual process_memory_region query_memory(managed_process /*process*/, uint64_t /*address*/) const
         {
             return {.error = process_error::unavailable};
+        }
+
+        virtual std::vector<managed_process_record> list_processes() const
+        {
+            return {};
+        }
+
+        // The process saves itself to the file and keeps running.
+        virtual process_save_result save_process(managed_process /*process*/, const std::string& /*snapshot_file*/)
+        {
+            return {.error = process_error::unavailable};
+        }
+
+        // Restored processes keep the handle and ids they were saved with, and run once restored.
+        virtual process_error restore_process(const managed_process_record& /*record*/, const std::string& /*snapshot_file*/)
+        {
+            return process_error::unavailable;
+        }
+
+        virtual process_error restore_exited_process(const managed_process_record& /*record*/)
+        {
+            return process_error::unavailable;
         }
     };
 }

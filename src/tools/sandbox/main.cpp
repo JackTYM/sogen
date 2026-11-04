@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -120,13 +121,32 @@ namespace sogen::sandbox
             return mounts;
         }
 
+        process_save_result save_child(snapshot::controller& snapshots, const std::string& snapshot_file)
+        {
+            std::promise<std::string> saved{};
+            auto error = saved.get_future();
+            if (!snapshots.request(snapshot_file, snapshot::after_save::keep_running,
+                                   [&](const snapshot::snapshot_outcome& outcome) { saved.set_value(outcome.error); }))
+            {
+                return {.error = process_error::unavailable, .message = "The process is already being saved or has ended"};
+            }
+
+            auto message = error.get();
+            if (message.empty())
+            {
+                return {};
+            }
+            return {.error = process_error::internal_failure, .message = std::move(message)};
+        }
+
         int run(const std::span<const std::string_view> args, const filesystem_mode root_mode, const std::filesystem::path& root_layer,
                 std::vector<mount_spec> mounts, const std::vector<document_mount>& document_mounts,
                 const std::filesystem::path& emulation_root, const std::filesystem::path& registry_directory,
                 const std::vector<std::filesystem::path>& registry_files,
                 const std::vector<std::pair<std::string, std::string>>& environment, const network::network_mode network_mode,
                 const bool spoof_gpu_features, const bool elevated, const std::filesystem::path& snapshot_directory,
-                const std::filesystem::path& resume_file, managed_process_connection* managed_connection)
+                const std::filesystem::path& resume_file, const std::filesystem::path& suspend_file,
+                managed_process_connection* managed_connection)
         {
             application_settings app_settings{
                 .application = args.empty() ? std::u8string{} : std::u8string(args[0].begin(), args[0].end()),
@@ -315,9 +335,24 @@ namespace sogen::sandbox
             win_emu.ui().set_snapshot_request_sink([&] { snapshots.request(); });
             const auto snapshot_sink_guard = utils::finally([&] { win_emu.ui().set_snapshot_request_sink({}); });
 
+            if (managed_connection)
+            {
+                managed_connection->set_save_handler(
+                    [&](const std::string& snapshot_file) { return save_child(snapshots, snapshot_file); });
+                managed_connection->set_parent_lost_handler([&] { snapshots.stop(); });
+            }
+            const auto managed_handlers_guard = utils::finally([&] {
+                if (managed_connection)
+                {
+                    managed_connection->set_parent_lost_handler({});
+                    managed_connection->set_save_handler({});
+                }
+            });
+
+            // A console interrupt reaches the whole process group. The parent of a managed process saves or ends it.
             std::atomic_uint32_t signals_received{0};
             utils::interupt_handler interrupt_guard{[&] {
-                if (signals_received++ >= 2)
+                if (!managed_connection && signals_received++ >= 2)
                 {
                     _Exit(1);
                 }
@@ -329,14 +364,25 @@ namespace sogen::sandbox
             bool watching = true;
             std::thread signal_watcher([&] {
                 std::unique_lock lock(signal_mutex);
+                uint32_t signals_handled{};
                 while (watching)
                 {
                     signal_changed.wait_for(lock, std::chrono::milliseconds(50));
-                    if (signals_received > 0)
+                    const auto signals = signals_received.load();
+                    if (signals == signals_handled)
+                    {
+                        continue;
+                    }
+
+                    if (signals == 1 && !suspend_file.empty())
+                    {
+                        snapshots.request(suspend_file);
+                    }
+                    else
                     {
                         snapshots.stop();
-                        return;
                     }
+                    signals_handled = signals;
                 }
             });
 
@@ -422,10 +468,12 @@ namespace sogen::sandbox
                          "Report Vulkan features DXVK requires even if the GPU lacks them (e.g. Mali)");
             std::filesystem::path snapshot_directory{"snapshots"};
             std::filesystem::path resume_file{};
+            std::filesystem::path suspend_file{};
             app.add_option("--snapshot-dir", snapshot_directory, "Where Ctrl+Alt+Shift+S saves the process")
                 ->capture_default_str()
                 ->type_name("DIR");
             app.add_option("--resume", resume_file, "Continue a saved process")->type_name("FILE");
+            app.add_option("--suspend-to", suspend_file, "Save the process and its child processes to FILE on Ctrl+C")->type_name("FILE");
             app.add_option("--managed-process-port", managed_process_port)->group("");
             app.add_option("--managed-process-token", managed_process_token)->group("");
 
@@ -448,8 +496,15 @@ namespace sogen::sandbox
                     managed_process.emplace(connect_managed_process(managed_process_port, managed_process_token));
                     const auto& request = managed_process->request();
                     application.clear();
-                    application.push_back(request.application);
-                    application.insert(application.end(), request.arguments.begin(), request.arguments.end());
+                    if (request.snapshot.empty())
+                    {
+                        application.push_back(request.application);
+                        application.insert(application.end(), request.arguments.begin(), request.arguments.end());
+                    }
+                    else
+                    {
+                        resume_file = request.snapshot;
+                    }
                 }
                 if (application.empty() && resume_file.empty())
                 {
@@ -489,7 +544,7 @@ namespace sogen::sandbox
                 const std::vector<std::string_view> views{application.begin(), application.end()};
                 return run(views, parse_root_mode(root_mode).value(), root_layer, std::move(mounts), document_mounts, emulation_root,
                            registry_directory, registry_files, environment, network::parse_network_mode(network_name), spoof_gpu_features,
-                           elevated, snapshot_directory, resume_file, managed_process ? &*managed_process : nullptr);
+                           elevated, snapshot_directory, resume_file, suspend_file, managed_process ? &*managed_process : nullptr);
             }
             catch (const std::exception& e)
             {

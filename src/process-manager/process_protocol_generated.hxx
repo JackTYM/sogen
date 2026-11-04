@@ -127,6 +127,14 @@ struct SuspendThreadResponse;
 struct SuspendThreadResponseBuilder;
 struct SuspendThreadResponseT;
 
+struct SaveProcessRequest;
+struct SaveProcessRequestBuilder;
+struct SaveProcessRequestT;
+
+struct SaveProcessResponse;
+struct SaveProcessResponseBuilder;
+struct SaveProcessResponseT;
+
 struct QueryMemoryRequest;
 struct QueryMemoryRequestBuilder;
 struct QueryMemoryRequestT;
@@ -330,11 +338,13 @@ enum MessagePayload : uint8_t {
   MessagePayload_ThreadInformationRequest = 25,
   MessagePayload_ThreadInformationResponse = 26,
   MessagePayload_DebugDetachRequest = 27,
+  MessagePayload_SaveProcessRequest = 28,
+  MessagePayload_SaveProcessResponse = 29,
   MessagePayload_MIN = MessagePayload_NONE,
-  MessagePayload_MAX = MessagePayload_DebugDetachRequest
+  MessagePayload_MAX = MessagePayload_SaveProcessResponse
 };
 
-inline const MessagePayload (&EnumValuesMessagePayload())[28] {
+inline const MessagePayload (&EnumValuesMessagePayload())[30] {
   static const MessagePayload values[] = {
     MessagePayload_NONE,
     MessagePayload_Hello,
@@ -363,13 +373,15 @@ inline const MessagePayload (&EnumValuesMessagePayload())[28] {
     MessagePayload_QueryMemoryResponse,
     MessagePayload_ThreadInformationRequest,
     MessagePayload_ThreadInformationResponse,
-    MessagePayload_DebugDetachRequest
+    MessagePayload_DebugDetachRequest,
+    MessagePayload_SaveProcessRequest,
+    MessagePayload_SaveProcessResponse
   };
   return values;
 }
 
 inline const char * const *EnumNamesMessagePayload() {
-  static const char * const names[29] = {
+  static const char * const names[31] = {
     "NONE",
     "Hello",
     "ProcessCreateRequest",
@@ -398,13 +410,15 @@ inline const char * const *EnumNamesMessagePayload() {
     "ThreadInformationRequest",
     "ThreadInformationResponse",
     "DebugDetachRequest",
+    "SaveProcessRequest",
+    "SaveProcessResponse",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameMessagePayload(MessagePayload e) {
-  if (::flatbuffers::IsOutRange(e, MessagePayload_NONE, MessagePayload_DebugDetachRequest)) return "";
+  if (::flatbuffers::IsOutRange(e, MessagePayload_NONE, MessagePayload_SaveProcessResponse)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesMessagePayload()[index];
 }
@@ -521,6 +535,14 @@ template<> struct MessagePayloadTraits<ProcessProtocol::DebugDetachRequest> {
   static const MessagePayload enum_value = MessagePayload_DebugDetachRequest;
 };
 
+template<> struct MessagePayloadTraits<ProcessProtocol::SaveProcessRequest> {
+  static const MessagePayload enum_value = MessagePayload_SaveProcessRequest;
+};
+
+template<> struct MessagePayloadTraits<ProcessProtocol::SaveProcessResponse> {
+  static const MessagePayload enum_value = MessagePayload_SaveProcessResponse;
+};
+
 template<typename T> struct MessagePayloadUnionTraits {
   static const MessagePayload enum_value = MessagePayload_NONE;
 };
@@ -631,6 +653,14 @@ template<> struct MessagePayloadUnionTraits<ProcessProtocol::ThreadInformationRe
 
 template<> struct MessagePayloadUnionTraits<ProcessProtocol::DebugDetachRequestT> {
   static const MessagePayload enum_value = MessagePayload_DebugDetachRequest;
+};
+
+template<> struct MessagePayloadUnionTraits<ProcessProtocol::SaveProcessRequestT> {
+  static const MessagePayload enum_value = MessagePayload_SaveProcessRequest;
+};
+
+template<> struct MessagePayloadUnionTraits<ProcessProtocol::SaveProcessResponseT> {
+  static const MessagePayload enum_value = MessagePayload_SaveProcessResponse;
 };
 
 struct MessagePayloadUnion {
@@ -878,6 +908,22 @@ struct MessagePayloadUnion {
   const ProcessProtocol::DebugDetachRequestT *AsDebugDetachRequest() const {
     return type == MessagePayload_DebugDetachRequest ?
       reinterpret_cast<const ProcessProtocol::DebugDetachRequestT *>(value) : nullptr;
+  }
+  ProcessProtocol::SaveProcessRequestT *AsSaveProcessRequest() {
+    return type == MessagePayload_SaveProcessRequest ?
+      reinterpret_cast<ProcessProtocol::SaveProcessRequestT *>(value) : nullptr;
+  }
+  const ProcessProtocol::SaveProcessRequestT *AsSaveProcessRequest() const {
+    return type == MessagePayload_SaveProcessRequest ?
+      reinterpret_cast<const ProcessProtocol::SaveProcessRequestT *>(value) : nullptr;
+  }
+  ProcessProtocol::SaveProcessResponseT *AsSaveProcessResponse() {
+    return type == MessagePayload_SaveProcessResponse ?
+      reinterpret_cast<ProcessProtocol::SaveProcessResponseT *>(value) : nullptr;
+  }
+  const ProcessProtocol::SaveProcessResponseT *AsSaveProcessResponse() const {
+    return type == MessagePayload_SaveProcessResponse ?
+      reinterpret_cast<const ProcessProtocol::SaveProcessResponseT *>(value) : nullptr;
   }
 };
 
@@ -1254,6 +1300,7 @@ struct ProcessCreateRequestT : public ::flatbuffers::NativeTable {
   std::vector<std::unique_ptr<ProcessProtocol::InheritedPipeT>> inherited_pipes{};
   std::string command_line{};
   bool debugged = false;
+  std::string snapshot{};
   ProcessCreateRequestT() = default;
   ProcessCreateRequestT(const ProcessCreateRequestT &o);
   ProcessCreateRequestT(ProcessCreateRequestT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -1276,7 +1323,8 @@ struct ProcessCreateRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
     VT_STANDARD_ERROR = 22,
     VT_INHERITED_PIPES = 24,
     VT_COMMAND_LINE = 26,
-    VT_DEBUGGED = 28
+    VT_DEBUGGED = 28,
+    VT_SNAPSHOT = 30
   };
   const ::flatbuffers::String *application() const {
     return GetPointer<const ::flatbuffers::String *>(VT_APPLICATION);
@@ -1317,6 +1365,9 @@ struct ProcessCreateRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
   bool debugged() const {
     return GetField<uint8_t>(VT_DEBUGGED, 0) != 0;
   }
+  const ::flatbuffers::String *snapshot() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SNAPSHOT);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -1343,6 +1394,8 @@ struct ProcessCreateRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
            VerifyOffsetRequired(verifier, VT_COMMAND_LINE) &&
            verifier.VerifyString(command_line()) &&
            VerifyField<uint8_t>(verifier, VT_DEBUGGED, 1) &&
+           VerifyOffset(verifier, VT_SNAPSHOT) &&
+           verifier.VerifyString(snapshot()) &&
            verifier.EndTable();
   }
   ProcessCreateRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -1393,6 +1446,9 @@ struct ProcessCreateRequestBuilder {
   void add_debugged(bool debugged) {
     fbb_.AddElement<uint8_t>(ProcessCreateRequest::VT_DEBUGGED, static_cast<uint8_t>(debugged), 0);
   }
+  void add_snapshot(::flatbuffers::Offset<::flatbuffers::String> snapshot) {
+    fbb_.AddOffset(ProcessCreateRequest::VT_SNAPSHOT, snapshot);
+  }
   explicit ProcessCreateRequestBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1422,11 +1478,13 @@ inline ::flatbuffers::Offset<ProcessCreateRequest> CreateProcessCreateRequest(
     uint64_t standard_error = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<ProcessProtocol::InheritedPipe>>> inherited_pipes = 0,
     ::flatbuffers::Offset<::flatbuffers::String> command_line = 0,
-    bool debugged = false) {
+    bool debugged = false,
+    ::flatbuffers::Offset<::flatbuffers::String> snapshot = 0) {
   ProcessCreateRequestBuilder builder_(_fbb);
   builder_.add_standard_error(standard_error);
   builder_.add_standard_output(standard_output);
   builder_.add_standard_input(standard_input);
+  builder_.add_snapshot(snapshot);
   builder_.add_command_line(command_line);
   builder_.add_inherited_pipes(inherited_pipes);
   builder_.add_thread_id(thread_id);
@@ -1454,7 +1512,8 @@ inline ::flatbuffers::Offset<ProcessCreateRequest> CreateProcessCreateRequestDir
     uint64_t standard_error = 0,
     const std::vector<::flatbuffers::Offset<ProcessProtocol::InheritedPipe>> *inherited_pipes = nullptr,
     const char *command_line = nullptr,
-    bool debugged = false) {
+    bool debugged = false,
+    const char *snapshot = nullptr) {
   auto application__ = application ? _fbb.CreateString(application) : 0;
   auto argument0__ = argument0 ? _fbb.CreateString(argument0) : 0;
   auto working_directory__ = working_directory ? _fbb.CreateString(working_directory) : 0;
@@ -1462,6 +1521,7 @@ inline ::flatbuffers::Offset<ProcessCreateRequest> CreateProcessCreateRequestDir
   auto environment__ = environment ? _fbb.CreateVector<::flatbuffers::Offset<ProcessProtocol::EnvironmentVariable>>(*environment) : 0;
   auto inherited_pipes__ = inherited_pipes ? _fbb.CreateVector<::flatbuffers::Offset<ProcessProtocol::InheritedPipe>>(*inherited_pipes) : 0;
   auto command_line__ = command_line ? _fbb.CreateString(command_line) : 0;
+  auto snapshot__ = snapshot ? _fbb.CreateString(snapshot) : 0;
   return ProcessProtocol::CreateProcessCreateRequest(
       _fbb,
       application__,
@@ -1476,7 +1536,8 @@ inline ::flatbuffers::Offset<ProcessCreateRequest> CreateProcessCreateRequestDir
       standard_error,
       inherited_pipes__,
       command_line__,
-      debugged);
+      debugged,
+      snapshot__);
 }
 
 ::flatbuffers::Offset<ProcessCreateRequest> CreateProcessCreateRequest(::flatbuffers::FlatBufferBuilder &_fbb, const ProcessCreateRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -3197,6 +3258,146 @@ inline ::flatbuffers::Offset<SuspendThreadResponse> CreateSuspendThreadResponse(
 
 ::flatbuffers::Offset<SuspendThreadResponse> CreateSuspendThreadResponse(::flatbuffers::FlatBufferBuilder &_fbb, const SuspendThreadResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct SaveProcessRequestT : public ::flatbuffers::NativeTable {
+  typedef SaveProcessRequest TableType;
+  std::string snapshot{};
+};
+
+struct SaveProcessRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SaveProcessRequestT NativeTableType;
+  typedef SaveProcessRequestBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SNAPSHOT = 4
+  };
+  const ::flatbuffers::String *snapshot() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SNAPSHOT);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffsetRequired(verifier, VT_SNAPSHOT) &&
+           verifier.VerifyString(snapshot()) &&
+           verifier.EndTable();
+  }
+  SaveProcessRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(SaveProcessRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<SaveProcessRequest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct SaveProcessRequestBuilder {
+  typedef SaveProcessRequest Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_snapshot(::flatbuffers::Offset<::flatbuffers::String> snapshot) {
+    fbb_.AddOffset(SaveProcessRequest::VT_SNAPSHOT, snapshot);
+  }
+  explicit SaveProcessRequestBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SaveProcessRequest> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SaveProcessRequest>(end);
+    fbb_.Required(o, SaveProcessRequest::VT_SNAPSHOT);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SaveProcessRequest> CreateSaveProcessRequest(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> snapshot = 0) {
+  SaveProcessRequestBuilder builder_(_fbb);
+  builder_.add_snapshot(snapshot);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<SaveProcessRequest> CreateSaveProcessRequestDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *snapshot = nullptr) {
+  auto snapshot__ = snapshot ? _fbb.CreateString(snapshot) : 0;
+  return ProcessProtocol::CreateSaveProcessRequest(
+      _fbb,
+      snapshot__);
+}
+
+::flatbuffers::Offset<SaveProcessRequest> CreateSaveProcessRequest(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct SaveProcessResponseT : public ::flatbuffers::NativeTable {
+  typedef SaveProcessResponse TableType;
+  ProcessProtocol::ProcessError error = ProcessProtocol::ProcessError_None;
+  std::string message{};
+};
+
+struct SaveProcessResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef SaveProcessResponseT NativeTableType;
+  typedef SaveProcessResponseBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_ERROR = 4,
+    VT_MESSAGE = 6
+  };
+  ProcessProtocol::ProcessError error() const {
+    return static_cast<ProcessProtocol::ProcessError>(GetField<uint8_t>(VT_ERROR, 0));
+  }
+  const ::flatbuffers::String *message() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MESSAGE);
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_ERROR, 1) &&
+           VerifyOffset(verifier, VT_MESSAGE) &&
+           verifier.VerifyString(message()) &&
+           verifier.EndTable();
+  }
+  SaveProcessResponseT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(SaveProcessResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<SaveProcessResponse> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct SaveProcessResponseBuilder {
+  typedef SaveProcessResponse Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_error(ProcessProtocol::ProcessError error) {
+    fbb_.AddElement<uint8_t>(SaveProcessResponse::VT_ERROR, static_cast<uint8_t>(error), 0);
+  }
+  void add_message(::flatbuffers::Offset<::flatbuffers::String> message) {
+    fbb_.AddOffset(SaveProcessResponse::VT_MESSAGE, message);
+  }
+  explicit SaveProcessResponseBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<SaveProcessResponse> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<SaveProcessResponse>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<SaveProcessResponse> CreateSaveProcessResponse(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ProcessProtocol::ProcessError error = ProcessProtocol::ProcessError_None,
+    ::flatbuffers::Offset<::flatbuffers::String> message = 0) {
+  SaveProcessResponseBuilder builder_(_fbb);
+  builder_.add_message(message);
+  builder_.add_error(error);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<SaveProcessResponse> CreateSaveProcessResponseDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ProcessProtocol::ProcessError error = ProcessProtocol::ProcessError_None,
+    const char *message = nullptr) {
+  auto message__ = message ? _fbb.CreateString(message) : 0;
+  return ProcessProtocol::CreateSaveProcessResponse(
+      _fbb,
+      error,
+      message__);
+}
+
+::flatbuffers::Offset<SaveProcessResponse> CreateSaveProcessResponse(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct QueryMemoryRequestT : public ::flatbuffers::NativeTable {
   typedef QueryMemoryRequest TableType;
   uint64_t address = 0;
@@ -3517,6 +3718,12 @@ struct Message FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ProcessProtocol::DebugDetachRequest *payload_as_DebugDetachRequest() const {
     return payload_type() == ProcessProtocol::MessagePayload_DebugDetachRequest ? static_cast<const ProcessProtocol::DebugDetachRequest *>(payload()) : nullptr;
   }
+  const ProcessProtocol::SaveProcessRequest *payload_as_SaveProcessRequest() const {
+    return payload_type() == ProcessProtocol::MessagePayload_SaveProcessRequest ? static_cast<const ProcessProtocol::SaveProcessRequest *>(payload()) : nullptr;
+  }
+  const ProcessProtocol::SaveProcessResponse *payload_as_SaveProcessResponse() const {
+    return payload_type() == ProcessProtocol::MessagePayload_SaveProcessResponse ? static_cast<const ProcessProtocol::SaveProcessResponse *>(payload()) : nullptr;
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -3636,6 +3843,14 @@ template<> inline const ProcessProtocol::ThreadInformationResponse *Message::pay
 
 template<> inline const ProcessProtocol::DebugDetachRequest *Message::payload_as<ProcessProtocol::DebugDetachRequest>() const {
   return payload_as_DebugDetachRequest();
+}
+
+template<> inline const ProcessProtocol::SaveProcessRequest *Message::payload_as<ProcessProtocol::SaveProcessRequest>() const {
+  return payload_as_SaveProcessRequest();
+}
+
+template<> inline const ProcessProtocol::SaveProcessResponse *Message::payload_as<ProcessProtocol::SaveProcessResponse>() const {
+  return payload_as_SaveProcessResponse();
 }
 
 struct MessageBuilder {
@@ -3796,7 +4011,8 @@ inline ProcessCreateRequestT::ProcessCreateRequestT(const ProcessCreateRequestT 
         standard_output(o.standard_output),
         standard_error(o.standard_error),
         command_line(o.command_line),
-        debugged(o.debugged) {
+        debugged(o.debugged),
+        snapshot(o.snapshot) {
   environment.reserve(o.environment.size());
   for (const auto &environment_ : o.environment) { environment.emplace_back((environment_) ? new ProcessProtocol::EnvironmentVariableT(*environment_) : nullptr); }
   inherited_pipes.reserve(o.inherited_pipes.size());
@@ -3817,6 +4033,7 @@ inline ProcessCreateRequestT &ProcessCreateRequestT::operator=(ProcessCreateRequ
   std::swap(inherited_pipes, o.inherited_pipes);
   std::swap(command_line, o.command_line);
   std::swap(debugged, o.debugged);
+  std::swap(snapshot, o.snapshot);
   return *this;
 }
 
@@ -3842,6 +4059,7 @@ inline void ProcessCreateRequest::UnPackTo(ProcessCreateRequestT *_o, const ::fl
   { auto _e = inherited_pipes(); if (_e) { _o->inherited_pipes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->inherited_pipes[_i]) { _e->Get(_i)->UnPackTo(_o->inherited_pipes[_i].get(), _resolver); } else { _o->inherited_pipes[_i] = std::unique_ptr<ProcessProtocol::InheritedPipeT>(_e->Get(_i)->UnPack(_resolver)); } } } else { _o->inherited_pipes.resize(0); } }
   { auto _e = command_line(); if (_e) _o->command_line = _e->str(); }
   { auto _e = debugged(); _o->debugged = _e; }
+  { auto _e = snapshot(); if (_e) _o->snapshot = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<ProcessCreateRequest> CreateProcessCreateRequest(::flatbuffers::FlatBufferBuilder &_fbb, const ProcessCreateRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -3865,6 +4083,7 @@ inline ::flatbuffers::Offset<ProcessCreateRequest> ProcessCreateRequest::Pack(::
   auto _inherited_pipes = _o->inherited_pipes.size() ? _fbb.CreateVector<::flatbuffers::Offset<ProcessProtocol::InheritedPipe>> (_o->inherited_pipes.size(), [](size_t i, _VectorArgs *__va) { return ProcessProtocol::CreateInheritedPipe(*__va->__fbb, __va->__o->inherited_pipes[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _command_line = _fbb.CreateString(_o->command_line);
   auto _debugged = _o->debugged;
+  auto _snapshot = _o->snapshot.empty() ? 0 : _fbb.CreateString(_o->snapshot);
   return ProcessProtocol::CreateProcessCreateRequest(
       _fbb,
       _application,
@@ -3879,7 +4098,8 @@ inline ::flatbuffers::Offset<ProcessCreateRequest> ProcessCreateRequest::Pack(::
       _standard_error,
       _inherited_pipes,
       _command_line,
-      _debugged);
+      _debugged,
+      _snapshot);
 }
 
 inline ProcessStartedT *ProcessStarted::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -4616,6 +4836,61 @@ inline ::flatbuffers::Offset<SuspendThreadResponse> SuspendThreadResponse::Pack(
       _previous_count);
 }
 
+inline SaveProcessRequestT *SaveProcessRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<SaveProcessRequestT>(new SaveProcessRequestT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void SaveProcessRequest::UnPackTo(SaveProcessRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = snapshot(); if (_e) _o->snapshot = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<SaveProcessRequest> CreateSaveProcessRequest(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return SaveProcessRequest::Pack(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<SaveProcessRequest> SaveProcessRequest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const SaveProcessRequestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _snapshot = _fbb.CreateString(_o->snapshot);
+  return ProcessProtocol::CreateSaveProcessRequest(
+      _fbb,
+      _snapshot);
+}
+
+inline SaveProcessResponseT *SaveProcessResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<SaveProcessResponseT>(new SaveProcessResponseT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void SaveProcessResponse::UnPackTo(SaveProcessResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = error(); _o->error = _e; }
+  { auto _e = message(); if (_e) _o->message = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<SaveProcessResponse> CreateSaveProcessResponse(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return SaveProcessResponse::Pack(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<SaveProcessResponse> SaveProcessResponse::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const SaveProcessResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const SaveProcessResponseT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _error = _o->error;
+  auto _message = _o->message.empty() ? 0 : _fbb.CreateString(_o->message);
+  return ProcessProtocol::CreateSaveProcessResponse(
+      _fbb,
+      _error,
+      _message);
+}
+
 inline QueryMemoryRequestT *QueryMemoryRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<QueryMemoryRequestT>(new QueryMemoryRequestT());
   UnPackTo(_o.get(), _resolver);
@@ -4835,6 +5110,14 @@ inline bool VerifyMessagePayload(::flatbuffers::VerifierTemplate<B> &verifier, c
       auto ptr = reinterpret_cast<const ProcessProtocol::DebugDetachRequest *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case MessagePayload_SaveProcessRequest: {
+      auto ptr = reinterpret_cast<const ProcessProtocol::SaveProcessRequest *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case MessagePayload_SaveProcessResponse: {
+      auto ptr = reinterpret_cast<const ProcessProtocol::SaveProcessResponse *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -4963,6 +5246,14 @@ inline void *MessagePayloadUnion::UnPack(const void *obj, MessagePayload type, c
       auto ptr = reinterpret_cast<const ProcessProtocol::DebugDetachRequest *>(obj);
       return ptr->UnPack(resolver);
     }
+    case MessagePayload_SaveProcessRequest: {
+      auto ptr = reinterpret_cast<const ProcessProtocol::SaveProcessRequest *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case MessagePayload_SaveProcessResponse: {
+      auto ptr = reinterpret_cast<const ProcessProtocol::SaveProcessResponse *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -5078,6 +5369,14 @@ inline ::flatbuffers::Offset<void> MessagePayloadUnion::Pack(::flatbuffers::Flat
       auto ptr = reinterpret_cast<const ProcessProtocol::DebugDetachRequestT *>(value);
       return CreateDebugDetachRequest(_fbb, ptr, _rehasher).Union();
     }
+    case MessagePayload_SaveProcessRequest: {
+      auto ptr = reinterpret_cast<const ProcessProtocol::SaveProcessRequestT *>(value);
+      return CreateSaveProcessRequest(_fbb, ptr, _rehasher).Union();
+    }
+    case MessagePayload_SaveProcessResponse: {
+      auto ptr = reinterpret_cast<const ProcessProtocol::SaveProcessResponseT *>(value);
+      return CreateSaveProcessResponse(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -5190,6 +5489,14 @@ inline MessagePayloadUnion::MessagePayloadUnion(const MessagePayloadUnion &u) : 
     }
     case MessagePayload_DebugDetachRequest: {
       value = new ProcessProtocol::DebugDetachRequestT(*reinterpret_cast<ProcessProtocol::DebugDetachRequestT *>(u.value));
+      break;
+    }
+    case MessagePayload_SaveProcessRequest: {
+      value = new ProcessProtocol::SaveProcessRequestT(*reinterpret_cast<ProcessProtocol::SaveProcessRequestT *>(u.value));
+      break;
+    }
+    case MessagePayload_SaveProcessResponse: {
+      value = new ProcessProtocol::SaveProcessResponseT(*reinterpret_cast<ProcessProtocol::SaveProcessResponseT *>(u.value));
       break;
     }
     default:
@@ -5331,6 +5638,16 @@ inline void MessagePayloadUnion::Reset() {
     }
     case MessagePayload_DebugDetachRequest: {
       auto ptr = reinterpret_cast<ProcessProtocol::DebugDetachRequestT *>(value);
+      delete ptr;
+      break;
+    }
+    case MessagePayload_SaveProcessRequest: {
+      auto ptr = reinterpret_cast<ProcessProtocol::SaveProcessRequestT *>(value);
+      delete ptr;
+      break;
+    }
+    case MessagePayload_SaveProcessResponse: {
+      auto ptr = reinterpret_cast<ProcessProtocol::SaveProcessResponseT *>(value);
       delete ptr;
       break;
     }
