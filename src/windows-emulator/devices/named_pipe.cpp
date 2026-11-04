@@ -518,6 +518,9 @@ namespace sogen
         {
             return STATUS_ILLEGAL_FUNCTION;
         }
+        // On Windows a write completes the peer's pending read at once, so a reply written just before
+        // DisconnectNamedPipe (crashpad's registration answer) has already reached a client in another process.
+        this->forward_relay_bytes(win_emu);
         this->endpoint->disconnect();
         this->endpoint.reset();
         this->unopened_peer.reset();
