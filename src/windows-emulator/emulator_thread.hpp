@@ -801,8 +801,7 @@ namespace sogen
 
       private:
         bool can_coalesce_message(const msg& msg) const;
-        std::optional<msg> peek_queued_message(process_context& process, hwnd hwnd_filter, UINT filter_min, UINT filter_max,
-                                               bool remove);
+        std::optional<msg> peek_queued_message(process_context& process, hwnd hwnd_filter, UINT filter_min, UINT filter_max, bool remove);
 
         void setup_registers(cpu_interface& emu, const process_context& context) const;
         void setup_wow64_registers(x86_64_cpu& emu, const process_context& context) const;
@@ -825,6 +824,17 @@ namespace sogen
                                                  static_cast<size_t>(this->stack_size + this->stack_guard_size));
                 this->stack_base = 0;
                 this->stack_guard_size = 0;
+            }
+
+            if (this->wow64_stack_base)
+            {
+                if (!this->memory_ptr)
+                {
+                    throw std::runtime_error("Emulator was never assigned!");
+                }
+
+                this->memory_ptr->release_memory(*this->wow64_stack_base, static_cast<size_t>(this->wow64_stack_size.value_or(0)));
+                this->wow64_stack_base.reset();
             }
 
             if (this->gs_segment)
