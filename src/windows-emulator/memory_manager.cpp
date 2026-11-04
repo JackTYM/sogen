@@ -127,6 +127,54 @@ namespace sogen
         return stats;
     }
 
+    uint64_t memory_manager::compute_private_commit() const
+    {
+        uint64_t private_commit = 0;
+
+        for (const auto& reserved_region : this->reserved_regions_ | std::views::values)
+        {
+            if (reserved_region.kind != memory_region_kind::private_allocation &&
+                reserved_region.kind != memory_region_kind::placeholder_backed_allocation)
+            {
+                continue;
+            }
+
+            for (const auto& committed_region : reserved_region.committed_regions | std::views::values)
+            {
+                private_commit += committed_region.length;
+            }
+        }
+
+        return private_commit;
+    }
+
+    uint64_t memory_manager::count_committed_bytes(const uint64_t address, const size_t size) const
+    {
+        const auto end = address + size;
+        uint64_t committed_bytes = 0;
+
+        auto entry = this->reserved_regions_.upper_bound(address);
+        if (entry != this->reserved_regions_.begin())
+        {
+            --entry;
+        }
+
+        for (; entry != this->reserved_regions_.end() && entry->first < end; ++entry)
+        {
+            for (const auto& [committed_address, committed_region] : entry->second.committed_regions)
+            {
+                const auto overlap_start = std::max(address, committed_address);
+                const auto overlap_end = std::min(end, committed_address + committed_region.length);
+                if (overlap_start < overlap_end)
+                {
+                    committed_bytes += overlap_end - overlap_start;
+                }
+            }
+        }
+
+        return committed_bytes;
+    }
+
     memory_permission memory_manager::get_effective_permissions(const nt_memory_permission permissions) const
     {
         if (permissions.is_guarded())

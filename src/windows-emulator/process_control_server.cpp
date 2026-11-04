@@ -416,6 +416,13 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
+        void execute_apply_job_limits(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        {
+            utils::buffer_deserializer buffer(request.payload);
+            buffer.read(target.process.assigned_job_limits);
+            response.status = STATUS_SUCCESS;
+        }
+
         void execute_adopt_object(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             const auto description = read_description_from_request(request);
@@ -500,6 +507,9 @@ namespace sogen
             break;
         case process_control_op::query_cycle_time:
             execute_query_cycle_time(target, request, response);
+            break;
+        case process_control_op::apply_job_limits:
+            execute_apply_job_limits(target, request, response);
             break;
         }
     }

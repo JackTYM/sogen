@@ -570,6 +570,19 @@ namespace sogen
 
                 return STATUS_SUCCESS;
             }
+
+            bool job_allows_another_process(const process_context& proc)
+            {
+                const auto& limit = proc.assigned_job_limits.active_processes;
+                if (!limit)
+                {
+                    return true;
+                }
+
+                const auto live_children = std::ranges::count_if(proc.child_processes | std::views::values,
+                                                                 [](const auto& child) { return child.exit_status == STATUS_PENDING; });
+                return 1 + static_cast<size_t>(live_children) < *limit;
+            }
         }
 
         NTSTATUS suspend_or_resume_process(const syscall_context& c, const handle process_handle, const bool suspend)
@@ -1993,6 +2006,11 @@ namespace sogen
             {
                 c.win_emu.log.log("NtCreateUserProcess: no create_child_process callback registered\n");
                 return STATUS_NOT_SUPPORTED;
+            }
+
+            if (!job_allows_another_process(c.proc))
+            {
+                return STATUS_QUOTA_EXCEEDED;
             }
 
             const auto record_id = c.proc.next_child_record_id++;

@@ -1018,6 +1018,7 @@ namespace sogen
         void release_mouse_capture(hwnd window);
         handle_store<handle_types::event, event> events{};
         handle_store<handle_types::job, job_object> jobs{};
+        job_limits assigned_job_limits{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
         handle_store<handle_types::section, section> sections{};

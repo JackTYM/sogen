@@ -927,6 +927,18 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        static bool exceeds_job_process_memory_limit(const syscall_context& c, const uint64_t address, const uint64_t size)
+        {
+            const auto& limit = c.proc.assigned_job_limits.process_memory;
+            if (!limit)
+            {
+                return false;
+            }
+
+            const auto newly_committed = size - c.win_emu.memory.count_committed_bytes(address, static_cast<size_t>(size));
+            return c.win_emu.memory.compute_private_commit() + newly_committed > *limit;
+        }
+
         static NTSTATUS allocate_virtual_memory(const syscall_context& c, const handle process_handle,
                                                 const emulator_object<uint64_t> base_address,
                                                 const emulator_object<uint64_t> bytes_to_allocate, const uint32_t allocation_type,
@@ -1093,6 +1105,11 @@ namespace sogen
                 (!commit && !reserve) || (placeholder && (commit || replace_placeholder || !reserve || page_protection != PAGE_NOACCESS)))
             {
                 return STATUS_INVALID_PARAMETER;
+            }
+
+            if (commit && exceeds_job_process_memory_limit(c, potential_base, allocation_bytes))
+            {
+                return STATUS_COMMITMENT_LIMIT;
             }
 
             if (replace_placeholder)

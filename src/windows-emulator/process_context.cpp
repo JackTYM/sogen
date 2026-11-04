@@ -1154,6 +1154,7 @@ namespace sogen
         buffer.write(this->wait_completion_packets);
         buffer.write(this->worker_factories);
         buffer.write(this->jobs);
+        buffer.write(this->assigned_job_limits);
         buffer.write(this->thread_state_changes);
         buffer.write(this->ports);
         buffer.write(this->mutants);
@@ -1314,6 +1315,7 @@ namespace sogen
         buffer.read(this->wait_completion_packets);
         buffer.read(this->worker_factories);
         buffer.read(this->jobs);
+        buffer.read(this->assigned_job_limits);
         buffer.read(this->thread_state_changes);
         buffer.read(this->ports);
         buffer.read(this->mutants);

@@ -181,11 +181,31 @@ namespace sogen
         }
     };
 
+    struct job_limits
+    {
+        std::optional<uint32_t> active_processes{};
+        std::optional<uint64_t> process_memory{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write_optional(this->active_processes);
+            buffer.write_optional(this->process_memory);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read_optional(this->active_processes);
+            buffer.read_optional(this->process_memory);
+        }
+    };
+
     struct job_object : ref_counted_object
     {
         std::u16string name{};
         bool kill_on_close{false};
         uint32_t limit_flags{0};
+        job_limits limits{};
+        bool owner_process_assigned{false};
         std::vector<uint32_t> assigned_child_record_ids{};
 
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -193,6 +213,8 @@ namespace sogen
             buffer.write(this->name);
             buffer.write(this->kill_on_close);
             buffer.write(this->limit_flags);
+            buffer.write(this->limits);
+            buffer.write(this->owner_process_assigned);
             buffer.write_vector(this->assigned_child_record_ids);
         }
 
@@ -201,6 +223,8 @@ namespace sogen
             buffer.read(this->name);
             buffer.read(this->kill_on_close);
             buffer.read(this->limit_flags);
+            buffer.read(this->limits);
+            buffer.read(this->owner_process_assigned);
             buffer.read_vector(this->assigned_child_record_ids);
         }
     };

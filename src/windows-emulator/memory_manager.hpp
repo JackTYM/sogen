@@ -228,6 +228,8 @@ namespace sogen
         void deserialize_memory_state(utils::buffer_deserializer& buffer, bool is_snapshot);
 
         memory_stats compute_memory_stats() const;
+        uint64_t compute_private_commit() const;
+        uint64_t count_committed_bytes(uint64_t address, size_t size) const;
 
         void set_dep_enabled(bool enabled);
 

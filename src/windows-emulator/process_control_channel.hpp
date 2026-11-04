@@ -29,6 +29,7 @@ namespace sogen
         query_peb = 15,
         suspend_process = 16,
         resume_process = 17,
+        apply_job_limits = 18,
     };
 
     inline constexpr int process_control_default_timeout_ms = 10000;

@@ -6,6 +6,9 @@ namespace sogen::syscalls
     NTSTATUS handle_NtSetInformationJobObject(const syscall_context& c, handle job_handle, uint32_t info_class, uint64_t info,
                                               ULONG length);
     NTSTATUS handle_NtAssignProcessToJobObject(const syscall_context& c, handle job_handle, handle process_handle);
+    NTSTATUS handle_NtAllocateVirtualMemory(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
+                                            uint64_t zero_bits, emulator_object<uint64_t> bytes_to_allocate, uint32_t allocation_type,
+                                            uint32_t page_protection);
 }
 
 namespace sogen::test
@@ -15,6 +18,10 @@ namespace sogen::test
         constexpr uint32_t extended_limit_information_class = 9;
         constexpr ULONG extended_limit_information_size = 144;
         constexpr uint64_t limit_flags_offset = 16;
+        constexpr uint64_t active_process_limit_offset = 40;
+        constexpr uint64_t process_memory_limit_offset = 112;
+        constexpr uint32_t active_process_flag = 0x0008;
+        constexpr uint32_t process_memory_flag = 0x0100;
 
         class JobObjectTest : public testing::Test
         {
@@ -48,6 +55,32 @@ namespace sogen::test
                                                                   this->storage, extended_limit_information_size);
             }
 
+            NTSTATUS set_limits(const uint32_t flags, const uint32_t active_processes, const uint64_t process_memory)
+            {
+                this->emu->emu().write_memory(this->storage + active_process_limit_offset, &active_processes, sizeof(active_processes));
+                this->emu->emu().write_memory(this->storage + process_memory_limit_offset, &process_memory, sizeof(process_memory));
+                return this->set_limit_flags(flags);
+            }
+
+            NTSTATUS assign_current_process()
+            {
+                return syscalls::handle_NtAssignProcessToJobObject(this->context(), this->job, CURRENT_PROCESS);
+            }
+
+            NTSTATUS commit(const uint64_t size)
+            {
+                const auto base_address = this->storage + 0x800;
+                const auto region_size = this->storage + 0x808;
+                this->emu->emu().write_memory<uint64_t>(base_address, 0);
+                this->emu->emu().write_memory<uint64_t>(region_size, size);
+
+                constexpr uint32_t mem_commit_reserve = 0x3000;
+                constexpr uint32_t page_readwrite = 0x04;
+                return syscalls::handle_NtAllocateVirtualMemory(
+                    this->context(), CURRENT_PROCESS, emulator_object<uint64_t>{this->emu->emu(), base_address}, 0,
+                    emulator_object<uint64_t>{this->emu->emu(), region_size}, mem_commit_reserve, page_readwrite);
+            }
+
             std::unique_ptr<windows_emulator> emu{};
             uint64_t storage{};
             handle job{};
@@ -68,8 +101,33 @@ namespace sogen::test
 
     TEST_F(JobObjectTest, RejectsLimitsThatAreNotEnforced)
     {
-        constexpr uint32_t active_process_limit = 0x0008;
-        EXPECT_EQ(STATUS_NOT_SUPPORTED, this->set_limit_flags(active_process_limit));
+        constexpr uint32_t job_memory_limit = 0x0200;
+        EXPECT_EQ(STATUS_NOT_SUPPORTED, this->set_limit_flags(job_memory_limit));
+    }
+
+    TEST_F(JobObjectTest, RefusesAProcessPastTheActiveProcessLimit)
+    {
+        ASSERT_EQ(STATUS_SUCCESS, this->set_limits(active_process_flag, 0, 0));
+        EXPECT_EQ(STATUS_QUOTA_EXCEEDED, this->assign_current_process());
+    }
+
+    TEST_F(JobObjectTest, ReassigningAMemberDoesNotCountAgainstTheActiveProcessLimit)
+    {
+        ASSERT_EQ(STATUS_SUCCESS, this->set_limits(active_process_flag, 1, 0));
+        EXPECT_EQ(STATUS_SUCCESS, this->assign_current_process());
+        EXPECT_EQ(STATUS_SUCCESS, this->assign_current_process());
+    }
+
+    TEST_F(JobObjectTest, FailsACommitPastTheProcessMemoryLimit)
+    {
+        constexpr uint64_t headroom = 0x100000;
+        const auto limit = this->emu->memory.compute_private_commit() + headroom;
+        ASSERT_EQ(STATUS_SUCCESS, this->set_limits(process_memory_flag, 0, limit));
+        ASSERT_EQ(STATUS_SUCCESS, this->assign_current_process());
+
+        EXPECT_EQ(STATUS_COMMITMENT_LIMIT, this->commit(headroom * 2));
+        EXPECT_EQ(STATUS_SUCCESS, this->commit(headroom / 2));
+        EXPECT_EQ(STATUS_COMMITMENT_LIMIT, this->commit(headroom / 2 + 0x1000));
     }
 
     TEST_F(JobObjectTest, AssignsTheCurrentProcess)

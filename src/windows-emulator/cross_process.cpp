@@ -48,6 +48,8 @@ namespace sogen
                 return "suspend_process";
             case process_control_op::resume_process:
                 return "resume_process";
+            case process_control_op::apply_job_limits:
+                return "apply_job_limits";
             }
 
             return "unknown";
