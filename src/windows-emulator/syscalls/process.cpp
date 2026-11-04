@@ -1157,28 +1157,37 @@ namespace sogen
                         const emulator_object<PEDosHeader_t> dos_header_obj{c.emu, mod.image_base};
                         const auto dos_header = dos_header_obj.read();
 
-                        const emulator_object<PENTHeaders_t<uint64_t>> nt_headers_obj{c.emu, mod.image_base + dos_header.e_lfanew};
-                        const auto nt_headers = nt_headers_obj.read();
+                        const auto fill = [&](const auto& nt_headers) {
+                            const auto& file_header = nt_headers.FileHeader;
+                            const auto& optional_header = nt_headers.OptionalHeader;
 
-                        const auto& file_header = nt_headers.FileHeader;
-                        const auto& optional_header = nt_headers.OptionalHeader;
+                            i.TransferAddress = 0;
+                            i.MaximumStackSize = optional_header.SizeOfStackReserve;
+                            i.CommittedStackSize = optional_header.SizeOfStackCommit;
+                            i.SubSystemType = optional_header.Subsystem;
+                            i.SubSystemMajorVersion = optional_header.MajorSubsystemVersion;
+                            i.SubSystemMinorVersion = optional_header.MinorSubsystemVersion;
+                            i.MajorOperatingSystemVersion = optional_header.MajorOperatingSystemVersion;
+                            i.MinorOperatingSystemVersion = optional_header.MinorOperatingSystemVersion;
+                            i.ImageCharacteristics = file_header.Characteristics;
+                            i.DllCharacteristics = optional_header.DllCharacteristics;
+                            i.Machine = file_header.Machine;
+                            i.ImageContainsCode = TRUE;
+                            i.ImageFlags = 0; // TODO
+                            i.ImageFileSize = optional_header.SizeOfImage;
+                            i.LoaderFlags = optional_header.LoaderFlags;
+                            i.CheckSum = optional_header.CheckSum;
+                        };
 
-                        i.TransferAddress = 0;
-                        i.MaximumStackSize = optional_header.SizeOfStackReserve;
-                        i.CommittedStackSize = optional_header.SizeOfStackCommit;
-                        i.SubSystemType = optional_header.Subsystem;
-                        i.SubSystemMajorVersion = optional_header.MajorSubsystemVersion;
-                        i.SubSystemMinorVersion = optional_header.MinorSubsystemVersion;
-                        i.MajorOperatingSystemVersion = optional_header.MajorOperatingSystemVersion;
-                        i.MinorOperatingSystemVersion = optional_header.MinorOperatingSystemVersion;
-                        i.ImageCharacteristics = file_header.Characteristics;
-                        i.DllCharacteristics = optional_header.DllCharacteristics;
-                        i.Machine = file_header.Machine;
-                        i.ImageContainsCode = TRUE;
-                        i.ImageFlags = 0; // TODO
-                        i.ImageFileSize = optional_header.SizeOfImage;
-                        i.LoaderFlags = optional_header.LoaderFlags;
-                        i.CheckSum = optional_header.CheckSum;
+                        const auto nt_headers_address = mod.image_base + dos_header.e_lfanew;
+                        if (mod.machine == IMAGE_FILE_MACHINE_I386)
+                        {
+                            fill(emulator_object<PENTHeaders_t<uint32_t>>{c.emu, nt_headers_address}.read());
+                        }
+                        else
+                        {
+                            fill(emulator_object<PENTHeaders_t<uint64_t>>{c.emu, nt_headers_address}.read());
+                        }
                     });
 
             case ProcessQuotaLimits: {
