@@ -714,6 +714,14 @@ namespace sogen
         std::vector<token_privilege> privileges{};
         LUID authentication_id{};
 
+        // Windows draws a token's ModifiedId from the system-wide LUID counter, and combase keys its DCOM
+        // access-check cache by it, so a zero or shared id hits stale cache slots. Each emulated process owns
+        // one token that is never modified, and process ids are unique across emulated processes.
+        static LUID token_modified_id(const uint32_t pid)
+        {
+            return LUID{.LowPart = pid, .HighPart = 1};
+        }
+
         uint64_t shared_section_address{0};
         uint64_t shared_section_size{0};
         uint64_t dbwin_buffer{0};

@@ -13,7 +13,6 @@ namespace sogen
         {
             constexpr uint32_t token_authentication_id = 0x1000;
             constexpr uint32_t token_id = 0x1001;
-            constexpr uint32_t token_modified_id = 0x1002;
 
             // Windows 11 26200 answers classes up to 0x3A, past the last one TOKEN_INFORMATION_CLASS names.
             constexpr ULONG last_token_information_class = 0x3A;
@@ -740,7 +739,7 @@ namespace sogen
                 stats.ImpersonationLevel = !anonymous && stats.TokenType == TokenImpersonation ? SecurityImpersonation : SecurityAnonymous;
                 stats.GroupCount = static_cast<ULONG>(get_token_groups(c, token_handle).size());
                 stats.PrivilegeCount = anonymous ? 0 : static_cast<ULONG>(token_privileges(c.proc, token_handle).size());
-                stats.ModifiedId.LowPart = token_modified_id;
+                stats.ModifiedId = process_context::token_modified_id(c.proc.process_id);
 
                 c.emu.write_memory(token_information, stats);
 

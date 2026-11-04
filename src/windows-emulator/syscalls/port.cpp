@@ -1081,7 +1081,7 @@ namespace sogen
         // ULONG GrantedAccess;} (0x14 bytes); rpcrt4 reads Handle@+8, ObjectType@+0xc, GrantedAccess@+0x10.
         // We return the handle stashed by the matching NtAlpcSendWaitReceivePort reply.
         NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, const handle /*port_handle*/,
-                                                      const emulator_object<PORT_MESSAGE64> /*port_message*/,
+                                                      const emulator_object<PORT_MESSAGE64> port_message,
                                                       const uint32_t message_information_class, const emulator_pointer message_information,
                                                       const uint32_t length, const emulator_object<ULONG> return_length)
         {
@@ -1096,8 +1096,16 @@ namespace sogen
                     return STATUS_INFO_LENGTH_MISMATCH;
                 }
 
-                // Emulated tokens carry no modified id; NtQueryInformationToken(TokenStatistics) reports zero too.
-                emulator_object<LUID>{c.emu, message_information}.write(LUID{});
+                if (!port_message)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto sender_pid =
+                    c.proc.is_wow64_process
+                        ? static_cast<uint32_t>(emulator_object<PORT_MESSAGE32>{c.emu, port_message.value()}.read().ClientId.UniqueProcess)
+                        : static_cast<uint32_t>(port_message.read().ClientId.UniqueProcess);
+                emulator_object<LUID>{c.emu, message_information}.write(process_context::token_modified_id(sender_pid));
                 return_length.write_if_valid(luid_size);
                 return STATUS_SUCCESS;
             }
