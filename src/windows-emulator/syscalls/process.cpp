@@ -825,6 +825,13 @@ namespace sogen
                                 [](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = 0; });
                         }
 
+                        if (const auto sibling_peb32 = c.win_emu.known_sibling_peb32(child->second.pid))
+                        {
+                            return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
+                                c.emu, process_information, process_information_length, return_length,
+                                [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = *sibling_peb32; });
+                        }
+
                         // Not positively confirmed native 64-bit from the file alone (a genuinely 32-bit
                         // child, or an unreadable/corrupt image): ask the child itself for its real
                         // PEB32 address, the same live ground truth real Windows answers this query

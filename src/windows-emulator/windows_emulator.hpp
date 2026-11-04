@@ -494,10 +494,12 @@ namespace sogen
         // resolve a sibling pid it never spawned itself (e.g. a crash-reporting broker registering every
         // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
         std::map<uint32_t, std::optional<bool>> known_sibling_pids_{};
+        std::map<uint32_t, std::optional<uint64_t>> known_sibling_peb32_{};
 
         // Test tooling (SOGEN_INJECT_INPUT): left clicks, keys and typed text delivered in order through the same
         // path as host UI input, each a given time after the newest visible window of its class appeared (or the
-        // previous step, whichever is later).
+        // previous step, whichever is later). A step may also wait until the guest writes a text to a file, and an
+        // optional step is skipped once a later step's text is written first.
         struct scheduled_input
         {
             enum class kind : uint8_t
@@ -661,9 +663,10 @@ namespace sogen
         // known-server announcement (see pump_pipe_ipc's generic relay loop). is_known_sibling_pid then
         // answers whether a given pid is a live process somewhere in the tree, for handle_NtOpenProcess's
         // sibling-pid fallback.
-        void broadcast_process_alive(uint32_t pid, std::optional<bool> native_64bit);
+        void broadcast_process_alive(uint32_t pid, std::optional<bool> native_64bit, std::optional<uint64_t> peb32_address = std::nullopt);
         bool is_known_sibling_pid(uint32_t pid) const;
         std::optional<bool> known_sibling_native_64bit(uint32_t pid) const;
+        std::optional<uint64_t> known_sibling_peb32(uint32_t pid) const;
 
         // Announces that `window`, whose hierarchy is attached to `parent_window` of another process, took
         // keyboard focus, so that process's input queue routes keyboard input to it (see pump_pipe_ipc).

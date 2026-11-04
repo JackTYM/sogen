@@ -233,10 +233,23 @@ namespace sogen
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
             if (timeout_ms >= 0)
             {
-                pollfd pfd{fd, POLLIN, 0};
-                const auto rc = ::poll(&pfd, 1, timeout_ms);
-                if (rc <= 0)
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+                while (true)
                 {
+                    const auto remaining =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+                    pollfd pfd{fd, POLLIN, 0};
+                    const auto rc = ::poll(&pfd, 1, static_cast<int>(std::max<decltype(remaining)>(remaining, 0)));
+                    if (rc > 0)
+                    {
+                        break;
+                    }
+
+                    if (rc < 0 && errno == EINTR)
+                    {
+                        continue;
+                    }
+
                     return std::nullopt;
                 }
             }
@@ -532,6 +545,7 @@ namespace sogen
                 buffer.write(message.window_thread_id);
                 buffer.write_optional(message.surface);
                 buffer.write_optional(message.native_64bit);
+                buffer.write_optional(message.peb32_address);
 
                 const auto framed = frame_message(buffer.get_buffer());
                 this->pending_send_.insert(this->pending_send_.end(), framed.begin(), framed.end());
@@ -588,6 +602,7 @@ namespace sogen
                 deserializer.read(message.window_thread_id);
                 deserializer.read_optional(message.surface);
                 deserializer.read_optional(message.native_64bit);
+                deserializer.read_optional(message.peb32_address);
 
                 return message;
             }

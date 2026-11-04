@@ -1268,6 +1268,10 @@ namespace sogen
             apiset::obtain(this->file_sys.read_file(this->version.get_system_root() / "System32" / "apisetschema.dll"));
 
         this->process.setup(*this, this->application_settings_, *executable, *ntdll, apiset_data, this->mod_manager.wow64_modules_.ntdll32);
+        const auto root_peb32 = (this->process.is_wow64_process && this->process.peb32.has_value())
+                                    ? std::optional<uint64_t>(this->process.peb32->value())
+                                    : std::nullopt;
+        this->broadcast_process_alive(this->process.process_id, std::optional<bool>(!this->process.is_wow64_process), root_peb32);
 
         const auto ntdll_data = emu.read_memory(ntdll->image_base, static_cast<size_t>(ntdll->size_of_image));
         const auto win32u_data = emu.read_memory(win32u->image_base, static_cast<size_t>(win32u->size_of_image));
@@ -1337,6 +1341,7 @@ namespace sogen
             message.type = pipe_ipc_message_type::process_alive;
             message.client_process_id = pid;
             message.native_64bit = native_64bit;
+            message.peb32_address = this->known_sibling_peb32_[pid];
             peer->send(message);
         }
 
@@ -1450,9 +1455,11 @@ namespace sogen
         }
     }
 
-    void windows_emulator::broadcast_process_alive(const uint32_t pid, const std::optional<bool> native_64bit)
+    void windows_emulator::broadcast_process_alive(const uint32_t pid, const std::optional<bool> native_64bit,
+                                                   const std::optional<uint64_t> peb32_address)
     {
         this->known_sibling_pids_.insert_or_assign(pid, native_64bit);
+        this->known_sibling_peb32_.insert_or_assign(pid, peb32_address);
 
         if (this->pipe_ipc_peers_.empty())
         {
@@ -1463,6 +1470,7 @@ namespace sogen
         message.type = pipe_ipc_message_type::process_alive;
         message.client_process_id = pid;
         message.native_64bit = native_64bit;
+        message.peb32_address = peb32_address;
 
         for (auto& peer : this->pipe_ipc_peers_)
         {
@@ -1584,6 +1592,12 @@ namespace sogen
         return sibling == this->known_sibling_pids_.end() ? std::nullopt : sibling->second;
     }
 
+    std::optional<uint64_t> windows_emulator::known_sibling_peb32(const uint32_t pid) const
+    {
+        const auto sibling = this->known_sibling_peb32_.find(pid);
+        return sibling == this->known_sibling_peb32_.end() ? std::nullopt : sibling->second;
+    }
+
     void windows_emulator::pump_pipe_ipc()
     {
         static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
@@ -1618,6 +1632,7 @@ namespace sogen
                 else if (message->type == pipe_ipc_message_type::process_alive && message->client_process_id)
                 {
                     this->known_sibling_pids_.insert_or_assign(*message->client_process_id, message->native_64bit);
+                    this->known_sibling_peb32_.insert_or_assign(*message->client_process_id, message->peb32_address);
                 }
                 else if (message->type == pipe_ipc_message_type::focus_changed && this->process.windows.get(message->parent_window))
                 {
