@@ -4,6 +4,7 @@
 
 #include <network/tcp_client_socket.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -23,6 +24,8 @@ namespace sogen
     class managed_process_connection
     {
       public:
+        using save_handler = std::function<process_save_result(const std::string& snapshot_file)>;
+
         managed_process_connection() = default;
         managed_process_connection(network::tcp_client_socket socket, process_create_request request);
 
@@ -38,8 +41,15 @@ namespace sogen
         bool notify_exit(uint64_t exit_code);
         void disconnect();
 
+        // Answers the parent's requests to save this process. Replacing the handler waits for a save in progress.
+        void set_save_handler(save_handler handler);
+        // Called when the parent closes the connection, which it does only by ending, so the process should end as well.
+        void set_parent_lost_handler(std::function<void()> handler);
+
       private:
         bool handle_messages(managed_process_target& target, bool wait_for_resume);
+        process_save_result save(const std::string& snapshot_file);
+        void notify_parent_lost();
 
         template <typename T>
         bool send(T payload);
@@ -47,6 +57,9 @@ namespace sogen
         network::tcp_client_socket socket_{};
         process_create_request request_{};
         std::mutex send_mutex_{};
+        std::mutex save_mutex_{};
+        save_handler save_handler_{};
+        std::function<void()> parent_lost_handler_{};
         std::thread control_thread_{};
     };
 
@@ -85,10 +98,27 @@ namespace sogen
         process_thread_information thread_information(managed_process process, uint32_t thread_id) override;
         process_suspend_result suspend_thread(managed_process process, uint32_t thread_id, bool resume) override;
         process_memory_region query_memory(managed_process process, uint64_t address) const override;
+        std::vector<managed_process_record> list_processes() const override;
+        process_save_result save_process(managed_process process, const std::string& snapshot_file) override;
+        process_error restore_process(const managed_process_record& record, const std::string& snapshot_file) override;
+        process_error restore_exited_process(const managed_process_record& record) override;
 
       private:
         struct process_entry;
 
+        enum class process_ids
+        {
+            assign,
+            keep,
+        };
+
+        process_create_result start_process(managed_process handle, process_create_request request, process_ids ids,
+                                            std::chrono::steady_clock::duration startup_timeout);
+        bool reserve_handle(managed_process handle);
+
+        template <typename Request>
+        std::optional<ProcessProtocol::MessageT> exchange(managed_process process, Request request, uint8_t response_type,
+                                                          std::chrono::steady_clock::duration timeout) const;
         template <typename Request>
         std::optional<ProcessProtocol::MessageT> exchange(managed_process process, Request request, uint8_t response_type) const;
 

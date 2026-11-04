@@ -67,6 +67,7 @@ table ProcessCreateRequest {
     inherited_pipes: [InheritedPipe];
     command_line: string (required);
     debugged: bool;
+    snapshot: string;
 }
 
 table ProcessStarted {
@@ -206,6 +207,15 @@ table SuspendThreadResponse {
     previous_count: uint;
 }
 
+table SaveProcessRequest {
+    snapshot: string (required);
+}
+
+table SaveProcessResponse {
+    error: ProcessError = None;
+    message: string;
+}
+
 table QueryMemoryRequest {
     address: ulong;
 }
@@ -250,6 +260,8 @@ union MessagePayload {
     ThreadInformationRequest,
     ThreadInformationResponse,
     DebugDetachRequest,
+    SaveProcessRequest,
+    SaveProcessResponse,
 }
 
 table Message {

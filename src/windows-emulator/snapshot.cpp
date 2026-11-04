@@ -1,6 +1,7 @@
 #include "std_include.hpp"
 
 #include "snapshot.hpp"
+#include "snapshot_manifest.hpp"
 
 #include <utils/io.hpp>
 #include <utils/finally.hpp>
@@ -156,21 +157,119 @@ namespace sogen
             }
 
             void serialize_emulator_state(const windows_emulator& win_emu, const std::string_view configuration,
-                                          utils::buffer_serializer& serializer)
+                                          const child_process_manifest& children, utils::buffer_serializer& serializer)
             {
                 serializer.write_string(configuration);
+                serializer.write_vector(children);
                 win_emu.serialize(serializer);
             }
 
-            void deserialize_emulator_state(windows_emulator& win_emu, const std::string_view configuration,
-                                            utils::buffer_deserializer& deserializer)
+            child_process_manifest deserialize_emulator_state(windows_emulator& win_emu, const std::string_view configuration,
+                                                              utils::buffer_deserializer& deserializer)
             {
                 if (deserializer.read_string<char>() != configuration)
                 {
                     throw std::runtime_error("The snapshot was taken with a different emulator configuration");
                 }
 
+                child_process_manifest children{};
+                deserializer.read_vector(children);
                 win_emu.deserialize(deserializer);
+                return children;
+            }
+
+            std::vector<managed_process_record> list_child_processes(const windows_emulator& win_emu)
+            {
+                const auto* processes = win_emu.processes();
+                return processes ? processes->list_processes() : std::vector<managed_process_record>{};
+            }
+
+            child_process_manifest describe_exited_child_processes(const windows_emulator& win_emu)
+            {
+                child_process_manifest children{};
+                for (auto& child : list_child_processes(win_emu))
+                {
+                    if (!child.exit)
+                    {
+                        throw std::runtime_error("A process with running child processes can only be saved to a file");
+                    }
+                    children.push_back({.process = std::move(child)});
+                }
+                return children;
+            }
+
+            // Every child saves itself and keeps running, so a failed save of the tree leaves all of it running.
+            void save_child_processes(windows_emulator& win_emu, const std::filesystem::path& snapshot_file,
+                                      child_process_manifest& children)
+            {
+                auto* processes = win_emu.processes();
+                for (auto& child : list_child_processes(win_emu))
+                {
+                    if (!child.exit)
+                    {
+                        const auto child_file = get_child_snapshot_path(snapshot_file, child.process_id);
+                        const auto result = processes->save_process(child.process, std::filesystem::absolute(child_file).string());
+                        if (result)
+                        {
+                            children.push_back({.process = std::move(child), .file = child_file.filename().string()});
+                            continue;
+                        }
+
+                        child.exit = processes->exit_status(child.process).status;
+                        if (!child.exit)
+                        {
+                            throw std::runtime_error("Saving the child process " + std::to_string(child.process_id) +
+                                                     " failed: " + result.message);
+                        }
+                    }
+
+                    children.push_back({.process = std::move(child)});
+                }
+            }
+
+            void remove_child_snapshots(const std::filesystem::path& snapshot_file, const child_process_manifest& children)
+            {
+                for (const auto& child : children)
+                {
+                    if (!child.file.empty())
+                    {
+                        std::error_code ec{};
+                        std::filesystem::remove(resolve_child_snapshot(snapshot_file, child.file), ec);
+                    }
+                }
+            }
+
+            void restore_child_processes(windows_emulator& win_emu, const std::filesystem::path& snapshot_file,
+                                         const child_process_manifest& children)
+            {
+                if (children.empty())
+                {
+                    return;
+                }
+
+                auto* processes = win_emu.processes();
+                if (!processes)
+                {
+                    throw std::runtime_error("The snapshot holds child processes, which this launcher cannot run");
+                }
+
+                for (const auto& child : children)
+                {
+                    if (!child.file.empty() && snapshot_file.empty())
+                    {
+                        throw std::runtime_error("A snapshot with running child processes can only be loaded from its file");
+                    }
+
+                    const auto error =
+                        child.file.empty()
+                            ? processes->restore_exited_process(child.process)
+                            : processes->restore_process(
+                                  child.process, std::filesystem::absolute(resolve_child_snapshot(snapshot_file, child.file)).string());
+                    if (error != process_error::none)
+                    {
+                        throw std::runtime_error("Restoring the child process " + std::to_string(child.process.process_id) + " failed");
+                    }
+                }
             }
 
             // Every worker keeps its own buffers, which a device with little memory may not afford while saving a large process.
@@ -200,7 +299,7 @@ namespace sogen
             win_emu.prepare_serialization();
 
             utils::buffer_serializer serializer{};
-            serialize_emulator_state(win_emu, configuration, serializer);
+            serialize_emulator_state(win_emu, configuration, describe_exited_child_processes(win_emu), serializer);
             const auto state = utils::compression::zstd::compress(serializer.get_buffer(), 1);
 
             const auto header = make_header(win_emu, serializer.size());
@@ -242,6 +341,10 @@ namespace sogen
                 std::filesystem::remove(temporary_file, ec);
             });
 
+            child_process_manifest children{};
+            auto remove_child_files = utils::finally([&] { remove_child_snapshots(snapshot_file, children); });
+            save_child_processes(win_emu, snapshot_file, children);
+
             {
                 std::ofstream stream{temporary_file, std::ios::binary | std::ios::trunc};
                 const auto write = [&](const std::span<const std::byte> data) {
@@ -257,7 +360,7 @@ namespace sogen
                 utils::compression::zstd::stream_compressor compressor{
                     write, 1, std::min(std::thread::hardware_concurrency(), max_compression_workers)};
                 utils::buffer_serializer serializer{[&](const std::span<const std::byte> data) { compressor.write(data); }};
-                serialize_emulator_state(win_emu, configuration, serializer);
+                serialize_emulator_state(win_emu, configuration, children, serializer);
                 serializer.flush();
                 compressor.finish();
 
@@ -278,6 +381,7 @@ namespace sogen
 
             std::filesystem::rename(temporary_file, snapshot_file);
             remove_temporary_file.cancel();
+            remove_child_files.cancel();
         }
 
         PEMachineType get_snapshot_machine(const std::filesystem::path& snapshot_file)
@@ -298,7 +402,7 @@ namespace sogen
             const auto data = get_decompressed_emulator_state(snapshot);
 
             utils::buffer_deserializer deserializer{data};
-            deserialize_emulator_state(win_emu, configuration, deserializer);
+            restore_child_processes(win_emu, {}, deserialize_emulator_state(win_emu, configuration, deserializer));
         }
 
         void load_emulator_snapshot(windows_emulator& win_emu, const std::filesystem::path& snapshot_file,
@@ -319,7 +423,7 @@ namespace sogen
 
             utils::buffer_deserializer deserializer{[&](const std::span<std::byte> data) { decompressor.read(data); },
                                                     get_state_size(read_header(header_data))};
-            deserialize_emulator_state(win_emu, configuration, deserializer);
+            const auto children = deserialize_emulator_state(win_emu, configuration, deserializer);
 
             if (deserializer.get_remaining_size() != 0)
             {
@@ -327,6 +431,7 @@ namespace sogen
             }
 
             decompressor.finish();
+            restore_child_processes(win_emu, snapshot_file, children);
         }
 
         controller::controller(windows_emulator& win_emu, std::string configuration, std::filesystem::path directory,
@@ -349,15 +454,16 @@ namespace sogen
             this->watcher_.join();
         }
 
-        bool controller::request(std::filesystem::path destination)
+        bool controller::request(std::filesystem::path destination, const after_save after, outcome_callback on_outcome)
         {
             {
                 const std::scoped_lock lock(this->mutex_);
-                if (this->pending_)
+                if (this->pending_ || this->finished_)
                 {
                     return false;
                 }
-                this->pending_ = std::move(destination);
+                this->pending_ =
+                    pending_request{.destination = std::move(destination), .after = after, .on_outcome = std::move(on_outcome)};
             }
             this->changed_.notify_all();
             return true;
@@ -420,6 +526,23 @@ namespace sogen
 
         bool controller::run()
         {
+            const auto finish = utils::finally([this] {
+                std::optional<pending_request> unanswered{};
+                {
+                    const std::scoped_lock lock(this->mutex_);
+                    this->finished_ = true;
+                    unanswered = std::exchange(this->pending_, std::nullopt);
+                }
+                if (unanswered && unanswered->on_outcome)
+                {
+                    unanswered->on_outcome({.path = unanswered->destination, .error = "The process ended before it was saved"});
+                }
+            });
+            return this->run_until_done();
+        }
+
+        bool controller::run_until_done()
+        {
             while (true)
             {
                 {
@@ -440,7 +563,8 @@ namespace sogen
                     return false;
                 }
 
-                snapshot_outcome outcome{.path = this->pending_->empty() ? this->next_snapshot_path() : *this->pending_};
+                auto request = std::move(*this->pending_);
+                snapshot_outcome outcome{.path = request.destination.empty() ? this->next_snapshot_path() : request.destination};
                 bool ended = this->stop_requested_ || this->win_emu_.process.exit_status.has_value();
                 lock.unlock();
 
@@ -485,10 +609,18 @@ namespace sogen
                 {
                     this->on_outcome_(outcome);
                 }
+                if (request.on_outcome)
+                {
+                    request.on_outcome(outcome);
+                }
 
-                if (ended || outcome.error.empty())
+                if (ended)
                 {
                     return outcome.error.empty();
+                }
+                if (outcome.error.empty() && request.after == after_save::stop)
+                {
+                    return true;
                 }
             }
         }
