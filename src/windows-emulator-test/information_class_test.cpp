@@ -159,6 +159,54 @@ namespace sogen::test
         }
     }
 
+    TEST_F(InformationClassTest, QueryProcessFixedSizeClassesFollowWindowsLengthAndHandleRules)
+    {
+        struct fixed_size_class
+        {
+            uint32_t info_class;
+            uint32_t size;
+        };
+
+        for (const auto [info_class, size] : {fixed_size_class{ProcessIoCounters, 48},
+                                              {ProcessHandleCount, 4},
+                                              {ProcessSessionInformation, 4},
+                                              {ProcessBreakOnTermination, 4}})
+        {
+            for (const auto process : {CURRENT_PROCESS, GUEST_PROCESS_HANDLE})
+            {
+                for (const uint32_t length : {0u, 1u, size - 1, size + 8})
+                {
+                    EXPECT_EQ(STATUS_INFO_LENGTH_MISMATCH,
+                              this->query_process(process, info_class, {.address = this->data().address, .length = length}))
+                        << info_class << " " << length;
+                    EXPECT_EQ(untouched, this->returned_length()) << info_class << " " << length;
+                }
+            }
+
+            for (const auto process : {handle{}, garbage_handle})
+            {
+                EXPECT_EQ(STATUS_INVALID_HANDLE,
+                          this->query_process(process, info_class, {.address = this->data().address, .length = size}))
+                    << info_class;
+                EXPECT_EQ(untouched, this->returned_length()) << info_class;
+            }
+        }
+
+        for (const uint32_t length : {5u, 7u, 9u, 16u})
+        {
+            EXPECT_EQ(STATUS_INFO_LENGTH_MISMATCH,
+                      this->query_process(CURRENT_PROCESS, ProcessHandleCount, {.address = this->data().address, .length = length}))
+                << length;
+            EXPECT_EQ(untouched, this->returned_length()) << length;
+        }
+
+        EXPECT_EQ(STATUS_SUCCESS, this->query_process(CURRENT_PROCESS, ProcessHandleCount, {.address = this->data().address, .length = 8}));
+        EXPECT_EQ(4u, this->returned_length());
+        const emulator_object<ULONG> fields{this->emu->memory, this->data().address};
+        EXPECT_NE(0u, fields.read(0));
+        EXPECT_EQ(fields.read(0), fields.read(1));
+    }
+
     TEST_F(InformationClassTest, SetProcessRejectsClassesPastTheLastOneBeforeLookingAtTheHandle)
     {
         for (const uint32_t info_class : {0x74u, 0x7FFFu, 0xFFFFFFFFu})
