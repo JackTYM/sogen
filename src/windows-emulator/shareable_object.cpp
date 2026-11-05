@@ -238,6 +238,7 @@ namespace sogen
     {
         auto& process = win_emu.process;
         utils::buffer_deserializer buffer{description.object_bytes};
+        buffer.register_factory<file_system_wrapper>([&win_emu] { return file_system_wrapper{win_emu.file_sys}; });
 
         switch (description.type)
         {
