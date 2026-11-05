@@ -239,6 +239,22 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (key_information_class == KeyFlagsInformation)
+            {
+                constexpr auto required_size = sizeof(KEY_FLAGS_INFORMATION);
+                result_length.write(required_size);
+
+                if (required_size > length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const emulator_object<KEY_FLAGS_INFORMATION> info_obj{c.emu, key_information};
+                info_obj.write(KEY_FLAGS_INFORMATION{});
+
+                return STATUS_SUCCESS;
+            }
+
             if (key_information_class == KeyHandleTagsInformation)
             {
                 constexpr auto required_size = sizeof(KEY_HANDLE_TAGS_INFORMATION);

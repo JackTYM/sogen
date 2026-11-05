@@ -143,13 +143,18 @@ namespace sogen
 
         case handle_types::token: {
             const bool impersonation = resolved_handle == DUMMY_IMPERSONATION_TOKEN;
-            if (!impersonation && !process.tokens.get(resolved_handle))
+            const auto* const token = process.tokens.get(resolved_handle);
+            if (!impersonation && !token)
             {
                 return STATUS_INVALID_HANDLE;
             }
 
             utils::buffer_serializer buffer{};
             buffer.write(impersonation);
+            if (token)
+            {
+                buffer.write_optional(token->groups);
+            }
             description.object_bytes = buffer.get_buffer();
             return STATUS_SUCCESS;
         }
@@ -253,9 +258,9 @@ namespace sogen
         }
 
         case handle_types::token: {
-            // A token's identity is that of the process querying it, so the receiver's token needs no
-            // state from the sender's. It is still a token distinct from the receiver's own, so adjusting
-            // its privileges must not change the receiver's.
+            // A token's identity is that of the process querying it, so only an explicit group list is
+            // carried over from the sender. It is still a token distinct from the receiver's own, so
+            // adjusting its privileges must not change the receiver's.
             bool impersonation{};
             buffer.read(impersonation);
             if (impersonation)
@@ -266,6 +271,7 @@ namespace sogen
 
             process_token token{};
             token.privileges = process.privileges;
+            buffer.read_optional(token.groups);
             adopted_handle = process.tokens.store(std::move(token));
             return STATUS_SUCCESS;
         }

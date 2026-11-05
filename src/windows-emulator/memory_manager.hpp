@@ -146,6 +146,7 @@ namespace sogen
 
         bool commit_memory(uint64_t address, size_t size, nt_memory_permission permissions);
         bool commit_image_memory(uint64_t address, size_t size, nt_memory_permission permissions);
+        bool commit_reserved_section_view_memory(uint64_t address, size_t size, nt_memory_permission permissions);
         bool decommit_memory(uint64_t address, size_t size);
 
         bool release_memory(uint64_t address, size_t size);
@@ -261,7 +262,8 @@ namespace sogen
         void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) final;
 
         void update_layout_version();
-        bool commit_memory(uint64_t address, size_t size, nt_memory_permission permissions, bool allow_image_section);
+        bool commit_memory(uint64_t address, size_t size, nt_memory_permission permissions,
+                           std::optional<memory_region_kind> allowed_section_kind);
         memory_permission get_effective_permissions(nt_memory_permission permissions) const;
 
         // The actual fixed-address allocation logic, without the reserve_host_memory_ranges rescan

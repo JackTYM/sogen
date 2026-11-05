@@ -14,10 +14,10 @@ namespace sogen
     {
         // TEB64/TEB32's NlsCache field is a pointer real ntdll (LdrpInitializeProcess) allocates and
         // populates with per-thread cached NLS/locale data; sogen has never populated it, leaving it
-        // null. Most guest code apparently never dereferences it (or the existing IsImpersonating
-        // hack below routes around it), but real ntdll's Unicode case-mapping helpers (e.g. reached
-        // from RtlUpcaseUnicodeChar-adjacent code during a wow64 process's startup) read a field at
-        // a fixed offset within it unconditionally, crashing on a null NlsCache.
+        // null. Most guest code apparently never dereferences it, but real ntdll's Unicode
+        // case-mapping helpers (e.g. reached from RtlUpcaseUnicodeChar-adjacent code during a wow64
+        // process's startup) read a field at a fixed offset within it unconditionally, crashing on a
+        // null NlsCache.
         //
         // The correct value - and the one used whenever available (see process_context::
         // kernelbase_nls_process_local_cache) - is the guest address of kernelbase.dll's real
@@ -149,9 +149,15 @@ namespace sogen
             }
 
             case handle_types::file: {
-                // File I/O is synchronous in the emulator, so no operation is ever in flight when a
-                // wait is issued -- the file object's built-in event stays signaled.
-                if (h.value.is_pseudo || c.files.get(h))
+                // File I/O is synchronous in the emulator, so the only operation that can be in flight
+                // is a directory change notification, which never completes.
+                if (h.value.is_pseudo)
+                {
+                    return wait_state::signaled;
+                }
+
+                const auto* f = c.files.get(h);
+                if (f && !f->pending_change_notification)
                 {
                     return wait_state::signaled;
                 }
@@ -271,9 +277,13 @@ namespace sogen
             }
 
             case handle_types::file: {
-                if (!h.value.is_pseudo && !c.files.get(h))
+                if (!h.value.is_pseudo)
                 {
-                    return std::nullopt;
+                    const auto* f = c.files.get(h);
+                    if (!f || f->pending_change_notification)
+                    {
+                        return std::nullopt;
+                    }
                 }
 
                 return wait_state::signaled;
@@ -496,19 +506,12 @@ namespace sogen
             const auto nls_cache_addr = resolve_nls_cache(*this->gs_segment, context);
 
             this->teb64->access([&](TEB64& teb_obj) {
-                // Skips GetCurrentNlsCache
-                // This hack can be removed once this is fixed:
-                // https://github.com/momo5502/emulator/issues/128
-                reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
-
                 // See nls_cache_placeholder's doc comment.
                 teb_obj.NlsCache = nls_cache_addr;
 
                 teb_obj.ClientId.UniqueProcess = context.process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
                 teb_obj.DeallocationStack = this->stack_base;
-                // TODO: Proper GuaranteedStack implementation.
-                teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
                 teb_obj.NtTib.StackLimit = this->stack_base;
                 teb_obj.NtTib.StackBase = this->stack_base + this->stack_size;
                 teb_obj.NtTib.Self = this->teb64->value();
@@ -593,11 +596,6 @@ namespace sogen
 
         // Initialize 64-bit TEB first
         this->teb64->access([&](TEB64& teb_obj) {
-            // Skips GetCurrentNlsCache
-            // This hack can be removed once this is fixed:
-            // https://github.com/momo5502/emulator/issues/128
-            reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
-
             // See nls_cache_placeholder's doc comment.
             teb_obj.NlsCache = nls_cache_addr;
 
@@ -606,8 +604,6 @@ namespace sogen
 
             // Native 64-bit stack
             teb_obj.DeallocationStack = this->stack_base;
-            // TODO: Proper GuaranteedStack implementation.
-            teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
             teb_obj.NtTib.StackLimit = this->stack_base;
             teb_obj.NtTib.StackBase = wow64_cpureserved_base;
             teb_obj.NtTib.Self = this->teb64->value();
@@ -668,8 +664,6 @@ namespace sogen
         this->teb32->access([&](TEB32& teb32_obj) {
             // Set NT_TIB32 fields
             teb32_obj.DeallocationStack = static_cast<uint32_t>(nttib32_stack_limit);
-            // TODO: Proper GuaranteedStack implementation.
-            teb32_obj.GuaranteedStackBytes = static_cast<ULONG>(this->wow64_stack_size.value());
             teb32_obj.NtTib.Self = static_cast<uint32_t>(teb32_addr);                // Self pointer to 32-bit TEB
             teb32_obj.NtTib.StackBase = static_cast<uint32_t>(nttib32_stack_base);   // Top of 32-bit stack (High address)
             teb32_obj.NtTib.StackLimit = static_cast<uint32_t>(nttib32_stack_limit); // Bottom of 32-bit stack (Low address)

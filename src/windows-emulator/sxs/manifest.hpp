@@ -62,6 +62,20 @@ namespace sogen::sxs
         assembly_version new_version{};
     };
 
+    // ACTCTX_COMPATIBILITY_ELEMENT_TYPE
+    enum class compatibility_element_type : uint32_t
+    {
+        os = 1,
+        max_version_tested = 3,
+    };
+
+    struct compatibility_element
+    {
+        std::array<std::byte, 16> id{};
+        compatibility_element_type type{compatibility_element_type::os};
+        uint64_t max_version_tested{};
+    };
+
     // ACTCTX_REQUESTED_RUN_LEVEL
     enum class run_level : uint32_t
     {
@@ -80,9 +94,13 @@ namespace sogen::sxs
         std::vector<manifest_file> files{};
         std::vector<application_setting> settings{};
         std::vector<binding_redirect> binding_redirects{};
+        std::vector<compatibility_element> compatibility{};
         run_level requested_run_level{run_level::unspecified};
         bool ui_access{};
     };
+
+    // Parses "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" into the in-memory (little-endian GUID) byte order.
+    std::optional<std::array<std::byte, 16>> parse_guid(std::u16string_view text);
 
     std::optional<manifest> parse_manifest(std::span<const std::byte> data);
 }

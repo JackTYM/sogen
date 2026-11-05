@@ -438,10 +438,12 @@ namespace sogen
         // resolve a sibling pid it never spawned itself (e.g. a crash-reporting broker registering every
         // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
         std::map<uint32_t, std::optional<bool>> known_sibling_pids_{};
+        std::map<uint32_t, std::optional<uint64_t>> known_sibling_peb32_{};
 
         // Test tooling (SOGEN_INJECT_INPUT): left clicks, keys and typed text delivered in order through the same
         // path as host UI input, each a given time after the newest visible window of its class appeared (or the
-        // previous step, whichever is later).
+        // previous step, whichever is later). A step may also wait until the guest writes a text to a file, and an
+        // optional step is skipped once a later step's text is written first.
         struct scheduled_input
         {
             enum class kind : uint8_t
@@ -453,6 +455,10 @@ namespace sogen
 
             kind type{};
             std::u16string window_class{};
+            std::u16string ready_child_class{};
+            std::string ready_written_text{};
+            bool ready_text_written{};
+            bool optional{};
             std::chrono::milliseconds delay{};
             int32_t x{};
             int32_t y{};
@@ -571,9 +577,10 @@ namespace sogen
         // known-server announcement (see pump_pipe_ipc's generic relay loop). is_known_sibling_pid then
         // answers whether a given pid is a live process somewhere in the tree, for handle_NtOpenProcess's
         // sibling-pid fallback.
-        void broadcast_process_alive(uint32_t pid, std::optional<bool> native_64bit);
+        void broadcast_process_alive(uint32_t pid, std::optional<bool> native_64bit, std::optional<uint64_t> peb32_address = std::nullopt);
         bool is_known_sibling_pid(uint32_t pid) const;
         std::optional<bool> known_sibling_native_64bit(uint32_t pid) const;
+        std::optional<uint64_t> known_sibling_peb32(uint32_t pid) const;
 
         // Announces that `window`, whose hierarchy is attached to `parent_window` of another process, took
         // keyboard focus, so that process's input queue routes keyboard input to it (see pump_pipe_ipc).
@@ -697,6 +704,7 @@ namespace sogen
         void take_focus_from_parent(hwnd window, hwnd previous_focus);
         void release_focus_to_parent(hwnd window, hwnd new_focus);
         void inject_scheduled_input();
+        void observe_file_write_for_scheduled_input(std::string_view data);
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);
         void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);
         void deliver_raw_keyboard_input(uint16_t vkey, uint16_t scan_code, uint32_t message, bool extended);

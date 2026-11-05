@@ -649,7 +649,7 @@ namespace sogen
 
     bool memory_manager::commit_memory(const uint64_t address, const size_t size, const nt_memory_permission permissions)
     {
-        return this->commit_memory(address, size, permissions, false);
+        return this->commit_memory(address, size, permissions, std::nullopt);
     }
 
     bool memory_manager::commit_image_memory(const uint64_t address, const size_t size, const nt_memory_permission permissions)
@@ -660,11 +660,23 @@ namespace sogen
             return false;
         }
 
-        return this->commit_memory(address, size, permissions, true);
+        return this->commit_memory(address, size, permissions, memory_region_kind::section_image);
+    }
+
+    bool memory_manager::commit_reserved_section_view_memory(const uint64_t address, const size_t size,
+                                                             const nt_memory_permission permissions)
+    {
+        const auto entry = this->find_reserved_region(address);
+        if (entry == this->reserved_regions_.end() || entry->second.kind != memory_region_kind::pagefile_section_view)
+        {
+            return false;
+        }
+
+        return this->commit_memory(address, size, permissions, memory_region_kind::pagefile_section_view);
     }
 
     bool memory_manager::commit_memory(const uint64_t address, const size_t size, const nt_memory_permission permissions,
-                                       const bool allow_image_section)
+                                       const std::optional<memory_region_kind> allowed_section_kind)
     {
         const auto entry = this->find_reserved_region(address);
         if (entry == this->reserved_regions_.end())
@@ -672,8 +684,7 @@ namespace sogen
             return false;
         }
 
-        if (memory_region_policy::is_section_kind(entry->second.kind) &&
-            !(allow_image_section && entry->second.kind == memory_region_kind::section_image))
+        if (memory_region_policy::is_section_kind(entry->second.kind) && entry->second.kind != allowed_section_kind)
         {
             return false;
         }

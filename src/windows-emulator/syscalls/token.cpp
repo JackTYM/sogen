@@ -9,13 +9,18 @@ namespace sogen
     {
         namespace
         {
+            constexpr std::array<uint8_t, 12> everyone_sid = {
+                0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            };
+
             constexpr std::array<uint8_t, 12> interactive_sid = {
                 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x00,
             };
 
             // S-1-5-5-0-1000: a synthetic logon-session SID (SECURITY_LOGON_IDS_RID); real Windows
             // derives the trailing two sub-authorities from the token's actual logon LUID, which sogen
-            // does not track, so a fixed, stable value is used instead.
+            // does not track, so a fixed, stable value is used instead, also in place of the logon SID
+            // a creator passes to NtCreateTokenEx.
             constexpr std::array<uint8_t, 20> logon_sid = {
                 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00,
             };
@@ -43,14 +48,64 @@ namespace sogen
             // administrator token and the elevation type is TokenElevationTypeDefault. A split token would need an
             // Explorer shell to de-elevate through (WebView2 launches its browser via CLSID_ShellWindows when its
             // host reports TokenElevationTypeFull).
-            std::array<token_group, 4> get_token_groups(const process_context& proc)
+            std::array<token_group, 5> get_token_groups(const process_context& proc)
             {
                 return {{
                     {.sid = proc.sid, .attributes = 0},
+                    {.sid = everyone_sid, .attributes = se_group_enabled},
                     {.sid = interactive_sid, .attributes = se_group_enabled},
                     {.sid = administrators_sid, .attributes = se_group_enabled | se_group_owner},
                     {.sid = logon_sid, .attributes = se_group_enabled | se_group_logon_id},
                 }};
+            }
+
+            std::vector<token_group> get_token_groups(process_context& proc, const handle token_handle)
+            {
+                const auto* const token = proc.tokens.get(token_handle);
+                if (!token || !token->groups)
+                {
+                    const auto process_groups = get_token_groups(proc);
+                    return {process_groups.begin(), process_groups.end()};
+                }
+
+                std::vector<token_group> groups{};
+                groups.reserve(token->groups->size());
+                for (const auto& group : *token->groups)
+                {
+                    groups.push_back({.sid = group.sid, .attributes = group.attributes});
+                }
+
+                return groups;
+            }
+
+            std::vector<uint8_t> read_sid(const memory_manager& memory, const uint64_t address)
+            {
+                std::array<uint8_t, 8> header{};
+                memory.read_memory(address, header.data(), header.size());
+
+                std::vector<uint8_t> sid(8 + static_cast<size_t>(header[1]) * sizeof(uint32_t));
+                memory.read_memory(address, sid.data(), sid.size());
+                return sid;
+            }
+
+            std::vector<token_group_entry> read_token_groups(const memory_manager& memory, const uint64_t address)
+            {
+                ULONG count{};
+                memory.read_memory(address, &count, sizeof(count));
+
+                std::vector<token_group_entry> groups{};
+                groups.reserve(count);
+                for (ULONG i = 0; i < count; ++i)
+                {
+                    SID_AND_ATTRIBUTES64 entry{};
+                    memory.read_memory(address + offsetof(TOKEN_GROUPS64, Groups) + i * sizeof(SID_AND_ATTRIBUTES64), &entry,
+                                       sizeof(entry));
+                    const bool is_logon_sid = (entry.Attributes & se_group_logon_id) == se_group_logon_id;
+                    auto sid = is_logon_sid ? std::vector<uint8_t>(logon_sid.begin(), logon_sid.end()) : read_sid(memory, entry.Sid);
+                    groups.push_back({.sid = std::move(sid), .attributes = entry.Attributes});
+                }
+
+                return groups;
             }
 
             bool sid_matches(const memory_manager& memory, const uint64_t address, const std::span<const uint8_t> expected)
@@ -269,12 +324,18 @@ namespace sogen
                                         ACCESS_MASK /*desired_access*/,
                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
                                         /*object_attributes*/,
-                                        const TOKEN_TYPE type)
+                                        const TOKEN_TYPE type, uint64_t /*authentication_id*/, uint64_t /*expiration_time*/,
+                                        uint64_t /*user*/, const uint64_t groups)
         {
             if (type == TokenPrimary)
             {
                 process_token token{};
+                token.default_user = true;
                 token.privileges = c.proc.privileges;
+                if (groups)
+                {
+                    token.groups = read_token_groups(c.emu.memory(), groups);
+                }
                 token_handle.write(c.proc.tokens.store(std::move(token)));
             }
             else if (type == TokenImpersonation)
@@ -311,7 +372,16 @@ namespace sogen
 
             if (token_information_class == TokenAppContainerSid)
             {
-                return STATUS_NOT_SUPPORTED;
+                constexpr auto required_size = sizeof(TOKEN_APPCONTAINER_INFORMATION64);
+                return_length.write(required_size);
+
+                if (required_size > token_information_length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                emulator_object<TOKEN_APPCONTAINER_INFORMATION64>{c.emu, token_information}.write({});
+                return STATUS_SUCCESS;
             }
 
             const auto& sid = c.proc.sid;
@@ -337,7 +407,7 @@ namespace sogen
 
             if (token_information_class == TokenGroups)
             {
-                const auto groups = get_token_groups(c.proc);
+                const auto groups = get_token_groups(c.proc, token_handle);
                 const auto entries_offset = offsetof(TOKEN_GROUPS64, Groups);
                 auto sid_offset = entries_offset + groups.size() * sizeof(SID_AND_ATTRIBUTES64);
 
@@ -601,7 +671,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (token_information_class == TokenIsAppContainer || token_information_class == TokenIsAppSilo)
+            if (token_information_class == TokenIsAppContainer || token_information_class == TokenIsAppSilo ||
+                token_information_class == TokenSandBoxInert)
             {
                 constexpr auto required_size = sizeof(ULONG);
                 return_length.write(required_size);
@@ -641,6 +712,7 @@ namespace sogen
 
                 TOKEN_STATISTICS stats{};
                 stats.AuthenticationId = c.proc.authentication_id;
+                stats.ModifiedId = process_context::token_modified_id(c.proc.process_id);
                 stats.TokenType = get_token_type(token_handle);
                 stats.ImpersonationLevel = stats.TokenType == TokenImpersonation ? SecurityImpersonation : SecurityAnonymous;
                 stats.GroupCount = static_cast<ULONG>(get_token_groups(c.proc).size());
@@ -791,6 +863,24 @@ namespace sogen
             granted_access.write(decision.granted);
             access_status.write(decision.status);
             return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAccessCheckByType(const syscall_context& c, const uint64_t security_descriptor,
+                                            const uint64_t /*principal_self_sid*/, const handle client_token,
+                                            const ACCESS_MASK desired_access, const uint64_t object_type_list,
+                                            const ULONG object_type_list_length, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                            const uint64_t privilege_set, const emulator_object<ULONG> privilege_set_length,
+                                            const emulator_object<ACCESS_MASK> granted_access,
+                                            const emulator_object<NTSTATUS> access_status)
+        {
+            if (object_type_list != 0 || object_type_list_length != 0)
+            {
+                c.win_emu.log.error("NtAccessCheckByType with an object type list is not supported\n");
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            return handle_NtAccessCheck(c, security_descriptor, client_token, desired_access, generic_mapping, privilege_set,
+                                        privilege_set_length, granted_access, access_status);
         }
 
         NTSTATUS handle_NtAccessCheckByTypeAndAuditAlarm(

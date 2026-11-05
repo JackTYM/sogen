@@ -101,28 +101,57 @@ namespace sogen
         uint32_t attributes{};
     };
 
+    struct token_group_entry
+    {
+        std::vector<uint8_t> sid{};
+        uint32_t attributes{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write_vector(this->sid);
+            buffer.write(this->attributes);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read_vector(this->sid);
+            buffer.read(this->attributes);
+        }
+    };
+
     struct process_token : ref_counted_object
     {
         // Unset for a handle to the owning process's own primary token, whose privileges live in
         // process_context::privileges.
         std::optional<std::vector<token_privilege>> privileges{};
 
+        std::optional<std::vector<token_group_entry>> groups{};
+
+        // Set for tokens that do not describe the creating process's account; a child created with one runs as the default user.
+        bool default_user{false};
+
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
+            buffer.write(this->default_user);
             buffer.write(this->privileges.has_value());
             if (this->privileges)
             {
                 buffer.write_vector(*this->privileges);
             }
+
+            buffer.write_optional(this->groups);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
+            buffer.read(this->default_user);
             this->privileges.reset();
             if (buffer.read<bool>())
             {
                 buffer.read_vector(this->privileges.emplace());
             }
+
+            buffer.read_optional(this->groups);
         }
     };
 
@@ -859,6 +888,19 @@ namespace sogen
         }
     };
 
+    struct directory_change_request
+    {
+        uint32_t thread_id{};
+        uint64_t event{};
+        uint64_t apc_routine{};
+        uint64_t apc_context{};
+        uint64_t io_status_block{};
+        uint64_t buffer{};
+        uint32_t length{};
+        uint32_t completion_filter{};
+        bool watch_tree{};
+    };
+
     struct file : ref_counted_object
     {
         utils::file_handle handle{};
@@ -869,6 +911,7 @@ namespace sogen
         ACCESS_MASK granted_access{};
         uint32_t file_mode{}; // FileModeInformation
         uint8_t drive_number{'c' - 'a' + 1};
+        std::optional<directory_change_request> pending_change_notification{};
 
         bool is_file() const
         {

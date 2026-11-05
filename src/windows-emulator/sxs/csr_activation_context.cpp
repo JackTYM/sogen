@@ -8,12 +8,23 @@ namespace sogen
 {
     namespace
     {
+        constexpr uint32_t basesrv_create_process = 0x1001D;
         constexpr uint32_t basesrv_create_activation_context = 0x1001E;
 
         // CSR_API_MESSAGE, after the PORT_MESSAGE header.
         constexpr uint64_t csr_api_number_offset = 0x08;
         constexpr uint64_t csr_return_value_offset = 0x0C;
         constexpr uint64_t csr_payload_offset = 0x18;
+
+        // BASE_CREATEPROCESS_MSG as the 64-bit csrss receives it (WoW64 callers are thunked to this layout):
+        // ProcessHandle first, the embedded BASE_SXS_CREATEPROCESS_MSG at +0x38. kernelbase reads the
+        // compatibility csrss derived from the child's manifest back out of that message: the newest
+        // supported OS as a {major, minor} WORD pair at Sxs+0xA4 and maxversiontested at Sxs+0xB8.
+        constexpr uint64_t create_process_handle_offset = csr_payload_offset;
+        constexpr uint64_t create_process_sxs_offset = csr_payload_offset + 0x38;
+        constexpr uint64_t sxs_supported_os_offset = create_process_sxs_offset + 0xA4;
+        constexpr uint64_t sxs_max_version_tested_offset = create_process_sxs_offset + 0xB8;
+        constexpr uint64_t create_process_minimum_size = sxs_max_version_tested_offset + sizeof(uint64_t);
 
         // BASE_SXS_CREATE_ACTIVATION_CONTEXT_MSG, as kernel32!BasepCreateActCtx fills it.
         constexpr uint64_t msg_processor_architecture = 0x04;
@@ -139,6 +150,41 @@ namespace sogen
 
             return STATUS_SUCCESS;
         }
+    }
+
+    std::optional<lpc_request_result> try_handle_sxs_create_process(windows_emulator& win_emu, const lpc_request_context& c)
+    {
+        if (c.send_buffer_length < create_process_minimum_size || c.recv_buffer_length < create_process_minimum_size)
+        {
+            return std::nullopt;
+        }
+
+        if (win_emu.emu().read_memory<uint32_t>(c.send_buffer + csr_api_number_offset) != basesrv_create_process)
+        {
+            return std::nullopt;
+        }
+
+        const auto process_handle = win_emu.emu().read_memory<handle>(c.send_buffer + create_process_handle_offset);
+        const auto record = process_handle.value.is_pseudo && process_handle.value.type == handle_types::process
+                                ? win_emu.process.child_processes.find(static_cast<uint32_t>(process_handle.value.id))
+                                : win_emu.process.child_processes.end();
+
+        if (record != win_emu.process.child_processes.end())
+        {
+            const auto manifest_data = sxs::read_image_file_manifest(win_emu.file_sys.translate(record->second.image_path));
+            const auto parsed = manifest_data ? sxs::parse_manifest(*manifest_data) : std::nullopt;
+            const auto compatibility = parsed ? sxs::query_process_compatibility(*parsed) : std::nullopt;
+
+            if (compatibility)
+            {
+                const uint16_t supported_os[]{compatibility->os_major, compatibility->os_minor};
+                win_emu.emu().write_memory(c.recv_buffer + sxs_supported_os_offset, supported_os, sizeof(supported_os));
+                win_emu.emu().write_memory(c.recv_buffer + sxs_max_version_tested_offset, compatibility->max_version_tested);
+            }
+        }
+
+        win_emu.emu().write_memory(c.recv_buffer + csr_return_value_offset, STATUS_SUCCESS);
+        return lpc_request_result{STATUS_SUCCESS, lpc_request_result::reply_in_place};
     }
 
     std::optional<lpc_request_result> try_handle_sxs_create_activation_context(windows_emulator& win_emu, const lpc_request_context& c)

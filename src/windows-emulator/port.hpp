@@ -274,6 +274,7 @@ namespace sogen
         lpc_port_message message{};
         std::vector<uint8_t> payload{};
         std::vector<alpc_reply_handle> handles{};
+        std::optional<uint64_t> message_context{};
 
         [[nodiscard]] ULONG total_length() const
         {
@@ -291,6 +292,7 @@ namespace sogen
             buffer.write(message);
             buffer.write_vector(payload);
             buffer.write_vector(handles);
+            buffer.write_optional(message_context);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -299,6 +301,7 @@ namespace sogen
             buffer.read(message);
             buffer.read_vector(payload);
             buffer.read_vector(handles);
+            buffer.read_optional(message_context);
         }
     };
 
@@ -414,6 +417,8 @@ namespace sogen
 
             this->assert_validity();
             buffer.write_vector(this->reply_queue_);
+            buffer.write_optional(this->completion_port_);
+            buffer.write(this->completion_key_);
             this->port_->serialize(buffer);
         }
 
@@ -427,6 +432,8 @@ namespace sogen
             }
 
             buffer.read_vector(this->reply_queue_);
+            buffer.read_optional(this->completion_port_);
+            buffer.read(this->completion_key_);
             this->setup();
             this->port_->deserialize(buffer);
         }
@@ -451,11 +458,19 @@ namespace sogen
             return !reply_queue_.empty();
         }
 
+        void queue_connection_reply(windows_emulator& win_emu, bool wow64);
+        void queue_async_reply(windows_emulator& win_emu, lpc_message_result reply);
+        void associate_completion_port(windows_emulator& win_emu, handle completion_port, uint64_t completion_key);
+
       private:
         std::u16string port_name_{};
         uint64_t alpc_port_id_{};
         std::unique_ptr<port> port_{};
         std::vector<lpc_message_result> reply_queue_;
+        std::optional<handle> completion_port_{};
+        uint64_t completion_key_{};
+
+        void notify_completion_port(windows_emulator& win_emu) const;
 
         void setup()
         {

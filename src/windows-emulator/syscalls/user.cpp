@@ -1270,6 +1270,12 @@ namespace sogen
                 return resolve_atom_name(c, static_cast<uint16_t>(uc_string.value()));
             }
 
+            const auto string = uc_string.read();
+            if (string.Length == 0 && string.Buffer != 0 && string.Buffer <= std::numeric_limits<uint16_t>::max())
+            {
+                return resolve_atom_name(c, static_cast<uint16_t>(string.Buffer));
+            }
+
             return read_unicode_string(c.emu, uc_string, index);
         }
 
@@ -2867,7 +2873,7 @@ namespace sogen
 
         uint16_t handle_NtUserRegisterClassExWOW(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
-                                                 const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*class_version*/,
+                                                 const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_version,
                                                  const emulator_object<CLSMENUNAME<EmulatorTraits<Emu64>>> class_menu_name,
                                                  const DWORD /*function_id*/, const DWORD flags, const emulator_pointer /*wow*/)
         {
@@ -2901,6 +2907,14 @@ namespace sogen
             c.proc.classes.insert_or_assign(class_name_str, entry);
             c.proc.classes.insert_or_assign(make_atom_class_name(index), entry);
 
+            // Activation-context-redirected classes (e.g. comctl32 v6 "Button") are looked up by
+            // user32 under their versioned name ("6.0.x.y!Button"), which win32k keys the class by.
+            if (const auto class_version_str = class_version ? read_unicode_string(c.emu, class_version) : std::u16string{};
+                !class_version_str.empty() && class_version_str != class_name_str)
+            {
+                c.proc.classes.insert_or_assign(class_version_str, entry);
+            }
+
             return index;
         }
 
@@ -2910,18 +2924,47 @@ namespace sogen
         {
             const auto cls_name = read_unicode_string_or_atom(c, class_name);
 
-            if (const auto it = c.proc.classes.find(cls_name); it != c.proc.classes.end())
+            const auto it = c.proc.classes.find(cls_name);
+            if (it == c.proc.classes.end())
             {
-                if (class_menu_name)
-                {
-                    class_menu_name.write(it->second.menu_name);
-                }
-
-                c.win_emu.memory.release_memory(it->second.guest_obj_addr, 0);
-                c.proc.classes.erase(it);
+                set_guest_last_error(c, 1411); // ERROR_CLASS_DOES_NOT_EXIST
+                return FALSE;
             }
 
-            return c.proc.delete_atom(cls_name);
+            const auto class_object = it->second.guest_obj_addr;
+            std::vector<std::u16string> aliases{};
+            for (const auto& [alias, entry] : c.proc.classes)
+            {
+                if (entry.guest_obj_addr == class_object)
+                {
+                    aliases.push_back(alias);
+                }
+            }
+
+            for (const auto& [index, window] : c.proc.windows)
+            {
+                (void)index;
+                if (std::ranges::any_of(
+                        aliases, [&](const std::u16string& alias) { return utils::string::equals_ignore_case(alias, window.class_name); }))
+                {
+                    set_guest_last_error(c, 1412); // ERROR_CLASS_HAS_WINDOWS
+                    return FALSE;
+                }
+            }
+
+            if (class_menu_name)
+            {
+                class_menu_name.write(it->second.menu_name);
+            }
+
+            c.win_emu.memory.release_memory(class_object, 0);
+            for (const auto& alias : aliases)
+            {
+                c.proc.classes.erase(alias);
+            }
+
+            c.proc.delete_atom(cls_name);
+            return TRUE;
         }
 
         BOOL handle_NtUserGetClassInfoEx(const syscall_context& c, const hinstance /*instance*/,
@@ -2948,6 +2991,7 @@ namespace sogen
                     c.win_emu.callbacks.on_generic_activity("GetClassInfoEx missing class '" + u16_to_u8(name_str) + "'");
                 }
 
+                set_guest_last_error(c, 1411); // ERROR_CLASS_DOES_NOT_EXIST
                 return FALSE;
             }
 
@@ -4053,6 +4097,15 @@ namespace sogen
 
             if (type == FNID_DEFWINDOW)
             {
+                if (msg == WM_CLOSE)
+                {
+                    if (!write_message_call_result(c, result_info, 0))
+                    {
+                        return FALSE;
+                    }
+                    return handle_NtUserDestroyWindow(c, hwnd);
+                }
+
                 const auto result = handle_default_window_proc_message(c, *win, msg, w_param, l_param, ansi);
                 return write_message_call_result(c, result_info, result) ? TRUE : FALSE;
             }
@@ -5821,6 +5874,23 @@ namespace sogen
             });
 
             return oldValue;
+        }
+
+        BOOL handle_NtUserIsTopLevelWindow(const syscall_context& c, const hwnd window)
+        {
+            const auto* win = c.proc.windows.get(window);
+            if (!win)
+            {
+                return FALSE;
+            }
+
+            const hwnd desktop = c.proc.default_desktop_window_handle.bits;
+            return win->parent_handle == 0 || win->parent_handle == desktop || (win->style & WS_CHILD) == 0;
+        }
+
+        BOOL handle_NtUserIsChildWindowDpiMessageEnabled()
+        {
+            return FALSE;
         }
 
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, const hwnd child_hwnd, const UINT flags)

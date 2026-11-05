@@ -681,6 +681,10 @@ namespace sogen
                     return STATUS_SUCCESS;
                 case AFD_SET_INFORMATION:
                     return this->ioctl_set_information(win_emu, c);
+                case AFD_ADDRESS_LIST_QUERY:
+                    return ioctl_address_list_query(win_emu, c);
+                case AFD_ADDRESS_LIST_CHANGE:
+                    return this->ioctl_address_list_change(win_emu, c);
                 case AFD_GET_INFORMATION:
                 case AFD_QUERY_HANDLES:
                 case AFD_TRANSPORT_IOCTL:
@@ -709,6 +713,51 @@ namespace sogen
                 }
 
                 return STATUS_SUCCESS;
+            }
+
+            // SIO_ADDRESS_LIST_QUERY: the input is the endpoint's USHORT address family and AFD answers with a
+            // TRANSPORT_ADDRESS (LONG count followed by TA_ADDRESS entries), which mswsock converts into the
+            // caller's SOCKET_ADDRESS_LIST. The emulator exposes no interface addresses, so the list is empty.
+            static NTSTATUS ioctl_address_list_query(windows_emulator& win_emu, const io_device_context& c)
+            {
+                if (c.input_buffer_length < sizeof(USHORT) || c.output_buffer_length < sizeof(LONG))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                win_emu.emu().write_memory<LONG>(c.output_buffer, 0);
+
+                if (c.io_status_block)
+                {
+                    status_block block{};
+                    block.Information = sizeof(LONG);
+                    c.io_status_block.write(block);
+                }
+
+                return STATUS_SUCCESS;
+            }
+
+            // SIO_ADDRESS_LIST_CHANGE completes only when the local address list changes, which never happens
+            // here, so a blocking request stays pending; a non-blocking one fails with WSAEWOULDBLOCK.
+            NTSTATUS ioctl_address_list_change(windows_emulator& win_emu, const io_device_context& c)
+            {
+                if (this->executing_delayed_ioctl_)
+                {
+                    return STATUS_PENDING;
+                }
+
+                if (c.input_buffer_length < sizeof(USHORT))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (this->non_blocking_)
+                {
+                    return STATUS_DEVICE_NOT_READY;
+                }
+
+                this->delay_ioctrl(win_emu, c);
+                return STATUS_PENDING;
             }
 
             NTSTATUS ioctl_connect(windows_emulator& win_emu, const io_device_context& c)

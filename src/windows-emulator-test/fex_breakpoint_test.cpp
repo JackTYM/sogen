@@ -3,8 +3,13 @@
 #if defined(__APPLE__) || defined(__ANDROID__)
 #include <memory_manager.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <functional>
+#include <memory>
+#include <optional>
+#include <vector>
 #endif
 
 namespace sogen::test
@@ -1009,6 +1014,189 @@ namespace sogen::test
         }
 
         emu->delete_hook(hook);
+    }
+
+    struct write_watch_record
+    {
+        uint64_t address{};
+        size_t size{};
+        uint32_t value{};
+        uint64_t rip{};
+    };
+
+    struct write_watch_fixture
+    {
+        std::unique_ptr<x86_64_emulator> emu{};
+        std::unique_ptr<memory_manager> memory{};
+        uint64_t code{};
+        uint64_t data{};
+    };
+
+    std::optional<write_watch_fixture> create_write_watch_fixture(const std::array<uint8_t, 11>& guest_code)
+    {
+        write_watch_fixture fixture{.emu = try_create_fex_emulator()};
+        if (!fixture.emu)
+        {
+            return std::nullopt;
+        }
+
+        fixture.memory = std::make_unique<memory_manager>(*fixture.emu);
+        fixture.code = setup_guest_code(*fixture.emu, *fixture.memory, guest_code);
+        fixture.data = fixture.memory->allocate_memory(0x1000, memory_permission::read_write);
+        stop_on_interrupt(*fixture.emu);
+
+        fixture.emu->reg(x86_register::rip, fixture.code);
+        fixture.emu->reg(x86_register::rbx, fixture.data);
+        fixture.emu->reg<uint32_t>(x86_register::eax, 0x11111111);
+        fixture.emu->reg<uint32_t>(x86_register::ecx, 0x22222222);
+        return fixture;
+    }
+
+    // mov [rbx], eax; mov [rbx+8], eax; jmp $+2; mov [rbx+8], ecx; hlt
+    constexpr std::array<uint8_t, 11> write_watch_guest_code = {0x89, 0x03, 0x89, 0x43, 0x08, 0xEB, 0x00, 0x89, 0x4B, 0x08, 0xF4};
+
+    TEST(FexWriteWatchTest, ReportsEveryWriteToTheWatchedRangeWithItsValue)
+    {
+        // mov [rbx], eax; mov [rbx+8], eax; mov [rbx+8], ecx; hlt
+        constexpr std::array<uint8_t, 11> guest_code = {0x89, 0x03, 0x89, 0x43, 0x08, 0x89, 0x4B, 0x08, 0xF4, 0x90, 0x90};
+        auto fixture = create_write_watch_fixture(guest_code);
+        if (!fixture)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+        auto& emu = *fixture->emu;
+        ASSERT_NE(fixture->code, 0u);
+        ASSERT_NE(fixture->data, 0u);
+
+        std::vector<write_watch_record> hits{};
+        emu.hook_memory_write(fixture->data + 8, 4, [&](cpu_interface&, const uint64_t address, const void* value, const size_t size) {
+            write_watch_record record{.address = address, .size = size, .rip = emu.reg<uint64_t>(x86_register::rip)};
+            std::memcpy(&record.value, value, std::min(size, sizeof(record.value)));
+            hits.push_back(record);
+        });
+
+        emu.start(0);
+
+        ASSERT_EQ(hits.size(), 2u);
+        EXPECT_EQ(hits[0].address, fixture->data + 8);
+        EXPECT_EQ(hits[0].size, 4u);
+        EXPECT_EQ(hits[0].value, 0x11111111u);
+        EXPECT_EQ(hits[1].address, fixture->data + 8);
+        EXPECT_EQ(hits[1].value, 0x22222222u);
+        for (const auto& hit : hits)
+        {
+            EXPECT_GE(hit.rip, fixture->code + 5);
+            EXPECT_LE(hit.rip, fixture->code + 8);
+        }
+
+        EXPECT_EQ(emu.read_memory<uint32_t>(fixture->data), 0x11111111u);
+        EXPECT_EQ(emu.read_memory<uint32_t>(fixture->data + 8), 0x22222222u);
+    }
+
+    TEST(FexWriteWatchTest, StoppingCallbackResumesAfterTheWriteAndDeletionDisarmsIt)
+    {
+        auto fixture = create_write_watch_fixture(write_watch_guest_code);
+        if (!fixture)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+        auto& emu = *fixture->emu;
+        ASSERT_NE(fixture->code, 0u);
+        ASSERT_NE(fixture->data, 0u);
+
+        int hit_count = 0;
+        auto* hook = emu.hook_memory_write(fixture->data + 8, 4, [&](cpu_interface& cpu, uint64_t, const void*, size_t) {
+            ++hit_count;
+            cpu.stop();
+        });
+
+        emu.start(0);
+        ASSERT_GE(hit_count, 1);
+        EXPECT_EQ(emu.read_memory<uint32_t>(fixture->data + 8), hit_count == 1 ? 0x11111111u : 0x22222222u);
+
+        const auto hits_before_deletion = hit_count;
+        emu.delete_hook(hook);
+        emu.start(0);
+        EXPECT_EQ(hit_count, hits_before_deletion);
+        EXPECT_EQ(emu.read_memory<uint32_t>(fixture->data + 8), 0x22222222u);
+        EXPECT_EQ(emu.reg<uint64_t>(x86_register::rip), fixture->code + 10);
+    }
+
+    TEST(FexWriteWatchTest, SingleStepReportsTheWriteOfTheSteppedInstruction)
+    {
+        auto fixture = create_write_watch_fixture(write_watch_guest_code);
+        if (!fixture)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+        auto& emu = *fixture->emu;
+        ASSERT_NE(fixture->code, 0u);
+        ASSERT_NE(fixture->data, 0u);
+
+        std::vector<uint64_t> hit_rips{};
+        emu.hook_memory_write(fixture->data + 8, 4, [&](cpu_interface&, uint64_t, const void*, size_t) {
+            hit_rips.push_back(emu.reg<uint64_t>(x86_register::rip));
+        });
+
+        emu.reg(x86_register::rip, fixture->code + 2);
+        emu.start(1);
+        ASSERT_EQ(hit_rips.size(), 1u);
+        EXPECT_EQ(hit_rips[0], fixture->code + 5);
+        EXPECT_EQ(emu.reg<uint64_t>(x86_register::rip), fixture->code + 5);
+        EXPECT_EQ(emu.read_memory<uint32_t>(fixture->data + 8), 0x11111111u);
+        EXPECT_EQ(emu.reg<uint64_t>(x86_register::rflags) & 0x100, 0u);
+    }
+
+    TEST(FexWriteWatchTest, WatchedWritesDoNotDisturbTheGuestFlags)
+    {
+        // add al, 1; mov [rbx+8], eax; lahf; mov dl, ah; hlt
+        constexpr std::array<uint8_t, 11> guest_code = {0x04, 0x01, 0x89, 0x43, 0x08, 0x9F, 0x88, 0xE2, 0xF4, 0x90, 0x90};
+
+        const auto run = [&](const bool watch) -> std::optional<uint8_t> {
+            auto fixture = create_write_watch_fixture(guest_code);
+            if (!fixture || fixture->code == 0 || fixture->data == 0)
+            {
+                return std::nullopt;
+            }
+            if (watch)
+            {
+                fixture->emu->hook_memory_write(fixture->data + 8, 4, [](cpu_interface&, uint64_t, const void*, size_t) {});
+            }
+            fixture->emu->reg(x86_register::rax, 0x7F);
+            fixture->emu->start(0);
+            return fixture->emu->reg<uint8_t>(x86_register::dl);
+        };
+
+        const auto unwatched = run(false);
+        if (!unwatched)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+        EXPECT_EQ(run(true), unwatched);
+    }
+
+    TEST(FexWriteWatchTest, HostWritesIntoAWatchedPageDoNotFault)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        memory_manager memory{*emu};
+        const uint64_t data = memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(data, 0u);
+
+        int hit_count = 0;
+        emu->hook_memory_write(data + 8, 4, [&](cpu_interface&, uint64_t, const void*, size_t) { ++hit_count; });
+
+        emu->write_memory<uint32_t>(data + 8, 0x33333333);
+        ASSERT_TRUE(memory.protect_memory(data, 0x1000, memory_permission::read_write));
+        emu->write_memory<uint32_t>(data, 0x44444444);
+
+        EXPECT_EQ(emu->read_memory<uint32_t>(data + 8), 0x33333333u);
+        EXPECT_EQ(emu->read_memory<uint32_t>(data), 0x44444444u);
+        EXPECT_EQ(hit_count, 0);
     }
 #endif
 } // namespace sogen::test

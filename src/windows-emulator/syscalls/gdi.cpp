@@ -36,8 +36,8 @@ namespace sogen
             constexpr uint32_t k_gdi_font_attr_size = 0x40;
             constexpr uint32_t k_gdi_region_attr_size = 0x20;
 
-            constexpr uint32_t k_gdi_dc_attr_hbrush_offset = 0x10;
-            constexpr uint32_t k_gdi_dc_attr_hpen_offset = 0x18;
+            constexpr uint32_t k_gdi_dc_attr_hbrush_offset = 0xA0;
+            constexpr uint32_t k_gdi_dc_attr_hpen_offset = 0xA8;
             constexpr uint32_t k_gdi_dc_attr_background_color_offset = 0x20; // DC_ATTR.crBackgroundClr (SetBkColor)
             constexpr uint32_t k_gdi_dc_attr_text_color_offset = 0x28;       // DC_ATTR.crForegroundClr (SetTextColor)
             constexpr uint32_t k_gdi_dc_attr_pt_current_offset = 0xD8;
@@ -1174,45 +1174,56 @@ namespace sogen
                     uint8_t type;
                     uint32_t attr_size;
                     bool mirror_to_default_gui_slot;
+                    uint32_t color;
                 };
 
-                constexpr std::array<stock_seed, 6> seeds = {
-                    stock_seed{
-                        .index = k_stock_white_brush_index,
+                const auto brush = [](const uint32_t index, const uint32_t color) {
+                    return stock_seed{
+                        .index = index,
                         .type = k_gdi_brush_type,
                         .attr_size = k_gdi_brush_attr_size,
                         .mirror_to_default_gui_slot = false,
-                    },
-                    stock_seed{
-                        .index = k_stock_black_pen_index,
+                        .color = color,
+                    };
+                };
+                const auto pen = [](const uint32_t index, const uint32_t color) {
+                    return stock_seed{
+                        .index = index,
                         .type = k_gdi_pen_type,
                         .attr_size = k_gdi_pen_attr_size,
                         .mirror_to_default_gui_slot = false,
-                    },
-                    stock_seed{
-                        .index = k_stock_system_font_index,
+                        .color = color,
+                    };
+                };
+                const auto font = [](const uint32_t index, const bool mirror_to_default_gui_slot) {
+                    return stock_seed{
+                        .index = index,
                         .type = k_gdi_font_type,
                         .attr_size = k_gdi_font_attr_size,
-                        .mirror_to_default_gui_slot = false,
-                    },
-                    stock_seed{
-                        .index = k_stock_default_gui_font_index,
-                        .type = k_gdi_font_type,
-                        .attr_size = k_gdi_font_attr_size,
-                        .mirror_to_default_gui_slot = true,
-                    },
-                    stock_seed{
-                        .index = k_stock_dc_brush_index,
-                        .type = k_gdi_brush_type,
-                        .attr_size = k_gdi_brush_attr_size,
-                        .mirror_to_default_gui_slot = false,
-                    },
-                    stock_seed{
-                        .index = k_stock_dc_pen_index,
-                        .type = k_gdi_pen_type,
-                        .attr_size = k_gdi_pen_attr_size,
-                        .mirror_to_default_gui_slot = false,
-                    },
+                        .mirror_to_default_gui_slot = mirror_to_default_gui_slot,
+                        .color = 0,
+                    };
+                };
+
+                const std::array seeds = {
+                    brush(k_stock_white_brush_index, 0x00FFFFFFu),
+                    brush(0x01, 0x00C0C0C0u),
+                    brush(0x02, 0x00808080u),
+                    brush(0x03, 0x00404040u),
+                    brush(0x04, 0x00000000u),
+                    brush(0x05, 0x00000000u),
+                    pen(k_stock_black_pen_index, 0x00000000u),
+                    pen(0x07, 0x00000000u),
+                    pen(0x08, 0x00000000u),
+                    font(0x0A, false),
+                    font(0x0B, false),
+                    font(0x0C, false),
+                    font(k_stock_system_font_index, false),
+                    font(0x0E, false),
+                    font(0x10, false),
+                    font(k_stock_default_gui_font_index, true),
+                    brush(k_stock_dc_brush_index, k_default_system_colors[15]),
+                    pen(k_stock_dc_pen_index, 0x00000000u),
                 };
 
                 for (const auto& seed : seeds)
@@ -1230,14 +1241,9 @@ namespace sogen
 
                     const uint64_t handle64 = handle;
                     write_gdi_object_slot(c, seed.index, handle64);
-                    if (seed.type == k_gdi_brush_type)
+                    if (seed.type == k_gdi_brush_type || seed.type == k_gdi_pen_type)
                     {
-                        const uint32_t color = seed.index == k_stock_white_brush_index ? 0x00FFFFFFu : k_default_system_colors[15];
-                        set_gdi_object_color(c, handle, k_gdi_brush_type, color);
-                    }
-                    else if (seed.type == k_gdi_pen_type)
-                    {
-                        set_gdi_object_color(c, handle, k_gdi_pen_type, 0x00000000u);
+                        set_gdi_object_color(c, handle, seed.type, seed.color);
                     }
 
                     if (seed.mirror_to_default_gui_slot)
@@ -1268,6 +1274,20 @@ namespace sogen
                 {
                     const auto handle_value = static_cast<uint32_t>(system_font);
                     c.emu.write_memory(dc_attr + k_gdi_dc_attr_font_offset, &handle_value, sizeof(handle_value));
+                }
+
+                const uint64_t white_brush = read_gdi_object_slot(c, k_stock_white_brush_index);
+                if (white_brush != 0)
+                {
+                    const auto handle_value = static_cast<uint32_t>(white_brush);
+                    c.emu.write_memory(dc_attr + k_gdi_dc_attr_hbrush_offset, &handle_value, sizeof(handle_value));
+                }
+
+                const uint64_t black_pen = read_gdi_object_slot(c, k_stock_black_pen_index);
+                if (black_pen != 0)
+                {
+                    const auto handle_value = static_cast<uint32_t>(black_pen);
+                    c.emu.write_memory(dc_attr + k_gdi_dc_attr_hpen_offset, &handle_value, sizeof(handle_value));
                 }
             }
 
@@ -2710,6 +2730,40 @@ namespace sogen
             return TRUE;
         }
 
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context& c, const hdc dc, const emulator_pointer bounds, const uint32_t flags)
+        {
+            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            RECT rect{};
+            const auto has_rect = bounds != 0 && c.win_emu.memory.try_read_memory(bounds, &rect, sizeof(rect));
+
+            const auto previous_flags = it->second.bounds.flags();
+            it->second.bounds.update(flags, has_rect ? &rect : nullptr);
+            return previous_flags;
+        }
+
+        uint32_t handle_NtGdiGetBoundsRect(const syscall_context& c, const hdc dc, const emulator_pointer bounds, const uint32_t flags)
+        {
+            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            const auto previous_flags = it->second.bounds.flags();
+            if (bounds != 0)
+            {
+                c.emu.write_memory(bounds, &it->second.bounds.bounds, sizeof(RECT));
+            }
+
+            it->second.bounds.update(flags & gdi_bounds_state::reset_flag, nullptr);
+            return previous_flags;
+        }
+
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, const hdc dc, const int /*x*/, const int /*y*/, const emulator_pointer prev)
         {
             if (dc == 0)
@@ -3125,13 +3179,42 @@ namespace sogen
             return required;
         }
 
-        NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& c, const uint32_t action, const uint32_t param,
-                                                   const emulator_pointer pv_param, const uint32_t win_ini)
+        BOOL handle_NtUserSystemParametersInfo(const syscall_context& c, const uint32_t action, const uint32_t param,
+                                               const emulator_pointer pv_param, const uint32_t win_ini)
         {
             if (std::getenv("SOGEN_DEBUG_SPI"))
             {
                 c.win_emu.log.error("NtUserSystemParametersInfo: action=0x%x param=0x%x pv_param=0x%llx win_ini=0x%x\n", action, param,
                                     static_cast<unsigned long long>(pv_param), win_ini);
+            }
+
+            constexpr uint32_t k_spi_getmousehovertime = 0x0066;
+            constexpr uint32_t k_spi_getkeyboardcues = 0x100A;
+            constexpr uint32_t k_spi_getflatmenu = 0x1022;
+
+            if (pv_param != 0)
+            {
+                std::optional<uint32_t> scalar{};
+                switch (action)
+                {
+                case k_spi_getmousehovertime:
+                    scalar = 400;
+                    break;
+                case k_spi_getkeyboardcues:
+                    scalar = FALSE;
+                    break;
+                case k_spi_getflatmenu:
+                    scalar = TRUE;
+                    break;
+                default:
+                    break;
+                }
+
+                if (scalar)
+                {
+                    c.emu.write_memory(pv_param, &*scalar, sizeof(*scalar));
+                    return TRUE;
+                }
             }
 
             if (action != SPI_GETNONCLIENTMETRICS || pv_param == 0 || param < offsetof(EMU_NONCLIENTMETRICSW, iPaddedBorderWidth))
@@ -3168,7 +3251,7 @@ namespace sogen
 
             const auto write_size = std::min<uint32_t>(param, sizeof(metrics));
             c.emu.write_memory(pv_param, &metrics, write_size);
-            return STATUS_SUCCESS;
+            return TRUE;
         }
 
         // SystemParametersInfoForDpi scales DPI-dependent metrics for an explicitly given DPI instead of the
@@ -3176,8 +3259,8 @@ namespace sogen
         // (see the identity conversion in handle_NtUserTransformPoint), so there is no scaling to apply and
         // this can share NtUserSystemParametersInfo's own metrics table verbatim; the requested dpi is
         // therefore unused, matching the fact that this variant never notifies/updates the system setting.
-        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, const uint32_t action, const uint32_t param,
-                                                         const emulator_pointer pv_param, const uint32_t /*dpi*/)
+        BOOL handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, const uint32_t action, const uint32_t param,
+                                                     const emulator_pointer pv_param, const uint32_t /*dpi*/)
         {
             return handle_NtUserSystemParametersInfo(c, action, param, pv_param, 0);
         }
@@ -4839,8 +4922,9 @@ namespace sogen
                             info.ValueType, info.PhysicalAdapterIndex);
                 }
 
-                std::vector<uint8_t> zeros(query.PrivateDriverDataSize, 0);
-                c.emu.write_memory(query.pPrivateDriverData, zeros.data(), zeros.size());
+                const auto output_fields_offset = offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, OutputValueSize);
+                std::vector<uint8_t> zeros(query.PrivateDriverDataSize - output_fields_offset, 0);
+                c.emu.write_memory(query.pPrivateDriverData + output_fields_offset, zeros.data(), zeros.size());
 
                 const auto is_adapterkey_query =
                     info.QueryType == static_cast<UINT32>(D3DDDI_QUERYREGISTRY_TYPE::D3DDDI_QUERYREGISTRY_ADAPTERKEY);

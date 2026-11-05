@@ -144,6 +144,41 @@ namespace sogen::sxs
             }
         }
 
+        void read_compatibility(const xml_element& assembly, manifest& result)
+        {
+            constexpr std::u16string_view compatibility_namespace = u"urn:schemas-microsoft-com:compatibility.v1";
+
+            for (const auto* compatibility : assembly.children_named(u"compatibility"))
+            {
+                if (compatibility->namespace_uri != compatibility_namespace)
+                {
+                    continue;
+                }
+
+                for (const auto* application : compatibility->children_named(u"application"))
+                {
+                    for (const auto* supported_os : application->children_named(u"supportedOS"))
+                    {
+                        if (const auto id = parse_guid(attribute_or_empty(*supported_os, u"Id")))
+                        {
+                            result.compatibility.push_back({*id, compatibility_element_type::os, 0});
+                        }
+                    }
+
+                    for (const auto* max_version : application->children_named(u"maxversiontested"))
+                    {
+                        if (const auto version = parse_version(attribute_or_empty(*max_version, u"Id")))
+                        {
+                            const auto packed = (static_cast<uint64_t>((*version)[0]) << 48) |
+                                                (static_cast<uint64_t>((*version)[1]) << 32) |
+                                                (static_cast<uint64_t>((*version)[2]) << 16) | (*version)[3];
+                            result.compatibility.push_back({{}, compatibility_element_type::max_version_tested, packed});
+                        }
+                    }
+                }
+            }
+        }
+
         void read_trust_info(const xml_element& assembly, manifest& result)
         {
             const auto* trust_info = assembly.child(u"trustInfo");
@@ -257,6 +292,63 @@ namespace sogen::sxs
         return result;
     }
 
+    std::optional<std::array<std::byte, 16>> parse_guid(const std::u16string_view text)
+    {
+        std::u16string digits{};
+        for (const auto c : text)
+        {
+            if (c != u'{' && c != u'}' && c != u'-')
+            {
+                digits.push_back(c);
+            }
+        }
+
+        if (digits.size() != 32)
+        {
+            return std::nullopt;
+        }
+
+        std::array<uint8_t, 16> canonical{};
+        for (size_t i = 0; i < canonical.size(); ++i)
+        {
+            uint32_t value = 0;
+            for (size_t nibble = 0; nibble < 2; ++nibble)
+            {
+                const auto c = digits[i * 2 + nibble];
+                uint32_t digit = 0;
+                if (c >= u'0' && c <= u'9')
+                {
+                    digit = static_cast<uint32_t>(c - u'0');
+                }
+                else if (c >= u'a' && c <= u'f')
+                {
+                    digit = static_cast<uint32_t>(c - u'a' + 10);
+                }
+                else if (c >= u'A' && c <= u'F')
+                {
+                    digit = static_cast<uint32_t>(c - u'A' + 10);
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+
+                value = value * 16 + digit;
+            }
+
+            canonical[i] = static_cast<uint8_t>(value);
+        }
+
+        constexpr std::array<size_t, 16> guid_memory_order{3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15};
+        std::array<std::byte, 16> guid{};
+        for (size_t i = 0; i < guid.size(); ++i)
+        {
+            guid[i] = static_cast<std::byte>(canonical[guid_memory_order[i]]);
+        }
+
+        return guid;
+    }
+
     std::optional<manifest> parse_manifest(const std::span<const std::byte> data)
     {
         const auto document = parse_xml(data);
@@ -282,6 +374,7 @@ namespace sogen::sxs
         read_files(*document, result);
         read_settings(*document, result);
         read_trust_info(*document, result);
+        read_compatibility(*document, result);
         return result;
     }
 }

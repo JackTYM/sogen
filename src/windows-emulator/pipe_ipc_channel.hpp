@@ -58,6 +58,10 @@ namespace sogen
         // For `process_alive`: whether the announced process's image is native 64-bit, so a sibling
         // that never reports its own PEB32 can still answer ProcessWow64Information.
         std::optional<bool> native_64bit{};
+
+        // For `process_alive` of a 32-bit process: its PEB32 address, so a sibling that cannot reach the process's
+        // memory can still answer ProcessWow64Information with the real value.
+        std::optional<uint64_t> peb32_address{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via

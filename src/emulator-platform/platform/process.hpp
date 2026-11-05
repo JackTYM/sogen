@@ -962,6 +962,11 @@ namespace sogen
         EMULATOR_CAST(EmulatorTraits<Emu64>::PVOID, PSID) PrimaryGroup;
     };
 
+    struct TOKEN_APPCONTAINER_INFORMATION64
+    {
+        EMULATOR_CAST(EmulatorTraits<Emu64>::PVOID, PSID) TokenAppContainer;
+    };
+
 #ifndef OS_WINDOWS
     struct ACL
     {
@@ -1425,6 +1430,15 @@ namespace sogen
         ULONG Version;
         ULONG Reserved;
         uint64_t Callback;
+    };
+
+    constexpr ULONG PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
+
+    struct POWER_THROTTLING_PROCESS_STATE
+    {
+        ULONG Version;
+        ULONG ControlMask;
+        ULONG StateMask;
     };
 
     // NOLINTEND(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)

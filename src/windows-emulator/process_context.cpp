@@ -516,6 +516,35 @@ namespace sogen
             env_map[u"TEMP"] = user_profile + u"\\AppData\\Local\\Temp";
             env_map[u"USERPROFILE"] = user_profile;
 
+            // userenv's CreateEnvironmentBlock derives these from ProfileList, not from Session Manager\Environment.
+            const std::filesystem::path profile_list_path = R"(\Registry\Machine\Software\Microsoft\Windows NT\CurrentVersion\ProfileList)";
+            if (const auto program_data = registry_utils::read_registry_string(registry, profile_list_path, "ProgramData"))
+            {
+                const auto expanded = expand_environment_string(*program_data, env_map);
+                env_map[u"ALLUSERSPROFILE"] = expanded;
+                env_map[u"ProgramData"] = expanded;
+            }
+
+            const std::filesystem::path current_version_path = R"(\Registry\Machine\Software\Microsoft\Windows\CurrentVersion)";
+            const auto set_from_current_version = [&](const std::u16string_view variable, const char* value_name) {
+                if (const auto value = registry_utils::read_registry_string(registry, current_version_path, value_name))
+                {
+                    env_map[std::u16string(variable)] = *value;
+                }
+            };
+
+            set_from_current_version(u"ProgramFiles", "ProgramFilesDir");
+            set_from_current_version(u"ProgramFiles(x86)", "ProgramFilesDir (x86)");
+            set_from_current_version(u"ProgramW6432", "ProgramW6432Dir");
+            set_from_current_version(u"CommonProgramFiles", "CommonFilesDir");
+            set_from_current_version(u"CommonProgramFiles(x86)", "CommonFilesDir (x86)");
+            set_from_current_version(u"CommonProgramW6432", "CommonW6432Dir");
+
+            if (const auto public_profile = registry_utils::read_registry_string(registry, profile_list_path, "Public"))
+            {
+                env_map[u"PUBLIC"] = expand_environment_string(*public_profile, env_map);
+            }
+
             for (const auto& [key, value] : app_settings.environment)
             {
                 env_map[key] = value;
@@ -1071,6 +1100,7 @@ namespace sogen
         buffer.write(this->events);
         buffer.write(this->files);
         buffer.write_map(this->file_locks);
+        buffer.write_map(this->handle_flags);
         buffer.write(this->sections);
         buffer.write(this->devices);
         buffer.write(this->console_handle);
@@ -1182,6 +1212,7 @@ namespace sogen
         buffer.read(this->events);
         buffer.read(this->files);
         buffer.read_map(this->file_locks);
+        buffer.read_map(this->handle_flags);
         buffer.read(this->sections);
         buffer.read(this->devices);
         buffer.read(this->console_handle);

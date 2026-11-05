@@ -811,7 +811,15 @@ namespace sogen
                            : STATUS_MEMORY_NOT_ALLOCATED;
             }
 
-            if (commit && !reserve && c.win_emu.memory.commit_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection))
+            const auto is_sec_reserve_view = [&] {
+                const auto view = c.proc.section_views.find(c.win_emu.memory.get_region_info(potential_base).allocation_base);
+                return view != c.proc.section_views.end() && view->second->allocation_attributes == SEC_RESERVE;
+            };
+
+            if (commit && !reserve &&
+                (c.win_emu.memory.commit_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection) ||
+                 (is_sec_reserve_view() && c.win_emu.memory.commit_reserved_section_view_memory(
+                                               potential_base, static_cast<size_t>(allocation_bytes), *protection))))
             {
                 c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, true);
                 trace_vm_accounting("NtAllocateVirtualMemory", true, allocation_bytes);

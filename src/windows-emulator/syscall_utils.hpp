@@ -360,4 +360,24 @@ namespace sogen
         fflush(stderr);
     }
 
+    constexpr uint32_t DIRECTORY_ACTION_ADDED = 1;
+    constexpr uint32_t DIRECTORY_ACTION_REMOVED = 2;
+    constexpr uint32_t DIRECTORY_ACTION_MODIFIED = 3;
+    constexpr uint32_t DIRECTORY_ACTION_RENAMED_OLD_NAME = 4;
+    constexpr uint32_t DIRECTORY_ACTION_RENAMED_NEW_NAME = 5;
+    constexpr uint32_t DIRECTORY_CHANGE_NAMES = 0x3;
+    constexpr uint32_t DIRECTORY_CHANGE_CONTENTS = 0x18;
+
+    struct directory_change
+    {
+        std::filesystem::path host_path{};
+        uint32_t action{};
+        uint32_t filter_mask{};
+    };
+
+    namespace syscalls
+    {
+        void notify_directory_changes(const syscall_context& c, const std::vector<directory_change>& changes);
+    }
+
 } // namespace sogen

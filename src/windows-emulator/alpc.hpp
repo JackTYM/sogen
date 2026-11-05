@@ -29,6 +29,8 @@ namespace sogen
         constexpr uint32_t msgflg_wait_alertable = 0x200000;
         constexpr uint32_t msgflg_wow64_call = 0x80000000;
 
+        constexpr uint32_t associate_completion_port_information = 2;
+
         enum class port_kind : uint8_t
         {
             connection,
@@ -66,6 +68,7 @@ namespace sogen
             uint32_t flags{};
             uint64_t max_message_length{};
             uint64_t connection_max_message_length{};
+            bool asynchronous_connect{};
             bool disconnected{};
 
             std::deque<message> queue{};
@@ -170,7 +173,28 @@ namespace sogen
         NTSTATUS query_information(const syscall_context& c, uint64_t port_id, uint32_t info_class, uint64_t information, uint32_t length,
                                    uint64_t return_length);
         NTSTATUS set_information(const syscall_context& c, uint64_t port_id, uint32_t info_class, uint64_t information, uint32_t length);
+
+        struct completion_association
+        {
+            handle port{};
+            uint64_t key{};
+        };
+
+        NTSTATUS read_completion_association(const syscall_context& c, uint64_t information, uint32_t length, completion_association& out);
         void close_port(windows_emulator& win_emu, uint64_t port_id);
+        void close_all_ports(windows_emulator& win_emu);
+
+        struct message_context_fields
+        {
+            uint64_t port_context{};
+            uint64_t message_context{};
+            uint32_t message_id{};
+            uint32_t callback_id{};
+        };
+
+        std::optional<uint64_t> read_send_message_context(const syscall_context& c, uint64_t attributes_address, bool wow64);
+        void write_message_context_attribute(windows_emulator& win_emu, uint64_t attributes_address, const message_context_fields& fields,
+                                             bool wow64);
 
         bool has_queued_message(const process_context& proc, uint64_t port_id);
         std::optional<uint32_t> last_received_sender_pid(const process_context& proc, uint64_t port_id);

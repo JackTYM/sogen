@@ -23,6 +23,8 @@ namespace sogen
         namespace
         {
             constexpr ACCESS_MASK PROCESS_DUP_HANDLE = 0x0040;
+            constexpr uint8_t handle_flag_inherit = 0x1;
+            constexpr uint8_t handle_flag_protect_from_close = 0x2;
 
             // DuplicateHandle of a section, event, mutant or semaphore into a child host process. On real
             // Windows the two handles refer to one kernel object. Here the object's state lives in shared
@@ -277,8 +279,20 @@ namespace sogen
             }
 
             auto* handle_store = c.proc.get_handle_store(h);
-            if (handle_store && handle_store->erase(h))
+            if (!handle_store)
             {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            const auto flags = c.proc.handle_flags.find(h.bits);
+            if (flags != c.proc.handle_flags.end() && (flags->second & handle_flag_protect_from_close))
+            {
+                return STATUS_HANDLE_NOT_CLOSABLE;
+            }
+
+            if (handle_store->erase(h))
+            {
+                c.proc.handle_flags.erase(h.bits);
                 return STATUS_SUCCESS;
             }
 
@@ -705,11 +719,13 @@ namespace sogen
 
             if (object_information_class == ObjectHandleFlagInformation)
             {
-                return handle_query<OBJECT_HANDLE_FLAG_INFORMATION>(c.emu, object_information, object_information_length, return_length,
-                                                                    [&](OBJECT_HANDLE_FLAG_INFORMATION& info) {
-                                                                        info.Inherit = 0;
-                                                                        info.ProtectFromClose = 0;
-                                                                    });
+                return handle_query<OBJECT_HANDLE_FLAG_INFORMATION>(
+                    c.emu, object_information, object_information_length, return_length, [&](OBJECT_HANDLE_FLAG_INFORMATION& info) {
+                        const auto flags = c.proc.handle_flags.find(handle.bits);
+                        const uint8_t bits = flags == c.proc.handle_flags.end() ? 0 : flags->second;
+                        info.Inherit = (bits & handle_flag_inherit) != 0;
+                        info.ProtectFromClose = (bits & handle_flag_protect_from_close) != 0;
+                    });
             }
 
             c.win_emu.log.error("Unsupported object info class: %X\n", object_information_class);
@@ -1255,15 +1271,28 @@ namespace sogen
             return handle_NtWaitForSingleObject(c, wait_handle, alertable, timeout);
         }
 
-        NTSTATUS handle_NtSetInformationObject(const syscall_context& c, const handle /*h*/,
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& c, const handle h,
                                                const OBJECT_INFORMATION_CLASS object_information_class,
-                                               const emulator_pointer /*object_information*/, const ULONG object_information_length)
+                                               const emulator_pointer object_information, const ULONG object_information_length)
         {
             if (object_information_class == ObjectHandleFlagInformation)
             {
                 if (object_information_length < sizeof(OBJECT_HANDLE_FLAG_INFORMATION))
                 {
                     return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto info = c.emu.read_memory<OBJECT_HANDLE_FLAG_INFORMATION>(object_information);
+                const auto bits = static_cast<uint8_t>((info.Inherit ? handle_flag_inherit : 0) |
+                                                       (info.ProtectFromClose ? handle_flag_protect_from_close : 0));
+
+                if (bits == 0)
+                {
+                    c.proc.handle_flags.erase(h.bits);
+                }
+                else
+                {
+                    c.proc.handle_flags[h.bits] = bits;
                 }
 
                 return STATUS_SUCCESS;

@@ -722,12 +722,10 @@ namespace sogen
                 }
             }
 
-            // The free-pick retry loop only makes sense when the caller left the target address up to
-            // us (relocation_base == 0) - if the caller specified a real target (mapping a view of an
-            // already-loaded image at that image's own base, so the view's internal absolute pointers
-            // stay correct), picking a different free host address instead would silently relocate the
-            // view away from where the caller actually needs it.
-            if (!mapped && relocation_base == 0)
+            // A caller-specified target (the base of an already-loaded copy of this image) is only
+            // usable while that range is free. If the loaded copy's view still occupies it, Windows
+            // places the additional image view at a new, relocated base, so do the same.
+            if (!mapped)
             {
                 for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
                 {

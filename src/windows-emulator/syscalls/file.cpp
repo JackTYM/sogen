@@ -153,7 +153,14 @@ namespace sogen
                 c.win_emu.log.warn("--> File rename requested: %s --> %s\n", u16_to_u8(f.name).c_str(), u16_to_u8(new_name).c_str());
 
                 std::error_code ec{};
-                const bool file_exists = std::filesystem::exists(c.win_emu.file_sys.translate(new_name), ec);
+                const auto new_host_path = c.win_emu.file_sys.translate(new_name);
+
+                if (!std::filesystem::is_directory(new_host_path.parent_path(), ec))
+                {
+                    return STATUS_OBJECT_PATH_NOT_FOUND;
+                }
+
+                const bool file_exists = std::filesystem::exists(new_host_path, ec);
 
                 if (ec)
                 {
@@ -165,7 +172,11 @@ namespace sogen
                     return STATUS_OBJECT_NAME_EXISTS;
                 }
 
-                f.handle.defer_rename(c.win_emu.file_sys.translate(f.name), c.win_emu.file_sys.translate(new_name));
+                const auto old_host_path = c.win_emu.file_sys.translate(f.name);
+                f.handle.defer_rename(old_host_path, new_host_path);
+
+                notify_directory_changes(c, {{old_host_path, DIRECTORY_ACTION_RENAMED_OLD_NAME, DIRECTORY_CHANGE_NAMES},
+                                             {new_host_path, DIRECTORY_ACTION_RENAMED_NEW_NAME, DIRECTORY_CHANGE_NAMES}});
 
                 return STATUS_SUCCESS;
             }
@@ -277,6 +288,12 @@ namespace sogen
 
                 f->handle.defer_delete(info.DeleteFile ? c.win_emu.file_sys.translate(f->name) : std::filesystem::path{});
 
+                if (info.DeleteFile)
+                {
+                    notify_directory_changes(c,
+                                             {{c.win_emu.file_sys.translate(f->name), DIRECTORY_ACTION_REMOVED, DIRECTORY_CHANGE_NAMES}});
+                }
+
                 return STATUS_SUCCESS;
             }
 
@@ -298,6 +315,12 @@ namespace sogen
                 c.win_emu.callbacks.on_generic_access(wants_delete ? "Marking for deletion" : "Clearing deletion marker", f->name);
 
                 f->handle.defer_delete(wants_delete ? c.win_emu.file_sys.translate(f->name) : std::filesystem::path{});
+
+                if (wants_delete)
+                {
+                    notify_directory_changes(c,
+                                             {{c.win_emu.file_sys.translate(f->name), DIRECTORY_ACTION_REMOVED, DIRECTORY_CHANGE_NAMES}});
+                }
 
                 return STATUS_SUCCESS;
             }
@@ -942,6 +965,41 @@ namespace sogen
                 return ret(STATUS_INFO_LENGTH_MISMATCH);
             }
 
+            if (info_class == FileNetworkOpenInformation)
+            {
+                constexpr auto required_length = sizeof(FILE_NETWORK_OPEN_INFORMATION);
+
+                if (length < required_length)
+                {
+                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                }
+
+                struct compat_stat file_stat{};
+                if (f->handle && !compat_fstat(f->handle.file_descriptor(), &file_stat))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                const bool is_directory = f->handle ? (file_stat.st_mode & S_IFDIR) != 0 : f->is_directory();
+
+                FILE_NETWORK_OPEN_INFORMATION i{};
+                i.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
+                i.ChangeTime = i.LastWriteTime;
+                i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+
+                if (f->handle)
+                {
+                    i.EndOfFile.QuadPart = f->handle.size();
+                    i.AllocationSize.QuadPart = static_cast<LONGLONG>(align_up(i.EndOfFile.QuadPart, 512));
+                }
+
+                c.emu.write_memory(file_information, i);
+
+                return ret(STATUS_SUCCESS, required_length);
+            }
+
             if (info_class == FileBasicInformation || all_info)
             {
                 constexpr auto required_length = sizeof(FILE_BASIC_INFORMATION);
@@ -1388,7 +1446,7 @@ namespace sogen
         void deliver_file_io_completion(const syscall_context& c, const uint64_t event, const uint64_t apc_routine,
                                         const uint64_t apc_context,
                                         const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
-                                        const NTSTATUS status, const uint64_t information)
+                                        const NTSTATUS status, const uint64_t information, emulator_thread* const apc_thread = nullptr)
         {
             if (event)
             {
@@ -1412,16 +1470,17 @@ namespace sogen
                     c.emu.write_memory(io_status_block.value() + sizeof(status32), &information32, sizeof(information32));
                 }
 
-                c.thread().pending_apcs.push_back({
-                    .flags = 0,
-                    .apc_routine = apc_routine,
-                    .apc_argument1 = apc_context,
-                    .apc_argument2 = io_status_block.value(),
-                    .apc_argument3 = 0,
-                    .restamp_io_status_block = c.proc.is_wow64_process && io_status_block,
-                    .io_status = static_cast<int32_t>(static_cast<ULONG>(status)),
-                    .io_information = static_cast<uint32_t>(information),
-                });
+                (apc_thread ? *apc_thread : c.thread())
+                    .pending_apcs.push_back({
+                        .flags = 0,
+                        .apc_routine = apc_routine,
+                        .apc_argument1 = apc_context,
+                        .apc_argument2 = io_status_block.value(),
+                        .apc_argument3 = 0,
+                        .restamp_io_status_block = c.proc.is_wow64_process && io_status_block,
+                        .io_status = static_cast<int32_t>(static_cast<ULONG>(status)),
+                        .io_information = static_cast<uint32_t>(information),
+                    });
             }
         }
 
@@ -1677,6 +1736,8 @@ namespace sogen
 
             const auto bytes_written = fwrite(temp_buffer.data(), 1, temp_buffer.size(), f->handle);
             (void)fflush(f->handle);
+            c.win_emu.observe_file_write_for_scheduled_input(temp_buffer);
+            notify_directory_changes(c, {{f->host_path, DIRECTORY_ACTION_MODIFIED, DIRECTORY_CHANGE_CONTENTS}});
 
             if (io_status_block)
             {
@@ -2043,7 +2104,7 @@ namespace sogen
             const auto io_device_name = get_io_device_name(filename);
             if (io_device_name.has_value())
             {
-                if (*io_device_name == u"DeviceApi\\Dev\\Query")
+                if (*io_device_name == u"DeviceApi\\Dev\\Query" || *io_device_name == u"IPT")
                 {
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
@@ -2162,6 +2223,7 @@ namespace sogen
                 }
 
                 f.host_path = host_path;
+                notify_directory_changes(c, {{host_path, DIRECTORY_ACTION_ADDED, DIRECTORY_CHANGE_NAMES}});
 
                 const auto handle = c.proc.files.store(std::move(f));
                 file_handle.write(handle);
@@ -2203,7 +2265,7 @@ namespace sogen
                 mode = u"rb";
             }
 
-            if (mode.empty() && (desired_access & DELETE))
+            if (mode.empty() && (desired_access & (DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER)))
             {
                 mode = u"rb";
             }
@@ -2222,6 +2284,11 @@ namespace sogen
             f.handle = std::move(native_file_handle);
             f.open_mode = mode;
             f.host_path = host_path;
+
+            if (!file_exists)
+            {
+                notify_directory_changes(c, {{host_path, DIRECTORY_ACTION_ADDED, DIRECTORY_CHANGE_NAMES}});
+            }
 
             if (create_options & FILE_DELETE_ON_CLOSE)
             {
@@ -2854,6 +2921,168 @@ namespace sogen
             constexpr auto status = STATUS_NOT_FOUND;
             write_lock_io_status(io_status_block, status);
             return status;
+        }
+
+        namespace
+        {
+            struct file_notify_information
+            {
+                uint32_t next_entry_offset;
+                uint32_t action;
+                uint32_t file_name_length;
+            };
+
+            std::u16string relative_notify_name(const std::filesystem::path& directory, const std::filesystem::path& changed,
+                                                const bool watch_tree)
+            {
+                const auto relative = changed.lexically_relative(directory);
+                if (relative.empty() || *relative.begin() == "..")
+                {
+                    return {};
+                }
+
+                if (!watch_tree && std::distance(relative.begin(), relative.end()) != 1)
+                {
+                    return {};
+                }
+
+                auto name = relative.generic_u16string();
+                std::ranges::replace(name, u'/', u'\\');
+                return name;
+            }
+
+            void complete_directory_change(const syscall_context& c, const directory_change_request& request,
+                                           const std::vector<std::byte>& records)
+            {
+                const auto fits = request.buffer && records.size() <= request.length;
+                const auto status = fits ? STATUS_SUCCESS : STATUS_NOTIFY_ENUM_DIR;
+                const auto information = fits ? records.size() : 0;
+
+                if (fits)
+                {
+                    c.emu.write_memory(request.buffer, records.data(), records.size());
+                }
+
+                if (request.io_status_block)
+                {
+                    if (c.proc.is_wow64_process)
+                    {
+                        const auto status32 = static_cast<uint32_t>(status);
+                        const auto information32 = static_cast<uint32_t>(information);
+                        c.emu.write_memory(request.io_status_block, &status32, sizeof(status32));
+                        c.emu.write_memory(request.io_status_block + sizeof(status32), &information32, sizeof(information32));
+                    }
+                    else
+                    {
+                        IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                        block.Status = status;
+                        block.Information = information;
+                        c.emu.write_memory(request.io_status_block, &block, sizeof(block));
+                    }
+                }
+
+                deliver_file_io_completion(c, request.event, request.apc_routine, request.apc_context,
+                                           emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>>{c.emu, request.io_status_block}, status,
+                                           information, c.proc.find_thread_by_id(request.thread_id));
+            }
+        }
+
+        void notify_directory_changes(const syscall_context& c, const std::vector<directory_change>& changes)
+        {
+            for (auto& [key, directory] : c.proc.files)
+            {
+                if (!directory.pending_change_notification || !directory.is_directory())
+                {
+                    continue;
+                }
+
+                const auto request = *directory.pending_change_notification;
+                const auto directory_path = directory.host_path.lexically_normal();
+
+                std::vector<std::byte> records{};
+                size_t previous_offset = 0;
+                for (const auto& change : changes)
+                {
+                    if (!(change.filter_mask & request.completion_filter))
+                    {
+                        continue;
+                    }
+
+                    const auto name = relative_notify_name(directory_path, change.host_path.lexically_normal(), request.watch_tree);
+                    if (name.empty())
+                    {
+                        continue;
+                    }
+
+                    const auto name_bytes = name.size() * sizeof(char16_t);
+                    const auto record_size = (sizeof(file_notify_information) + name_bytes + 3) & ~size_t{3};
+                    const auto offset = records.size();
+                    records.resize(offset + record_size);
+
+                    if (offset != 0)
+                    {
+                        const auto next_entry_offset = static_cast<uint32_t>(offset - previous_offset);
+                        memcpy(records.data() + previous_offset, &next_entry_offset, sizeof(next_entry_offset));
+                    }
+
+                    const file_notify_information header{
+                        .next_entry_offset = 0,
+                        .action = change.action,
+                        .file_name_length = static_cast<uint32_t>(name_bytes),
+                    };
+                    memcpy(records.data() + offset, &header, sizeof(header));
+                    memcpy(records.data() + offset + sizeof(header), name.data(), name_bytes);
+                    previous_offset = offset;
+                }
+
+                if (records.empty())
+                {
+                    continue;
+                }
+
+                directory.pending_change_notification.reset();
+                complete_directory_change(c, request, records);
+            }
+        }
+
+        NTSTATUS handle_NtNotifyChangeDirectoryFile(const syscall_context& c, const handle file_handle, const uint64_t event,
+                                                    const uint64_t apc_routine, const uint64_t apc_context,
+                                                    const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
+                                                    const uint64_t buffer, const ULONG length, const ULONG completion_filter,
+                                                    const BOOLEAN watch_tree)
+        {
+            auto* f = c.proc.files.get(file_handle);
+            if (!f || !f->is_directory())
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            f->pending_change_notification = directory_change_request{
+                .thread_id = c.thread().id,
+                .event = event,
+                .apc_routine = apc_routine,
+                .apc_context = apc_context,
+                .io_status_block = io_status_block.value(),
+                .buffer = buffer,
+                .length = length,
+                .completion_filter = completion_filter,
+                .watch_tree = watch_tree != 0,
+            };
+
+            if (event)
+            {
+                if (auto* e = c.proc.events.get(event))
+                {
+                    e->set_signaled(false);
+                }
+            }
+
+            if (io_status_block)
+            {
+                io_status_block.access([](IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& status) { status.Status = STATUS_PENDING; });
+            }
+
+            return STATUS_PENDING;
         }
     }
 

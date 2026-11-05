@@ -110,6 +110,12 @@ namespace sogen
         return PAGE_READONLY;
     }
 
+    inline uint32_t map_emulator_to_nt_protection(const nt_memory_permission& permission)
+    {
+        const auto protection = map_emulator_to_nt_protection(permission.common);
+        return permission.is_guarded() ? (protection | PAGE_GUARD) : protection;
+    }
+
     inline uint32_t map_emulator_to_nt_allocation_protection(const memory_permission permission, const memory_region_kind kind)
     {
         const auto protection = map_emulator_to_nt_protection(permission);

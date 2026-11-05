@@ -315,6 +315,7 @@ namespace sogen
         uint64_t argument{};
         uint64_t executed_instructions{0};
         uint64_t executed_blocks{0};
+        uint64_t last_scheduled_sequence{0};
         bool setup_done{false};
 
         uint32_t id{};
@@ -364,6 +365,8 @@ namespace sogen
         std::vector<pending_apc> pending_apcs{};
 
         std::optional<NTSTATUS> pending_status{};
+
+        bool impersonating{false};
 
         uint64_t win32k_thread_info{0};
         uint64_t win32k_thread_state{0};
@@ -506,6 +509,7 @@ namespace sogen
             buffer.write_vector(this->pending_apcs);
 
             buffer.write_optional(this->pending_status);
+            buffer.write(this->impersonating);
             buffer.write(this->win32k_thread_info);
             buffer.write(this->win32k_thread_state);
             buffer.write(this->win32k_desktop);
@@ -577,6 +581,7 @@ namespace sogen
             buffer.read_vector(this->pending_apcs);
 
             buffer.read_optional(this->pending_status);
+            buffer.read(this->impersonating);
             buffer.read(this->win32k_thread_info);
             buffer.read(this->win32k_thread_state);
             buffer.read(this->win32k_desktop);
@@ -641,6 +646,17 @@ namespace sogen
                                                  static_cast<size_t>(this->stack_size + this->stack_guard_size));
                 this->stack_base = 0;
                 this->stack_guard_size = 0;
+            }
+
+            if (this->wow64_stack_base)
+            {
+                if (!this->memory_ptr)
+                {
+                    throw std::runtime_error("Emulator was never assigned!");
+                }
+
+                this->memory_ptr->release_memory(*this->wow64_stack_base, static_cast<size_t>(this->wow64_stack_size.value_or(0)));
+                this->wow64_stack_base.reset();
             }
 
             if (this->gs_segment)

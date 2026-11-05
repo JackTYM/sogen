@@ -9,6 +9,20 @@ namespace sogen
     {
         constexpr ULONG EX_TIMER_NOTIFICATION = 0x80000000;
         constexpr ULONG NotificationTimer = 0;
+        constexpr uint32_t TimerSetCoalescableTimer = 0;
+
+        struct TIMER_SET_COALESCABLE_TIMER_INFO
+        {
+            LARGE_INTEGER DueTime;
+            uint64_t TimerApcRoutine;
+            uint64_t TimerContext;
+            uint64_t WakeContext;
+            ULONG Period;
+            ULONG TolerableDelay;
+            uint64_t PreviousState;
+        };
+
+        static_assert(sizeof(TIMER_SET_COALESCABLE_TIMER_INFO) == 48);
     }
 
     namespace syscalls
@@ -165,10 +179,30 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetTimerEx(const syscall_context& /*c*/, handle /*timer_handle*/, uint32_t /*timer_set_info_class*/,
-                                     uint64_t /*timer_set_information*/, ULONG /*timer_set_information_length*/)
+        NTSTATUS handle_NtSetTimerEx(const syscall_context& c, const handle timer_handle, const uint32_t timer_set_info_class,
+                                     const uint64_t timer_set_information, const ULONG timer_set_information_length)
         {
-            return STATUS_NOT_SUPPORTED;
+            if (timer_set_info_class != TimerSetCoalescableTimer)
+            {
+                return STATUS_INVALID_INFO_CLASS;
+            }
+
+            if (timer_set_information_length != sizeof(TIMER_SET_COALESCABLE_TIMER_INFO))
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            auto* const t = c.proc.timers.get(timer_handle);
+            if (!t)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            const auto info = emulator_object<TIMER_SET_COALESCABLE_TIMER_INFO>{c.emu, timer_set_information}.read();
+            const auto was_signaled = t->is_signaled(c.proc.steady_now());
+            t->arm(utils::convert_delay_interval_to_time_point(c.win_emu.clock(), info.DueTime), std::chrono::milliseconds(info.Period));
+            emulator_object<BOOLEAN>{c.emu, info.PreviousState}.write_if_valid(was_signaled ? TRUE : FALSE);
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCancelTimer(const syscall_context& c, const handle timer_handle, const emulator_object<BOOLEAN> current_state)

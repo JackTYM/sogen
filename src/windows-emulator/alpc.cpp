@@ -15,7 +15,6 @@ namespace sogen::alpc
     namespace
     {
         constexpr uint32_t basic_information = 0;
-        constexpr uint32_t associate_completion_port_information = 2;
 
         constexpr ULONG security_attribute = 0x80000000;
         constexpr ULONG view_attribute = 0x40000000;
@@ -265,6 +264,24 @@ namespace sogen::alpc
 
                 client->connection_status = payload.status;
                 client->connection_max_message_length = payload.max_message_length;
+
+                // Without ALPC_MSGFLG_SYNC_REQUEST NtAlpcConnectPort has already returned the handle, and the
+                // server's answer arrives as an LPC_CONNECTION_REPLY message queued on the client port.
+                if (client->asynchronous_connect)
+                {
+                    if (!NT_SUCCESS(payload.status))
+                    {
+                        client->disconnected = true;
+                        notify_completion_port(win_emu, *client);
+                        return true;
+                    }
+
+                    auto m = make_message(payload.sender_message_id, client_id);
+                    m.type = LPC_CONNECTION_REPLY;
+                    enqueue_message(win_emu, *client, std::move(m));
+                    return true;
+                }
+
                 client->connection_reply = make_message(payload.sender_message_id, client_id);
                 client->connection_reply->type = LPC_REPLY;
                 return true;
@@ -655,6 +672,29 @@ namespace sogen::alpc
             return offset;
         }
 
+        void write_context_fields(windows_emulator& win_emu, const uint64_t attributes_address, const ULONG allocated,
+                                  const message_context_fields& fields, const bool wow64)
+        {
+            auto& emu = win_emu.emu();
+            const auto address = attributes_address + attribute_offset(allocated, context_attribute, wow64);
+            const auto sequence = ++win_emu.process.alpc.sequence;
+
+            if (wow64)
+            {
+                const std::array<uint32_t, 5> context{static_cast<uint32_t>(fields.port_context),
+                                                      static_cast<uint32_t>(fields.message_context), sequence, fields.message_id,
+                                                      fields.callback_id};
+                emu.write_memory(address, context.data(), sizeof(context));
+            }
+            else
+            {
+                const std::array<uint64_t, 2> pointers{fields.port_context, fields.message_context};
+                const std::array<uint32_t, 3> ids{sequence, fields.message_id, fields.callback_id};
+                emu.write_memory(address, pointers.data(), sizeof(pointers));
+                emu.write_memory(address + sizeof(pointers), ids.data(), sizeof(ids));
+            }
+        }
+
         void write_receive_attributes(windows_emulator& win_emu, const uint64_t attributes_address, const message& m, const bool wow64)
         {
             if (!attributes_address)
@@ -669,24 +709,12 @@ namespace sogen::alpc
             if (header.AllocatedAttributes & context_attribute)
             {
                 const auto* via = find_port(win_emu.process.alpc, m.via_port_id);
-                const uint64_t port_context = via ? via->context : 0;
-                const auto address = attributes_address + attribute_offset(header.AllocatedAttributes, context_attribute, wow64);
-                const auto sequence = ++win_emu.process.alpc.sequence;
-
-                if (wow64)
-                {
-                    const std::array<uint32_t, 5> context{static_cast<uint32_t>(port_context), static_cast<uint32_t>(m.message_context),
-                                                          sequence, m.message_id, m.callback_id};
-                    emu.write_memory(address, context.data(), sizeof(context));
-                }
-                else
-                {
-                    const std::array<uint64_t, 2> pointers{port_context, m.message_context};
-                    const std::array<uint32_t, 3> ids{sequence, m.message_id, m.callback_id};
-                    emu.write_memory(address, pointers.data(), sizeof(pointers));
-                    emu.write_memory(address + sizeof(pointers), ids.data(), sizeof(ids));
-                }
-
+                write_context_fields(win_emu, attributes_address, header.AllocatedAttributes,
+                                     {.port_context = via ? via->context : 0,
+                                      .message_context = m.message_context,
+                                      .message_id = m.message_id,
+                                      .callback_id = m.callback_id},
+                                     wow64);
                 header.ValidAttributes |= context_attribute;
             }
 
@@ -720,23 +748,6 @@ namespace sogen::alpc
             }
 
             emu.write_memory(attributes_address, &header, sizeof(header));
-        }
-
-        std::optional<uint64_t> read_send_message_context(const syscall_context& c, const uint64_t attributes_address, const bool wow64)
-        {
-            if (!attributes_address)
-            {
-                return std::nullopt;
-            }
-
-            const auto header = c.emu.read_memory<ALPC_MESSAGE_ATTRIBUTES>(attributes_address);
-            if (!(header.ValidAttributes & context_attribute))
-            {
-                return std::nullopt;
-            }
-
-            const auto address = attributes_address + attribute_offset(header.AllocatedAttributes, context_attribute, wow64);
-            return wow64 ? uint64_t{c.emu.read_memory<uint32_t>(address + 4)} : c.emu.read_memory<uint64_t>(address + 8);
         }
 
         std::optional<std::vector<uint8_t>> read_send_view(const syscall_context& c, const uint64_t attributes_address, const bool wow64)
@@ -985,6 +996,42 @@ namespace sogen::alpc
         return found->kind == kernel_arena::named_object_kind::alpc_port;
     }
 
+    std::optional<uint64_t> read_send_message_context(const syscall_context& c, const uint64_t attributes_address, const bool wow64)
+    {
+        if (!attributes_address)
+        {
+            return std::nullopt;
+        }
+
+        const auto header = c.emu.read_memory<ALPC_MESSAGE_ATTRIBUTES>(attributes_address);
+        if (!(header.ValidAttributes & context_attribute))
+        {
+            return std::nullopt;
+        }
+
+        const auto address = attributes_address + attribute_offset(header.AllocatedAttributes, context_attribute, wow64);
+        return wow64 ? uint64_t{c.emu.read_memory<uint32_t>(address + 4)} : c.emu.read_memory<uint64_t>(address + 8);
+    }
+
+    void write_message_context_attribute(windows_emulator& win_emu, const uint64_t attributes_address, const message_context_fields& fields,
+                                         const bool wow64)
+    {
+        if (!attributes_address)
+        {
+            return;
+        }
+
+        auto header = win_emu.emu().read_memory<ALPC_MESSAGE_ATTRIBUTES>(attributes_address);
+        if (!(header.AllocatedAttributes & context_attribute))
+        {
+            return;
+        }
+
+        write_context_fields(win_emu, attributes_address, header.AllocatedAttributes, fields, wow64);
+        header.ValidAttributes |= context_attribute;
+        win_emu.emu().write_memory(attributes_address, &header, sizeof(header));
+    }
+
     NTSTATUS create_port(const syscall_context& c, std::u16string name, const uint64_t port_attributes, handle& out)
     {
         const auto flags = port_attributes ? c.emu.read_memory<uint32_t>(port_attributes) : 0;
@@ -1050,9 +1097,11 @@ namespace sogen::alpc
         p.flags = port_attributes ? c.emu.read_memory<uint32_t>(port_attributes) : 0;
         p.max_message_length = read_max_message_length(c, port_attributes);
         p.connection_id = (static_cast<uint64_t>(c.proc.process_id) << 32) | ++s.next_connection_serial;
+        p.asynchronous_connect = (flags & msgflg_sync_request) == 0;
 
         const auto id = new_port_id(s);
         const auto connection_id = p.connection_id;
+        const auto asynchronous = p.asynchronous_connect;
         s.ports.emplace(id, std::move(p));
         s.client_ports[connection_id] = id;
 
@@ -1068,7 +1117,18 @@ namespace sogen::alpc
 
         (void)in_message_attributes;
 
+        if (asynchronous)
+        {
+            const auto h = c.proc.ports.store(port_container::guest_alpc(std::u16string(name), id));
+            write_size_parameter(c.win_emu, port_handle_out, (flags & msgflg_wow64_call) != 0, h.bits);
+        }
+
         route(c.win_emu, {.port_name = std::u16string(name), .connection_id = connection_id, .to_server = true, .payload = payload});
+
+        if (asynchronous)
+        {
+            return STATUS_SUCCESS;
+        }
 
         return park(c, pending_wait{
                            .kind = wait_kind::connect,
@@ -1137,7 +1197,7 @@ namespace sogen::alpc
             const auto h = c.proc.ports.store(port_container::guest_alpc(listener->name, id));
             if (port_handle_out)
             {
-                c.emu.write_memory(port_handle_out, &h, sizeof(h));
+                write_size_parameter(c.win_emu, port_handle_out, (flags & msgflg_wow64_call) != 0, h.bits);
             }
         }
 
@@ -1376,7 +1436,7 @@ namespace sogen::alpc
                 }
 
                 const auto h = win_emu.process.ports.store(port_container::guest_alpc(p->name, wait.port_id));
-                win_emu.emu().write_memory(wait.port_handle_out, &h, sizeof(h));
+                write_size_parameter(win_emu, wait.port_handle_out, wait.wow64_layout, h.bits);
                 p->connection_reply.reset();
                 return STATUS_SUCCESS;
             }
@@ -1496,6 +1556,24 @@ namespace sogen::alpc
         return STATUS_SUCCESS;
     }
 
+    NTSTATUS read_completion_association(const syscall_context& c, const uint64_t information, const uint32_t length,
+                                         completion_association& out)
+    {
+        if (length < 16 || !information)
+        {
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+
+        out.key = c.emu.read_memory<uint64_t>(information);
+        out.port.bits = c.emu.read_memory<uint64_t>(information + 8);
+        if (!c.proc.io_completions.get(out.port))
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        return STATUS_SUCCESS;
+    }
+
     NTSTATUS set_information(const syscall_context& c, const uint64_t port_id, const uint32_t info_class, const uint64_t information,
                              const uint32_t length)
     {
@@ -1510,23 +1588,15 @@ namespace sogen::alpc
             return STATUS_INVALID_INFO_CLASS;
         }
 
-        if (length < 16 || !information)
+        completion_association association{};
+        const auto status = read_completion_association(c, information, length, association);
+        if (!NT_SUCCESS(status))
         {
-            return STATUS_INFO_LENGTH_MISMATCH;
+            return status;
         }
 
-        const auto key = c.emu.read_memory<uint64_t>(information);
-        const auto port_handle = c.emu.read_memory<uint64_t>(information + 8);
-
-        handle completion{};
-        completion.bits = port_handle;
-        if (!c.proc.io_completions.get(completion))
-        {
-            return STATUS_INVALID_HANDLE;
-        }
-
-        p->completion_port = completion;
-        p->completion_key = key;
+        p->completion_port = association.port;
+        p->completion_key = association.key;
 
         for (size_t i = 0; i < p->queue.size(); ++i)
         {
@@ -1657,6 +1727,20 @@ namespace sogen::alpc
         }
 
         s.ports.erase(port_id);
+    }
+
+    void close_all_ports(windows_emulator& win_emu)
+    {
+        std::vector<uint64_t> port_ids{};
+        for (const auto& port_id : win_emu.process.alpc.ports | std::views::keys)
+        {
+            port_ids.push_back(port_id);
+        }
+
+        for (const auto port_id : port_ids)
+        {
+            close_port(win_emu, port_id);
+        }
     }
 
     bool has_queued_message(const process_context& proc, const uint64_t port_id)

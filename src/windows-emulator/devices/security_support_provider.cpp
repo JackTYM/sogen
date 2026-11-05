@@ -276,8 +276,8 @@ namespace sogen
                     }
 
                     // AES-CMAC is a keyed hash in the primitive provider, so bcrypt expects it on the hash interface too.
-                    if (algorithm_name == u"SHA1" || algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2" ||
-                        algorithm_name == u"AES-CMAC")
+                    if (algorithm_name == u"SHA1" || algorithm_name == u"SHA384" || algorithm_name == u"SHA512" ||
+                        algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2" || algorithm_name == u"AES-CMAC")
                     {
                         return write_response(make_descriptor(sha256_output_data, 0x02, algorithm_name));
                     }

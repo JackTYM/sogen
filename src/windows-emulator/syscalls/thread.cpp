@@ -241,8 +241,8 @@ namespace sogen
                     return STATUS_BUFFER_OVERFLOW;
                 }
 
-                const emulator_object<handle> info{c.emu, thread_information};
-                info.write(DUMMY_IMPERSONATION_TOKEN);
+                const auto token = emulator_object<handle>{c.emu, thread_information}.read();
+                thread->impersonating = token.bits != 0;
 
                 return STATUS_SUCCESS;
             }
@@ -482,8 +482,8 @@ namespace sogen
                     i.TebBaseAddress = thread->teb64->value();
                     i.ClientId = thread->teb64->read().ClientId;
                     i.AffinityMask = affinity_mask;
-                    i.Priority = 8; // THREAD_PRIORITY_NORMAL's KPRIORITY value
-                    i.BasePriority = 8;
+                    i.Priority = 8;     // THREAD_PRIORITY_NORMAL's KPRIORITY value
+                    i.BasePriority = 0; // increment relative to the process base priority (THREAD_PRIORITY_NORMAL)
                 });
 
                 return STATUS_SUCCESS;
@@ -769,7 +769,12 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            token_handle.write(CURRENT_THREAD_TOKEN);
+            if (!c.vcpu.active_thread->impersonating)
+            {
+                return STATUS_NO_TOKEN;
+            }
+
+            token_handle.write(DUMMY_IMPERSONATION_TOKEN);
 
             return STATUS_SUCCESS;
         }
@@ -779,6 +784,17 @@ namespace sogen
                                             const emulator_object<handle> token_handle)
         {
             return handle_NtOpenThreadToken(c, thread_handle, desired_access, open_as_self, token_handle);
+        }
+
+        NTSTATUS handle_NtImpersonateAnonymousToken(const syscall_context& c, const handle thread_handle)
+        {
+            if (!c.proc.is_current_thread_handle(thread_handle, c.vcpu.active_thread))
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            c.vcpu.active_thread->impersonating = true;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtTerminateThread(const syscall_context& c, const handle thread_handle, const NTSTATUS exit_status)

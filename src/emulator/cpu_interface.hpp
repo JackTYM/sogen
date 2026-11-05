@@ -32,6 +32,8 @@ namespace sogen
         virtual std::vector<std::byte> save_registers() const = 0;
         virtual void restore_registers(const std::vector<std::byte>& register_data) = 0;
 
+        virtual void discard_saved_registers(const std::vector<std::byte>& /*register_data*/) {}
+
         // TODO: Remove this
         virtual bool has_violation() const = 0;
 

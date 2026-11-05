@@ -31,6 +31,67 @@ namespace sogen
 
     namespace
     {
+        enum class user_stack_fault
+        {
+            outside_stack,
+            grown,
+            overflow,
+        };
+
+        // Mirrors MiCheckForUserStackOverflow: a guard page hit inside the TEB's
+        // [DeallocationStack, StackBase) range is ordinary stack growth that the kernel resolves without
+        // delivering any exception, by committing the next guard page below and lowering StackLimit.
+        template <typename Teb>
+        user_stack_fault grow_user_stack(memory_manager& memory, emulator_object<Teb>& teb, const uint64_t address)
+        {
+            constexpr uint64_t page_size = 0x1000;
+
+            const auto teb_obj = teb.read();
+            const uint64_t stack_base = teb_obj.NtTib.StackBase;
+            const uint64_t deallocation_stack = teb_obj.DeallocationStack;
+            if (address < deallocation_stack || address >= stack_base)
+            {
+                return user_stack_fault::outside_stack;
+            }
+
+            const auto guard_size = std::max(page_size, page_align_up(teb_obj.GuaranteedStackBytes, page_size));
+            const auto next_guard = page_align_down(address, page_size) - guard_size;
+            if (next_guard <= deallocation_stack + page_size)
+            {
+                return user_stack_fault::overflow;
+            }
+
+            const nt_memory_permission guard_permission{memory_permission::read_write, memory_permission_ext::guard};
+            const auto committed = memory.get_region_info(next_guard).is_committed
+                                       ? memory.protect_memory(next_guard, static_cast<size_t>(guard_size), guard_permission)
+                                       : memory.commit_memory(next_guard, static_cast<size_t>(guard_size), guard_permission);
+            if (!committed)
+            {
+                return user_stack_fault::overflow;
+            }
+
+            teb.access([&](Teb& t) { t.NtTib.StackLimit = static_cast<decltype(t.NtTib.StackLimit)>(next_guard); });
+            return user_stack_fault::grown;
+        }
+
+        user_stack_fault grow_thread_stack(memory_manager& memory, emulator_thread& thread, const uint64_t address)
+        {
+            if (thread.teb64)
+            {
+                if (const auto result = grow_user_stack(memory, *thread.teb64, address); result != user_stack_fault::outside_stack)
+                {
+                    return result;
+                }
+            }
+
+            if (thread.teb32)
+            {
+                return grow_user_stack(memory, *thread.teb32, address);
+            }
+
+            return user_stack_fault::outside_stack;
+        }
+
         // TEMPDIAG: remove before finalizing. Dumps every thread's wait-state fields once the
         // idle loop has been spinning for a while with nothing ready, so a captured freeze
         // explains itself in the log instead of requiring live debugger inspection.
@@ -249,6 +310,24 @@ namespace sogen
             }
 
             return result;
+        }
+
+        bool has_descendant_with_class(const process_context& process, const hwnd ancestor, const std::u16string& class_name)
+        {
+            for (const auto& child : process.windows | std::views::values)
+            {
+                if (child.parent_handle != ancestor)
+                {
+                    continue;
+                }
+
+                if (child.class_name == class_name || has_descendant_with_class(process, child.handle, class_name))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         std::optional<POINT> get_window_origin_relative_to_ancestor(const process_context& process, const hwnd window, const hwnd ancestor)
@@ -678,8 +757,11 @@ namespace sogen
                         continue;
                     }
 
+                    it->second.save(vcpu.cpu);
                     running_on->active_thread = nullptr;
                 }
+
+                vcpu.cpu.discard_saved_registers(it->second.last_registers);
 
                 const auto [new_it, deleted] = threads.erase(it);
                 if (!deleted)
@@ -866,6 +948,7 @@ namespace sogen
             }
 
             thread.apc_alertable = false;
+            thread.last_scheduled_sequence = ++context.thread_schedule_sequence;
             return true;
         }
 
@@ -907,6 +990,24 @@ namespace sogen
             return false;
         }
 
+        // A ready thread that is no longer marked as waiting (its wait was satisfied eagerly, e.g. by NtSetEvent,
+        // or it was preempted) gets no wake boost. Picking the next ready thread in list order would then let a
+        // few threads earlier in the list that keep cycling through short sleeps, plus a CPU-bound thread, take
+        // every slice and starve it indefinitely; the least recently scheduled ready thread runs instead.
+        bool switch_to_least_recently_scheduled_thread(windows_emulator& win_emu, vcpu_context& vcpu)
+        {
+            std::vector<emulator_thread*> candidates{};
+            candidates.reserve(win_emu.process.threads.size());
+            for (auto& t : win_emu.process.threads | std::views::values)
+            {
+                candidates.push_back(&t);
+            }
+
+            std::ranges::stable_sort(candidates, {}, &emulator_thread::last_scheduled_sequence);
+
+            return std::ranges::any_of(candidates, [&](emulator_thread* t) { return switch_to_thread(win_emu, vcpu, *t); });
+        }
+
         bool switch_to_next_thread(windows_emulator& win_emu, vcpu_context& vcpu)
         {
             perform_context_switch_work(win_emu, vcpu);
@@ -921,7 +1022,7 @@ namespace sogen
                 return true;
             }
 
-            return switch_to_next_thread_matching(win_emu, vcpu, [](const emulator_thread&) { return true; });
+            return switch_to_least_recently_scheduled_thread(win_emu, vcpu);
         }
 
         struct instruction_tick_clock : utils::tick_clock
@@ -1155,6 +1256,10 @@ namespace sogen
         const auto apiset_data = apiset::obtain(this->emulation_root);
 
         this->process.setup(*this, this->application_settings_, *executable, *ntdll, apiset_data, this->mod_manager.wow64_modules_.ntdll32);
+        const auto root_peb32 = (this->process.is_wow64_process && this->process.peb32.has_value())
+                                    ? std::optional<uint64_t>(this->process.peb32->value())
+                                    : std::nullopt;
+        this->broadcast_process_alive(this->process.process_id, std::optional<bool>(!this->process.is_wow64_process), root_peb32);
 
         const auto ntdll_data = emu.read_memory(ntdll->image_base, static_cast<size_t>(ntdll->size_of_image));
         const auto win32u_data = emu.read_memory(win32u->image_base, static_cast<size_t>(win32u->size_of_image));
@@ -1222,6 +1327,7 @@ namespace sogen
             message.type = pipe_ipc_message_type::process_alive;
             message.client_process_id = pid;
             message.native_64bit = native_64bit;
+            message.peb32_address = this->known_sibling_peb32_[pid];
             peer->send(message);
         }
 
@@ -1335,9 +1441,11 @@ namespace sogen
         }
     }
 
-    void windows_emulator::broadcast_process_alive(const uint32_t pid, const std::optional<bool> native_64bit)
+    void windows_emulator::broadcast_process_alive(const uint32_t pid, const std::optional<bool> native_64bit,
+                                                   const std::optional<uint64_t> peb32_address)
     {
         this->known_sibling_pids_.insert_or_assign(pid, native_64bit);
+        this->known_sibling_peb32_.insert_or_assign(pid, peb32_address);
 
         if (this->pipe_ipc_peers_.empty())
         {
@@ -1348,6 +1456,7 @@ namespace sogen
         message.type = pipe_ipc_message_type::process_alive;
         message.client_process_id = pid;
         message.native_64bit = native_64bit;
+        message.peb32_address = peb32_address;
 
         for (auto& peer : this->pipe_ipc_peers_)
         {
@@ -1469,6 +1578,12 @@ namespace sogen
         return sibling == this->known_sibling_pids_.end() ? std::nullopt : sibling->second;
     }
 
+    std::optional<uint64_t> windows_emulator::known_sibling_peb32(const uint32_t pid) const
+    {
+        const auto sibling = this->known_sibling_peb32_.find(pid);
+        return sibling == this->known_sibling_peb32_.end() ? std::nullopt : sibling->second;
+    }
+
     void windows_emulator::pump_pipe_ipc()
     {
         static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
@@ -1503,6 +1618,7 @@ namespace sogen
                 else if (message->type == pipe_ipc_message_type::process_alive && message->client_process_id)
                 {
                     this->known_sibling_pids_.insert_or_assign(*message->client_process_id, message->native_64bit);
+                    this->known_sibling_peb32_.insert_or_assign(*message->client_process_id, message->peb32_address);
                 }
                 else if (message->type == pipe_ipc_message_type::focus_changed && this->process.windows.get(message->parent_window))
                 {
@@ -1616,6 +1732,8 @@ namespace sogen
         {
             return;
         }
+
+        alpc::close_all_ports(*this);
 
         this->process_control_server_->notify_exit(static_cast<int32_t>(exit_status.value_or(STATUS_UNSUCCESSFUL)));
     }
@@ -1823,7 +1941,14 @@ namespace sogen
 
     void windows_emulator::on_instruction_execution(vcpu_context& vcpu, const uint64_t address)
     {
-        auto& thread = vcpu.thread();
+        if (!vcpu.active_thread)
+        {
+            vcpu.switch_thread = true;
+            vcpu.cpu.stop();
+            return;
+        }
+
+        auto& thread = *vcpu.active_thread;
 
         if (try_complete_guest_function(vcpu, address))
         {
@@ -2600,6 +2725,26 @@ namespace sogen
                     return memory_violation_continuation::restart;
                 }
 
+                if (!is_stack_guard)
+                {
+                    const auto touched_page = page_align_down(address, page_size);
+                    const auto unguarded = region.permissions & ~memory_permission_ext::guard;
+                    const auto stack_fault = grow_thread_stack(this->memory, thread, address);
+
+                    if (stack_fault == user_stack_fault::grown)
+                    {
+                        this->memory.protect_memory(touched_page, page_size, unguarded);
+                        return memory_violation_continuation::restart;
+                    }
+
+                    if (stack_fault == user_stack_fault::overflow)
+                    {
+                        this->memory.protect_memory(touched_page, page_size, unguarded);
+                        dispatch_stack_overflow(*this, vcpu, address, operation);
+                        return memory_violation_continuation::resume;
+                    }
+                }
+
                 // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION, matching real
                 // Windows for a guest-requested PAGE_GUARD page, or STATUS_STACK_OVERFLOW once the
                 // fault has genuinely reached the last page before DeallocationStack.
@@ -3017,9 +3162,11 @@ namespace sogen
         return true;
     }
 
-    // SOGEN_INJECT_INPUT=<window class>@<seconds>:<action>[;...] where <action> is <x>,<y> (left click),
-    // key=<name> (Tab, Enter, Escape, Backspace, Space or a single character) or text=<characters>.
+    // SOGEN_INJECT_INPUT=[?]<window class>[+<child class>][~<text>]@<seconds>:<action>[;...] where <action> is <x>,<y>
+    // (left click), key=<name> (Tab, Enter, Escape, Backspace, Space or a single character) or text=<characters>.
     // text-file types the content of the file named by SOGEN_INJECT_TEXT_FILE, keeping it off command lines.
+    // ~<text> waits until a file write of this process contains <text> (UTF-8 or UTF-16LE) after the previous step;
+    // a leading ? marks the step optional.
     void windows_emulator::parse_scheduled_input(const std::string_view specification)
     {
         static const std::map<std::string, uint16_t, std::less<>> named_keys{
@@ -3047,7 +3194,25 @@ namespace sogen
             }
 
             scheduled_input input{};
-            input.window_class = u8_to_u16(std::string(entry.substr(0, at)));
+            auto class_spec = std::string(entry.substr(0, at));
+            if (class_spec.starts_with('?'))
+            {
+                input.optional = true;
+                class_spec.erase(0, 1);
+            }
+
+            if (const auto text_separator = class_spec.find('~'); text_separator != std::string::npos)
+            {
+                input.ready_written_text = class_spec.substr(text_separator + 1);
+                class_spec.resize(text_separator);
+            }
+
+            const auto ready_separator = class_spec.find('+');
+            input.window_class = u8_to_u16(class_spec.substr(0, ready_separator));
+            if (ready_separator != std::string::npos)
+            {
+                input.ready_child_class = u8_to_u16(class_spec.substr(ready_separator + 1));
+            }
             input.delay =
                 std::chrono::milliseconds(static_cast<int64_t>(std::stod(std::string(entry.substr(at + 1, colon - at - 1))) * 1000.0));
 
@@ -3184,6 +3349,16 @@ namespace sogen
                 return;
             }
 
+            if (!input.ready_child_class.empty() && !has_descendant_with_class(this->process, target->handle, input.ready_child_class))
+            {
+                return;
+            }
+
+            if (!input.ready_written_text.empty() && !input.ready_text_written)
+            {
+                return;
+            }
+
             const auto now = std::chrono::steady_clock::now();
             if (!input.window_seen || input.seen_window != target->handle)
             {
@@ -3203,13 +3378,15 @@ namespace sogen
             switch (input.type)
             {
             case scheduled_input::kind::click: {
-                const auto point = pack_point(input.x, input.y);
-                this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s)\n", input.x, input.y,
-                               static_cast<unsigned long long>(window), class_name.c_str());
+                const auto routed = route_pointer(this->process, window, input.x, input.y);
+                const auto point = pack_point(routed.x, routed.y);
+                this->log.info("[inject-input] click at %d,%d in window 0x%llx (%s) routed to 0x%llx at %d,%d\n", input.x, input.y,
+                               static_cast<unsigned long long>(window), class_name.c_str(), static_cast<unsigned long long>(routed.window),
+                               routed.x, routed.y);
 
-                this->deliver_ui_event(ui_event{.window = window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
-                this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
-                this->deliver_ui_event(ui_event{.window = window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = routed.window, .message = WM_MOUSEMOVE, .wParam = 0, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = routed.window, .message = WM_LBUTTONDOWN, .wParam = MK_LBUTTON, .lParam = point});
+                this->deliver_ui_event(ui_event{.window = routed.window, .message = WM_LBUTTONUP, .wParam = 0, .lParam = point});
                 break;
             }
 
@@ -3245,6 +3422,40 @@ namespace sogen
             }
 
             return;
+        }
+    }
+
+    void windows_emulator::observe_file_write_for_scheduled_input(const std::string_view data)
+    {
+        const auto contains_text = [&](const std::string& text) {
+            const auto wide = u8_to_u16(text);
+            const std::string_view wide_bytes(reinterpret_cast<const char*>(wide.data()), wide.size() * sizeof(char16_t));
+            return data.find(text) != std::string_view::npos || data.find(wide_bytes) != std::string_view::npos;
+        };
+
+        const auto head = std::ranges::find_if(this->scheduled_inputs_, [](const scheduled_input& input) { return !input.delivered; });
+        for (auto input = head; input != this->scheduled_inputs_.end(); ++input)
+        {
+            if (!input->ready_written_text.empty() && !input->ready_text_written && contains_text(input->ready_written_text))
+            {
+                input->ready_text_written = true;
+                this->log.info("[inject-input] step %zu: text '%s' written\n", static_cast<size_t>(input - this->scheduled_inputs_.begin()),
+                               input->ready_written_text.c_str());
+
+                for (auto skipped = head; skipped != input; ++skipped)
+                {
+                    skipped->delivered = true;
+                    this->log.info("[inject-input] step %zu: optional step skipped\n",
+                                   static_cast<size_t>(skipped - this->scheduled_inputs_.begin()));
+                }
+
+                return;
+            }
+
+            if (!input->optional)
+            {
+                return;
+            }
         }
     }
 

@@ -172,6 +172,76 @@ namespace sogen
         }
     };
 
+    struct gdi_bounds_state
+    {
+        static constexpr uint32_t reset_flag = 0x1;
+        static constexpr uint32_t accumulate_flag = 0x2;
+        static constexpr uint32_t enable_flag = 0x4;
+        static constexpr uint32_t disable_flag = 0x8;
+
+        RECT bounds{};
+        bool enabled{};
+
+        bool empty() const
+        {
+            return this->bounds.left >= this->bounds.right || this->bounds.top >= this->bounds.bottom;
+        }
+
+        uint32_t flags() const
+        {
+            return (this->enabled ? enable_flag : disable_flag) | (this->empty() ? reset_flag : accumulate_flag);
+        }
+
+        void update(const uint32_t update_flags, const RECT* const rect)
+        {
+            if (update_flags & reset_flag)
+            {
+                this->bounds = {};
+            }
+
+            if ((update_flags & accumulate_flag) && rect)
+            {
+                const RECT normalized{std::min(rect->left, rect->right), std::min(rect->top, rect->bottom),
+                                      std::max(rect->left, rect->right), std::max(rect->top, rect->bottom)};
+
+                if (normalized.left < normalized.right && normalized.top < normalized.bottom)
+                {
+                    if (this->empty())
+                    {
+                        this->bounds = normalized;
+                    }
+                    else
+                    {
+                        this->bounds = {std::min(this->bounds.left, normalized.left), std::min(this->bounds.top, normalized.top),
+                                        std::max(this->bounds.right, normalized.right), std::max(this->bounds.bottom, normalized.bottom)};
+                    }
+                }
+            }
+
+            if (update_flags & enable_flag)
+            {
+                this->enabled = true;
+            }
+
+            if (update_flags & disable_flag)
+            {
+                this->enabled = false;
+            }
+        }
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->bounds);
+            buffer.write(this->enabled);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->bounds);
+            buffer.read(this->enabled);
+        }
+    };
+
     struct gdi_dc_state
     {
         uint32_t selected_bitmap{};
@@ -181,6 +251,7 @@ namespace sogen
         int32_t current_y{};
         bool is_memory_dc{};
         uint32_t map_mode{1}; // MM_TEXT, the real GDI default for a freshly created DC
+        gdi_bounds_state bounds{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -191,6 +262,7 @@ namespace sogen
             buffer.write(this->current_y);
             buffer.write(this->is_memory_dc);
             buffer.write(this->map_mode);
+            this->bounds.serialize(buffer);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -202,6 +274,7 @@ namespace sogen
             buffer.read(this->current_y);
             buffer.read(this->is_memory_dc);
             buffer.read(this->map_mode);
+            this->bounds.deserialize(buffer);
         }
     };
 
@@ -631,6 +704,14 @@ namespace sogen
         std::vector<token_privilege> privileges{};
         LUID authentication_id{};
 
+        // Windows draws a token's ModifiedId from the system-wide LUID counter, and combase keys its DCOM
+        // access-check cache by it, so a zero or shared id hits stale cache slots. Each emulated process owns
+        // one token that is never modified, and process ids are unique across emulated processes.
+        static LUID token_modified_id(const uint32_t pid)
+        {
+            return LUID{.LowPart = pid, .HighPart = 1};
+        }
+
         uint64_t shared_section_address{0};
         uint64_t shared_section_size{0};
         uint64_t dbwin_buffer{0};
@@ -816,6 +897,7 @@ namespace sogen
         handle_store<handle_types::job, job_object> jobs{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
+        std::map<uint64_t, uint8_t> handle_flags{};
         handle_store<handle_types::section, section, 2> sections{};
         // Keeps a pagefile-backed section's section_object alive for as long as a guest-visible view of
         // it is mapped, independent of the handle-table entry above (see handle_NtMapViewOfSection /
@@ -914,6 +996,7 @@ namespace sogen
         }
 
         handle_store<handle_types::thread, emulator_thread> threads{};
+        uint64_t thread_schedule_sequence{};
 
         // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's
         // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)

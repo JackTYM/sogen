@@ -35,6 +35,17 @@ namespace sogen
             std::u16string name_;
         };
 
+        struct endpoint_mapper : rpc_port
+        {
+            NTSTATUS handle_rpc(windows_emulator& /*win_emu*/, const uint32_t /*procedure_id*/, const lpc_request_context& /*c*/,
+                                utils::aligned_binary_writer& writer, std::vector<alpc_reply_handle>& /*reply_handles*/) override
+            {
+                constexpr uint32_t ep_s_not_registered = 0x16C9A0D6;
+                writer.write(ep_s_not_registered);
+                return STATUS_SUCCESS;
+            }
+        };
+
         struct noop_port : port
         {
             lpc_request_result handle_request(windows_emulator& /*win_emu*/, const lpc_request_context&) override
@@ -50,6 +61,11 @@ namespace sogen
         if (port == u"\\Windows\\ApiPort")
         {
             return create_api_port();
+        }
+
+        if (port == u"\\RPC Control\\epmapper")
+        {
+            return std::make_unique<endpoint_mapper>();
         }
 
         if (port == u"\\RPC Control\\protected_storage")
@@ -95,6 +111,13 @@ namespace sogen
             // User Mode Power Object RPC port. The audio stack queries this to manage power policy
             // for the audio endpoint (e.g. before activating a render stream). An empty success
             // reply for all procedures is sufficient to let mmdevapi proceed to OpenStream.
+            return std::make_unique<noop_port>();
+        }
+
+        if (port == u"\\RPC Control\\eventlog")
+        {
+            // Event Log RPC port. lsass reports its security events here and does not depend on the
+            // entries being stored, so an empty success reply lets the reporter proceed.
             return std::make_unique<noop_port>();
         }
 
@@ -154,6 +177,47 @@ namespace sogen
         }
 
         return result;
+    }
+
+    void port_container::queue_connection_reply(windows_emulator& win_emu, const bool wow64)
+    {
+        lpc_port_message reply{};
+        reply.is_wow64 = wow64;
+        reply.native.u2.s2.Type = LPC_CONNECTION_REPLY;
+        // WOW64 ALPC messages keep the 64-bit header footprint; only the header fields use the 32-bit layout.
+        reply.native.u1.s1.TotalLength = static_cast<CSHORT>(sizeof(PORT_MESSAGE64));
+
+        this->queue_async_reply(win_emu, {.status = STATUS_SUCCESS, .message = reply});
+    }
+
+    void port_container::queue_async_reply(windows_emulator& win_emu, lpc_message_result reply)
+    {
+        reply_queue_.push_back(std::move(reply));
+        this->notify_completion_port(win_emu);
+    }
+
+    void port_container::associate_completion_port(windows_emulator& win_emu, const handle completion_port, const uint64_t completion_key)
+    {
+        completion_port_ = completion_port;
+        completion_key_ = completion_key;
+
+        for (size_t i = 0; i < reply_queue_.size(); ++i)
+        {
+            this->notify_completion_port(win_emu);
+        }
+    }
+
+    void port_container::notify_completion_port(windows_emulator& win_emu) const
+    {
+        if (!completion_port_)
+        {
+            return;
+        }
+
+        if (auto* completion = win_emu.process.io_completions.get(*completion_port_))
+        {
+            completion->enqueue({.key_context = completion_key_});
+        }
     }
 
     lpc_message_result port::handle_message(windows_emulator& win_emu, const lpc_message_context& c)

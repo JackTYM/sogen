@@ -358,15 +358,9 @@ namespace sogen
                 return this->transceive(win_emu, c);
             }
 
-            // ImpersonateNamedPipeClient (e.g. crashpad's ExceptionHandlerServer, verifying a
-            // connecting child's identity before trusting its registration request) requires this to
-            // succeed - a real server thread already has SeImpersonatePrivilege on its own connected
-            // pipe. This codebase has no per-thread impersonation-context model (see
-            // NtSetInformationThread's ThreadImpersonationToken case), so there is nothing to actually
-            // switch the calling thread into; reporting success is the only observable behavior a
-            // caller here can check.
             if (c.io_control_code == FSCTL_PIPE_IMPERSONATE)
             {
+                c.thread().impersonating = true;
                 return STATUS_SUCCESS;
             }
 

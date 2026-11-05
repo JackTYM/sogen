@@ -1273,6 +1273,7 @@ namespace sogen::fex
 
         std::vector<std::byte> save_registers() const override;
         void restore_registers(const std::vector<std::byte>& register_data) override;
+        void discard_saved_registers(const std::vector<std::byte>& register_data) override;
 
         bool has_violation() const override
         {
@@ -1340,6 +1341,13 @@ namespace sogen::fex
         void ensure_callret_buffer(FEXCore::Core::CPUState& state);
         void ensure_callret_stack(FEXCore::Core::CPUState& state);
         void restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src);
+
+        // With a single vCPU every logical thread shares one engine, and a parked snapshot's
+        // InlineJITBlockHeader is zeroed on resume and never read while parked, so retaining its
+        // CodeBuffer only pins one whole buffer generation (code plus lookup cache) in the fixed
+        // host arena for as long as the thread stays parked. Dozens of long-idle threads then
+        // exhaust the arena after ~40 minutes.
+        bool retains_parked_code_buffers() const;
         void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
                                       size_t size) const;
         void invalidate_code_range(uint64_t address, size_t size) const;
@@ -1634,6 +1642,11 @@ namespace sogen::fex
         void restore_registers(const std::vector<std::byte>& register_data) override
         {
             this->vcpus_[0]->restore_registers(register_data);
+        }
+
+        void discard_saved_registers(const std::vector<std::byte>& register_data) override
+        {
+            this->vcpus_[0]->discard_saved_registers(register_data);
         }
 
         bool has_violation() const override
@@ -2961,7 +2974,7 @@ namespace sogen::fex
 
         void poke_breakpoint_byte(uint64_t address, std::byte value)
         {
-            const bool needs_temporary_write = !this->range_is_writable(address, 1);
+            const bool needs_temporary_write = !this->range_is_writable(address, 1) || this->range_has_code_write_trap_apple(address, 1);
             if (needs_temporary_write)
             {
                 this->set_temporary_write_access(address, 1, true);
@@ -3686,6 +3699,7 @@ namespace sogen::fex
         std::map<uint64_t, mapped_region> regions_;
         std::vector<mmio_region> mmio_regions_;
         std::vector<std::pair<void*, size_t>> callret_buffers_;
+        std::vector<uint64_t> free_callret_stacks_;
         std::vector<gate_crossing> gate_crossings_;
 
 #ifdef __APPLE__
@@ -4134,6 +4148,11 @@ namespace sogen::fex
         return kWow64SnapshotHeader + 2 * sizeof(FEXCore::Core::CPUState);
     }
 
+    bool fex_vcpu::retains_parked_code_buffers() const
+    {
+        return this->emulator_.vcpu_count() > 1;
+    }
+
     std::vector<std::byte> fex_vcpu::save_registers() const
     {
         // For a wow64 process, once the 32-bit engine exists a logical thread's full state spans
@@ -4154,11 +4173,11 @@ namespace sogen::fex
             // which FEXCore's own bookkeeping may free once some OTHER logical thread sharing this
             // engine compiles enough new code to rotate past it. Retain that exact buffer for as long
             // as this snapshot might still be resumed from; restore_state_into releases it again.
-            if (this->thread_->CurrentFrame->State.InlineJITBlockHeader != 0)
+            if (this->retains_parked_code_buffers() && this->thread_->CurrentFrame->State.InlineJITBlockHeader != 0)
             {
                 this->emulator_.context_->RetainCodeBufferAt(this->thread_->CurrentFrame->State.InlineJITBlockHeader);
             }
-            if (this->thread32_->CurrentFrame->State.InlineJITBlockHeader != 0)
+            if (this->retains_parked_code_buffers() && this->thread32_->CurrentFrame->State.InlineJITBlockHeader != 0)
             {
                 this->emulator_.context32_->RetainCodeBufferAt(this->thread32_->CurrentFrame->State.InlineJITBlockHeader);
             }
@@ -4170,7 +4189,7 @@ namespace sogen::fex
         std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState));
         std::memcpy(data.data(), &state, sizeof(state));
 
-        if (state.InlineJITBlockHeader != 0 && this->active_context_ != nullptr)
+        if (this->retains_parked_code_buffers() && state.InlineJITBlockHeader != 0 && this->active_context_ != nullptr)
         {
             this->active_context_->RetainCodeBufferAt(state.InlineJITBlockHeader);
         }
@@ -4208,7 +4227,7 @@ namespace sogen::fex
         // comment) specifically so it survives until here even if some OTHER logical thread sharing
         // this engine rotated FEXCore's CurrentCodeBuffer past it in the meantime; release that
         // retention now that this thread is resuming and no longer needs it kept alive on its behalf.
-        if (state.InlineJITBlockHeader != 0 && context != nullptr)
+        if (this->retains_parked_code_buffers() && state.InlineJITBlockHeader != 0 && context != nullptr)
         {
             context->ReleaseCodeBufferAt(state.InlineJITBlockHeader);
         }
@@ -4226,7 +4245,16 @@ namespace sogen::fex
         // pointer into freed or foreign-generation JIT memory (observed as ExitFunctionLink "Record
         // outside code buffer" bails and wild host jumps under --vcpus > 1). The entries are purely a
         // RET fast path, so dropping them on every restore is always safe.
-        state.callret_sp = state._pad1 + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4;
+        //
+        // Resetting callret_sp alone does not drop them: a RET pops at callret_sp and moves it up, so
+        // once a resumed thread returns past the reset point it reads entries left above it by earlier
+        // quanta, and a matching guest address sends it to a host pointer into a CodeBuffer that may
+        // since have been freed and its arena VA reused. Everything below the reset point is always
+        // re-pushed before it can be popped, so only the region above it needs clearing.
+        constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+        const auto callret_reset_sp = state._pad1 + callret_stack_size / 4;
+        FEXCore::Allocator::VirtualDontNeed(reinterpret_cast<void*>(callret_reset_sp), callret_stack_size - callret_stack_size / 4);
+        state.callret_sp = callret_reset_sp;
     }
 
     void fex_vcpu::restore_registers(const std::vector<std::byte>& register_data)
@@ -4682,8 +4710,20 @@ namespace sogen::fex
     {
         if (state._pad1 == 0)
         {
-            const size_t host_page = static_cast<size_t>(::getpagesize());
             constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+            {
+                const std::unique_lock lock(this->emulator_.tables_mutex_);
+                auto& pool = this->emulator_.free_callret_stacks_;
+                if (!pool.empty())
+                {
+                    state._pad1 = pool.back();
+                    pool.pop_back();
+                    state.callret_sp = state._pad1 + callret_stack_size / 4;
+                    return;
+                }
+            }
+
+            const size_t host_page = static_cast<size_t>(::getpagesize());
             const size_t callret_alloc_size = callret_stack_size + 2 * host_page;
 
             void* alloc_base = FEXCore::Allocator::mmap(nullptr, callret_alloc_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -4703,6 +4743,35 @@ namespace sogen::fex
 
             const std::unique_lock lock(this->emulator_.tables_mutex_);
             this->emulator_.callret_buffers_.emplace_back(alloc_base, callret_alloc_size);
+        }
+    }
+
+    void fex_vcpu::discard_saved_registers(const std::vector<std::byte>& register_data)
+    {
+        constexpr size_t state_count_wow64 = 2;
+        const bool is_wow64_snapshot = register_data.size() == wow64_snapshot_size();
+        if (!is_wow64_snapshot && register_data.size() != sizeof(FEXCore::Core::CPUState))
+        {
+            return;
+        }
+
+        const auto* first_state = register_data.data() + (is_wow64_snapshot ? kWow64SnapshotHeader : 0);
+        const size_t state_count = is_wow64_snapshot ? state_count_wow64 : 1;
+        constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+
+        for (size_t i = 0; i < state_count; ++i)
+        {
+            FEXCore::Core::CPUState state{};
+            std::memcpy(&state, first_state + i * sizeof(FEXCore::Core::CPUState), sizeof(state));
+            if (state._pad1 == 0)
+            {
+                continue;
+            }
+
+            FEXCore::Allocator::VirtualDontNeed(reinterpret_cast<void*>(state._pad1), callret_stack_size);
+
+            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            this->emulator_.free_callret_stacks_.push_back(state._pad1);
         }
     }
 

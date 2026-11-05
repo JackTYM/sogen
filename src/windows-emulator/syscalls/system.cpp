@@ -830,6 +830,26 @@ namespace sogen
                         info.BootFlags = 0;
                     });
 
+            case SystemSecureBootPolicyInformation: {
+                struct secure_boot_policy_information
+                {
+                    GUID policy_publisher;
+                    ULONG policy_version;
+                    ULONG policy_options;
+                };
+
+                const auto status = handle_query<secure_boot_policy_information>(
+                    c.emu, system_information, system_information_length, return_length, [](secure_boot_policy_information& info) {
+                        info.policy_publisher = {.Data1 = 0x77FA9ABD,
+                                                 .Data2 = 0x0359,
+                                                 .Data3 = 0x4D32,
+                                                 .Data4 = {0xBD, 0x60, 0x28, 0xF4, 0xE7, 0x8F, 0x78, 0x4B}};
+                        info.policy_version = 1;
+                        info.policy_options = 0;
+                    });
+                return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
+            }
+
             case SystemLeapSecondInformation:
                 // Leap second support is on by default since Windows 10 1809 / Server 2019
                 // (HKLM\SYSTEM\CurrentControlSet\Control\LeapSecondInformation Enabled=1).
@@ -848,6 +868,15 @@ namespace sogen
                                                                                 return_length, [](std::array<uint8_t, 12>&) {})
                                         : handle_query<std::array<uint8_t, 24>>(c.emu, system_information, system_information_length,
                                                                                 return_length, [](std::array<uint8_t, 24>&) {});
+                return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
+            }
+
+            case SystemCpuQuotaInformation:
+                return STATUS_QUOTA_NOT_ENABLED;
+
+            case SystemEnergyEstimationConfigInformation: {
+                const auto status = handle_query<uint8_t>(c.emu, system_information, system_information_length, return_length,
+                                                          [](uint8_t& enabled) { enabled = 0; });
                 return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
             }
 

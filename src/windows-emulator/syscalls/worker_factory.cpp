@@ -68,9 +68,7 @@ namespace sogen
 
             bool is_runnable(const emulator_thread& thread)
             {
-                return thread.suspended == 0 && !thread.await_io_completion.has_value() && thread.await_objects.empty() &&
-                       !thread.await_time.has_value() && !thread.await_msg_mask.has_value() && !thread.waiting_for_alert &&
-                       !thread.await_host_condition;
+                return thread.suspended == 0 && !thread.is_waiting();
             }
 
             bool has_available_worker(process_context& process, const worker_factory& factory)

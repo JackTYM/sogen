@@ -370,6 +370,13 @@ namespace sogen
                                 [](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = 0; });
                         }
 
+                        if (const auto sibling_peb32 = c.win_emu.known_sibling_peb32(child->second.pid))
+                        {
+                            return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
+                                c.emu, process_information, process_information_length, return_length,
+                                [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = *sibling_peb32; });
+                        }
+
                         // Not positively confirmed native 64-bit from the file alone (a genuinely 32-bit
                         // child, or an unreadable/corrupt image): ask the child itself for its real
                         // PEB32 address, the same live ground truth real Windows answers this query
@@ -656,28 +663,37 @@ namespace sogen
                         const emulator_object<PEDosHeader_t> dos_header_obj{c.emu, mod.image_base};
                         const auto dos_header = dos_header_obj.read();
 
-                        const emulator_object<PENTHeaders_t<uint64_t>> nt_headers_obj{c.emu, mod.image_base + dos_header.e_lfanew};
-                        const auto nt_headers = nt_headers_obj.read();
+                        const auto fill = [&](const auto& nt_headers) {
+                            const auto& file_header = nt_headers.FileHeader;
+                            const auto& optional_header = nt_headers.OptionalHeader;
 
-                        const auto& file_header = nt_headers.FileHeader;
-                        const auto& optional_header = nt_headers.OptionalHeader;
+                            i.TransferAddress = 0;
+                            i.MaximumStackSize = optional_header.SizeOfStackReserve;
+                            i.CommittedStackSize = optional_header.SizeOfStackCommit;
+                            i.SubSystemType = optional_header.Subsystem;
+                            i.SubSystemMajorVersion = optional_header.MajorSubsystemVersion;
+                            i.SubSystemMinorVersion = optional_header.MinorSubsystemVersion;
+                            i.MajorOperatingSystemVersion = optional_header.MajorOperatingSystemVersion;
+                            i.MinorOperatingSystemVersion = optional_header.MinorOperatingSystemVersion;
+                            i.ImageCharacteristics = file_header.Characteristics;
+                            i.DllCharacteristics = optional_header.DllCharacteristics;
+                            i.Machine = file_header.Machine;
+                            i.ImageContainsCode = TRUE;
+                            i.ImageFlags = 0; // TODO
+                            i.ImageFileSize = optional_header.SizeOfImage;
+                            i.LoaderFlags = optional_header.LoaderFlags;
+                            i.CheckSum = optional_header.CheckSum;
+                        };
 
-                        i.TransferAddress = 0;
-                        i.MaximumStackSize = optional_header.SizeOfStackReserve;
-                        i.CommittedStackSize = optional_header.SizeOfStackCommit;
-                        i.SubSystemType = optional_header.Subsystem;
-                        i.SubSystemMajorVersion = optional_header.MajorSubsystemVersion;
-                        i.SubSystemMinorVersion = optional_header.MinorSubsystemVersion;
-                        i.MajorOperatingSystemVersion = optional_header.MajorOperatingSystemVersion;
-                        i.MinorOperatingSystemVersion = optional_header.MinorOperatingSystemVersion;
-                        i.ImageCharacteristics = file_header.Characteristics;
-                        i.DllCharacteristics = optional_header.DllCharacteristics;
-                        i.Machine = file_header.Machine;
-                        i.ImageContainsCode = TRUE;
-                        i.ImageFlags = 0; // TODO
-                        i.ImageFileSize = optional_header.SizeOfImage;
-                        i.LoaderFlags = optional_header.LoaderFlags;
-                        i.CheckSum = optional_header.CheckSum;
+                        const auto nt_headers_address = mod.image_base + dos_header.e_lfanew;
+                        if (mod.machine == IMAGE_FILE_MACHINE_I386)
+                        {
+                            fill(emulator_object<PENTHeaders_t<uint32_t>>{c.emu, nt_headers_address}.read());
+                        }
+                        else
+                        {
+                            fill(emulator_object<PENTHeaders_t<uint64_t>>{c.emu, nt_headers_address}.read());
+                        }
                     });
 
             case ProcessQuotaLimits: {
@@ -883,6 +899,17 @@ namespace sogen
 
                 c.proc.break_on_termination = c.emu.read_memory<ULONG>(process_information) != 0;
                 return STATUS_SUCCESS;
+            }
+
+            if (info_class == ProcessPowerThrottlingState)
+            {
+                if (process_information_length != sizeof(POWER_THROTTLING_PROCESS_STATE))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto state = c.emu.read_memory<POWER_THROTTLING_PROCESS_STATE>(process_information);
+                return state.Version == PROCESS_POWER_THROTTLING_CURRENT_VERSION ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
 
             if (info_class == ProcessSchedulerSharedData                     //
@@ -1133,6 +1160,7 @@ namespace sogen
             }
 
             process_token child_token{};
+            child_token.default_user = true;
             child_token.privileges = c.proc.privileges;
             token_handle.write(c.proc.tokens.store(std::move(child_token)));
 
@@ -1342,7 +1370,7 @@ namespace sogen
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> client_id_attribute{};
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> image_info_attribute{};
             std::vector<handle> inherited_handles{};
-            bool has_explicit_token = false;
+            std::optional<uint64_t> token_attribute{};
 
             if (attribute_list)
             {
@@ -1378,7 +1406,7 @@ namespace sogen
                             }
                             else if (type == PsAttributeToken)
                             {
-                                has_explicit_token = true;
+                                token_attribute = attribute.Value;
                             }
                             else
                             {
@@ -1430,6 +1458,13 @@ namespace sogen
                                   c.win_emu.mod_manager.executable ? c.win_emu.mod_manager.executable->name.c_str() : "<unknown>");
             }
 
+            bool child_runs_as_local_system = c.win_emu.runs_as_local_system();
+            if (token_attribute)
+            {
+                const auto* const token = c.proc.tokens.get(make_handle(*token_attribute));
+                child_runs_as_local_system = child_runs_as_local_system && !(token && token->default_user);
+            }
+
             application_settings child_settings{
                 .application = image_windows_path,
                 .working_directory = windows_path{working_directory},
@@ -1438,9 +1473,7 @@ namespace sogen
                 .image_path = image_path,
                 .process_id = child_pid,
                 .start_suspended = (thread_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) != 0,
-                // Without PsAttributeToken the child runs on a copy of the creator's primary token. Token handles
-                // carry no identity here, so a child created with an explicit token keeps the default user.
-                .local_system = !has_explicit_token && c.win_emu.runs_as_local_system(),
+                .local_system = child_runs_as_local_system,
             };
 
             if (std::getenv("SOGEN_TRACE_CHILD_PROCESS_LAUNCH") != nullptr)

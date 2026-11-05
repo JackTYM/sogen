@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assembly_resolver.hpp"
+#include "manifest.hpp"
 
 #include <cstddef>
 #include <filesystem>
@@ -38,6 +39,19 @@ namespace sogen::sxs
     // Maps activation context data into the emulated process the way csrss maps its section view: read-only,
     // and below 2 GB for WoW64 processes, whose 32-bit side receives the pointer narrowed. Returns 0 on failure.
     uint64_t map_activation_context_data(windows_emulator& win_emu, const std::vector<std::byte>& data);
+
+    struct process_compatibility
+    {
+        uint16_t os_major{};
+        uint16_t os_minor{};
+        uint64_t max_version_tested{};
+    };
+
+    std::optional<std::vector<std::byte>> read_image_file_manifest(const std::filesystem::path& image);
+
+    // The compatibility csrss reports for a new process: the newest operating system its manifest declares support
+    // for, and the highest maxversiontested. Nullopt when the manifest declares neither.
+    std::optional<process_compatibility> query_process_compatibility(const manifest& content);
 
     // csrss builds the activation context of an executable's manifest during process creation and publishes it
     // in PEB.ActivationContextData before the loader resolves the executable's imports.
