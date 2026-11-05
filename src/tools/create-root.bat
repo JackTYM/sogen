@@ -124,6 +124,7 @@ CALL :collect kernelbase.dll
 CALL :collect_file "%WINDIR%\System32\en-US", kernelbase.dll.mui, %EMU_SYSDIR%\en-us
 CALL :collect ktmw32.dll
 CALL :collect mfperfhelper.dll
+CALL :collect mfc140u.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
 CALL :collect mmdevapi.dll
@@ -181,6 +182,7 @@ CALL :collect_file "%WINDIR%\SystemResources", shell32.dll.mun, %EMU_SYSTEMRESOU
 CALL :collect_file "%WINDIR%", WindowsShell.Manifest, %EMU_WINDIR%
 CALL :collect psapi.dll
 CALL :collect rasadhlp.dll
+CALL :collect regsvr32.exe
 CALL :collect resampledmo.dll
 CALL :collect rpcrt4.dll
 CALL :collect rpcss.dll
