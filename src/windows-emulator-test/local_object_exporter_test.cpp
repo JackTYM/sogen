@@ -13,7 +13,7 @@ namespace sogen::test
         class LocalObjectExporterTest : public RpcProtocolTest
         {
           protected:
-            std::vector<uint8_t> connect_request(uint32_t count = 3)
+            std::vector<uint8_t> connect_request(uint32_t count = 3, bool with_architecture = true)
             {
                 std::vector<uint8_t> request;
                 utils::aligned_binary_writer writer(request, this->pointer_size);
@@ -21,7 +21,10 @@ namespace sogen::test
                 writer.write_ndr_pointer(false);
                 writer.write_ndr_pointer(false);
                 writer.write<uint32_t>(0);
-                writer.write<uint16_t>(9);
+                if (with_architecture)
+                {
+                    writer.write<uint16_t>(9);
+                }
                 writer.write(count);
                 return request;
             }
@@ -103,6 +106,23 @@ namespace sogen::test
             ASSERT_TRUE(result.payload.has_value());
             EXPECT_EQ(connection_context{}, read<connection_context>(*result.payload, 24));
             EXPECT_EQ(STATUS_INVALID_PARAMETER, this->call(6, this->allocate_request(context)).status);
+        }
+    }
+
+    TEST_F(LocalObjectExporterTest, AcceptsConnectWithoutArchitectureFromWindows10Combase)
+    {
+        for (const size_t width : {size_t{4}, size_t{8}})
+        {
+            this->bind(u"\\RPC Control\\epmapper", exporter_interface, width);
+            auto result = this->call(0, this->connect_request(3, false));
+            ASSERT_EQ(STATUS_SUCCESS, result.status);
+            ASSERT_TRUE(result.payload.has_value());
+            const auto context = read<connection_context>(*result.payload, 24);
+            EXPECT_NE(connection_context{}, context);
+            result = this->call(6, this->allocate_request(context));
+            ASSERT_EQ(STATUS_SUCCESS, result.status);
+            ASSERT_TRUE(result.payload.has_value());
+            EXPECT_EQ(5u, read<uint64_t>(*result.payload, width == 8 ? 64u : 56u));
         }
     }
 

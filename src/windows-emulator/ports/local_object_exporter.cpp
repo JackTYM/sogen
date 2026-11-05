@@ -90,6 +90,17 @@ namespace sogen
             size_t offset_{};
         };
 
+        uint16_t caller_architecture(const windows_emulator& win_emu)
+        {
+            if (win_emu.process.is_wow64_process)
+            {
+                return PROCESSOR_ARCHITECTURE_IA32_ON_WIN64;
+            }
+
+            return win_emu.process.native_architecture == windows_guest_architecture::arm64 ? PROCESSOR_ARCHITECTURE_ARM64
+                                                                                            : PROCESSOR_ARCHITECTURE_AMD64;
+        }
+
         std::vector<uint8_t> make_com_security_descriptor(std::span<const uint8_t> user_sid)
         {
             constexpr std::array<uint8_t, 12> system_sid{1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0};
@@ -178,7 +189,9 @@ namespace sogen
                         (void)reader.read<connect_process_info>();
                     }
                     const auto process_flags = reader.read<uint32_t>();
-                    const auto architecture = reader.read<uint16_t>();
+                    // Windows 10 and Server 2022 combase send no architecture field between the flags and the reserve count.
+                    const auto architecture =
+                        reader.remaining().size() > sizeof(uint32_t) ? reader.read<uint16_t>() : caller_architecture(win_emu);
                     const auto reserve_count = reader.read<uint32_t>();
                     if (reserve_count > maximum_reserved_ids)
                     {
