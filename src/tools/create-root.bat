@@ -32,6 +32,7 @@ REG SAVE HKLM\SYSTEM %EMU_REGDIR%\SYSTEM /Y
 COPY /B /Y C:\Users\Default\NTUSER.DAT "%EMU_REGDIR%\NTUSER.DAT"
 
 CALL :collect advapi32.dll
+CALL :collect attrib.exe
 CALL :collect bcrypt.dll
 CALL :collect bcryptprimitives.dll
 CALL :collect cabinet.dll
@@ -44,6 +45,7 @@ CALL :collect comdlg32.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
 CALL :collect cryptsp.dll
+CALL :collect cscript.exe
 CALL :collect d3d10.dll
 CALL :collect d3d10core.dll
 CALL :collect d3d11.dll
@@ -69,6 +71,7 @@ CALL :collect gdiplus.dll
 CALL :collect glu32.dll
 CALL :collect hal.dll
 CALL :collect hid.dll
+CALL :collect icacls.exe
 CALL :collect imm32.dll
 CALL :collect imagehlp.dll
 CALL :collect iphlpapi.dll
@@ -86,6 +89,7 @@ CALL :collect msasn1.dll
 CALL :collect mscms.dll
 CALL :collect mscoree.dll
 CALL :collect msdmo.dll
+CALL :collect mshta.exe
 CALL :collect msvcp140.dll
 CALL :collect msvcp140d.dll
 CALL :collect msvcp60.dll
@@ -94,8 +98,10 @@ CALL :collect msvcr120_clr0400.dll
 CALL :collect msvcrt.dll
 CALL :collect mswsock.dll
 CALL :collect ncrypt.dll
+CALL :collect net.exe
 CALL :collect netapi32.dll
 CALL :collect netmsg.dll
+CALL :collect netsh.exe
 CALL :collect netutils.dll
 CALL :collect nlsbres.dll
 CALL :collect normaliz.dll
@@ -111,10 +117,14 @@ CALL :collect profapi.dll
 CALL :collect propsys.dll
 CALL :collect psapi.dll
 CALL :collect rasadhlp.dll
+CALL :collect reg.exe
+CALL :collect regsvr32.exe
 CALL :collect resampledmo.dll
 CALL :collect rpcrt4.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
+CALL :collect rundll32.exe
+CALL :collect sc.exe
 CALL :collect sechost.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
@@ -127,6 +137,7 @@ CALL :collect sspicli.dll
 CALL :collect ucrtbase.dll
 CALL :collect ucrtbased.dll
 CALL :collect uiautomationcore.dll
+CALL :collect ulib.dll
 CALL :collect umpdc.dll
 CALL :collect urlmon.dll
 CALL :collect user32.dll
@@ -157,6 +168,7 @@ CALL :collect wow64con.dll
 CALL :collect wow64cpu.dll
 CALL :collect wow64win.dll
 CALL :collect ws2_32.dll
+CALL :collect wscript.exe
 CALL :collect wsock32.dll
 CALL :collect wtsapi32.dll
 CALL :collect x3daudio1_7.dll
