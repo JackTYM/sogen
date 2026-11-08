@@ -89,6 +89,7 @@ CALL :collect msacm32.dll
 CALL :collect msasn1.dll
 CALL :collect mscms.dll
 CALL :collect mscoree.dll
+CALL :collect msimg32.dll
 CALL :collect msdmo.dll
 CALL :collect mshta.exe
 CALL :collect msvcp140.dll
@@ -109,8 +110,10 @@ CALL :collect normaliz.dll
 CALL :collect nsi.dll
 CALL :collect ntasn1.dll
 CALL :collect ntdll.dll
+CALL :collect odbc32.dll
 CALL :collect ole32.dll
 CALL :collect oleaut32.dll
+CALL :collect oledlg.dll
 CALL :collect opengl32.dll
 CALL :collect pdh.dll
 CALL :collect powrprof.dll

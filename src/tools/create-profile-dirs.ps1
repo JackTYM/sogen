@@ -25,3 +25,16 @@ Get-ChildItem $profileListPath -ErrorAction SilentlyContinue | ForEach-Object {
         }
     }
 }
+
+# C:\Users\Public is not a profile of ProfileList but the "Public" value of that key; known-folder lookups (FOLDERID_Public) and
+# installer custom actions that save files there fail without the directory tree.
+$pub = (Get-ItemProperty -Path $profileListPath -Name Public -ErrorAction SilentlyContinue).Public
+if ($pub) {
+    $low = ([Environment]::ExpandEnvironmentVariables($pub)).ToLower() -replace '^([a-z]):', '$1'
+    $target = Join-Path $FilesysRoot $low
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    Write-Host 'Created:' $target
+    @('desktop', 'documents', 'downloads', 'music', 'pictures', 'videos') | ForEach-Object {
+        New-Item -ItemType Directory -Path (Join-Path $target $_) -Force | Out-Null
+    }
+}
