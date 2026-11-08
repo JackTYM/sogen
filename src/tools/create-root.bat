@@ -331,6 +331,7 @@ CALL :collect_dir "%WINDIR%\SysWOW64\wbem", %EMU_SYSDIR_WOW64%\wbem
 CALL :collect_dir "%WINDIR%\System32\en-US", %EMU_SYSDIR%\en-US
 CALL :collect_dir "%WINDIR%\SysWOW64\en-US", %EMU_SYSDIR_WOW64%\en-US
 CALL :collect_dir "%WINDIR%\Microsoft.NET", %EMU_WINDIR%\Microsoft.NET
+powershell -NoProfile -ExecutionPolicy Bypass -Command "foreach ($d in 'WinSxS','assembly','Microsoft.NET','SysWOW64','System32') { $s = (Get-ChildItem -LiteralPath (Join-Path $env:WINDIR $d) -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum; Write-Host ('SIZE ' + $d + ' ' + [math]::Round($s / 1MB) + ' MB') }"
 
 EXIT /B 0
 
