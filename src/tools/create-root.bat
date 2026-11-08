@@ -32,12 +32,14 @@ REG SAVE HKLM\SYSTEM %EMU_REGDIR%\SYSTEM /Y
 COPY /B /Y C:\Users\Default\NTUSER.DAT "%EMU_REGDIR%\NTUSER.DAT"
 
 CALL :collect advapi32.dll
+CALL :collect appresolver.dll
 CALL :collect attrib.exe
 CALL :collect bcrypt.dll
 CALL :collect bcryptprimitives.dll
 CALL :collect cabinet.dll
 CALL :collect cfgmgr32.dll
 CALL :collect ci.dll
+CALL :collect cmd.exe
 CALL :collect coloradapterclient.dll
 CALL :collect combase.dll
 CALL :collect comctl32.dll
@@ -81,6 +83,7 @@ CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
+CALL :collect logoncli.dll
 CALL :collect mfc140u.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
@@ -125,10 +128,14 @@ CALL :collect rasadhlp.dll
 CALL :collect reg.exe
 CALL :collect regsvr32.exe
 CALL :collect resampledmo.dll
+CALL :collect rpcepmap.dll
 CALL :collect rpcrt4.dll
+CALL :collect rpcss.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect rundll32.exe
+CALL :collect samcli.dll
+CALL :collect samlib.dll
 CALL :collect sc.exe
 CALL :collect sechost.dll
 CALL :collect setupapi.dll
@@ -139,6 +146,8 @@ CALL :collect slwga.dll
 CALL :collect sppc.dll
 CALL :collect srvcli.dll
 CALL :collect sspicli.dll
+CALL :collect svchost.exe
+CALL :collect twinapi.appcore.dll
 CALL :collect ucrtbase.dll
 CALL :collect ucrtbased.dll
 CALL :collect uiautomationcore.dll
@@ -154,6 +163,7 @@ CALL :collect vcruntime140_1.dll
 CALL :collect vcruntime140_1d.dll
 CALL :collect vcruntime140d.dll
 CALL :collect version.dll
+CALL :collect virtdisk.dll
 CALL :collect wer.dll
 CALL :collect win32u.dll
 CALL :collect windows.storage.dll
@@ -167,6 +177,7 @@ CALL :collect wintrust.dll
 CALL :collect wintypes.dll
 CALL :collect wlanapi.dll
 CALL :collect wldap32.dll
+CALL :collect wldp.dll
 CALL :collect wow64.dll
 CALL :collect wow64base.dll
 CALL :collect wow64con.dll
