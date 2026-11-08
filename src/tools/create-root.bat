@@ -74,6 +74,7 @@ CALL :collect hid.dll
 CALL :collect icacls.exe
 CALL :collect imm32.dll
 CALL :collect imagehlp.dll
+CALL :collect iertutil.dll
 CALL :collect iphlpapi.dll
 CALL :collect kdcom.dll
 CALL :collect kernel.appcore.dll
