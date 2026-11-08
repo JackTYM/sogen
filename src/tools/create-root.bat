@@ -181,6 +181,21 @@ CALL :collect locale.nls
 CALL :collect c_1252.nls
 CALL :collect c_437.nls
 CALL :collect c_850.nls
+CALL :collect schannel.dll
+CALL :collect wdigest.dll
+CALL :collect pku2u.dll
+CALL :collect TSpkg.dll
+CALL :collect negoexts.dll
+CALL :collect cloudAP.dll
+CALL :collect cryptngc.dll
+CALL :collect dsreg.dll
+CALL :collect kdcpw.dll
+CALL :collect netlogon.dll
+CALL :collect gmsaclient.dll
+CALL :collect scecli.dll
+CALL :collect credssp.dll
+CALL :collect ncryptprov.dll
+CALL :collect ncryptsslp.dll
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 
