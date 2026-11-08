@@ -33,6 +33,7 @@ COPY /B /Y C:\Users\Default\NTUSER.DAT "%EMU_REGDIR%\NTUSER.DAT"
 
 CALL :collect advapi32.dll
 CALL :collect apisetschema.dll
+CALL :collect apphelp.dll
 CALL :collect appresolver.dll
 CALL :collect appxdeploymentclient.dll
 CALL :collect attrib.exe
@@ -80,6 +81,7 @@ CALL :collect dcomp.dll
 CALL :collect ddraw.dll
 CALL :collect devobj.dll
 CALL :collect dhcpcsvc.DLL
+CALL :collect dhcpcsvc6.dll
 CALL :collect diagnosticdatasettings.dll
 CALL :collect dinput8.dll
 CALL :collect dnsapi.dll
@@ -101,6 +103,7 @@ CALL :collect gdi32.dll
 CALL :collect gdi32full.dll
 CALL :collect gdiplus.dll
 CALL :collect glu32.dll
+CALL :collect gpapi.dll
 CALL :collect hal.dll
 CALL :collect hid.dll
 CALL :collect icacls.exe
@@ -170,6 +173,7 @@ CALL :collect ncrypt.dll
 CALL :collect NDFAPI.DLL
 CALL :collect net.exe
 CALL :collect netapi32.dll
+CALL :collect netjoin.dll
 CALL :collect netmsg.dll
 CALL :collect netprofm.dll
 CALL :collect netprovfw.dll
@@ -209,6 +213,7 @@ CALL :collect rpcrt4.dll
 CALL :collect rpcss.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
+CALL :collect rtworkq.dll
 CALL :collect rundll32.exe
 CALL :collect samcli.dll
 CALL :collect samlib.dll
@@ -255,6 +260,7 @@ CALL :collect vcruntime140_clr0400.dll
 CALL :collect vcruntime140d.dll
 CALL :collect version.dll
 CALL :collect virtdisk.dll
+CALL :collect wbemcomn.dll
 CALL :collect wdmaud.drv
 CALL :collect wer.dll
 CALL :collect wevtapi.dll
@@ -270,6 +276,7 @@ CALL :collect winmm.dll
 CALL :collect winmmbase.dll
 CALL :collect winnlsres.dll
 CALL :collect winspool.drv
+CALL :collect winsta.dll
 CALL :collect wintrust.dll
 CALL :collect wintypes.dll
 CALL :collect WINUSB.DLL
@@ -319,6 +326,11 @@ CALL :collect ncryptprov.dll
 CALL :collect ncryptsslp.dll
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
+CALL :collect_dir "%WINDIR%\System32\wbem", %EMU_SYSDIR%\wbem
+CALL :collect_dir "%WINDIR%\SysWOW64\wbem", %EMU_SYSDIR_WOW64%\wbem
+CALL :collect_dir "%WINDIR%\System32\en-US", %EMU_SYSDIR%\en-US
+CALL :collect_dir "%WINDIR%\SysWOW64\en-US", %EMU_SYSDIR_WOW64%\en-US
+CALL :collect_dir "%WINDIR%\Microsoft.NET", %EMU_WINDIR%\Microsoft.NET
 
 EXIT /B 0
 
@@ -341,3 +353,9 @@ CALL :collect_file %SYSDIR%, %~1, %EMU_SYSDIR%
 CALL :collect_file %SYSDIR_WOW64%, %~1, %EMU_SYSDIR_WOW64%
 EXIT /B
 
+:collect_dir
+IF EXIST "%~1" (
+	ECHO %~1 -^> %~2
+	robocopy "%~1" "%~2" /E /NFL /NDL /NJH /NJS /NP >NUL
+)
+EXIT /B 0
