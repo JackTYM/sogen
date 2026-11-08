@@ -499,6 +499,12 @@ namespace sogen
         }
 
         template <typename T>
+        bool is_backed_up_to_size_of_image(const PEOptionalHeader_t<T>& optional_header)
+        {
+            return optional_header.SectionAlignment <= page_align_up(1);
+        }
+
+        template <typename T>
         bool map_sections(memory_manager& memory, mapped_module& binary, const utils::safe_buffer_accessor<const std::byte> buffer,
                           const PENTHeaders_t<T>& nt_headers, const uint64_t nt_headers_offset)
         {
@@ -560,9 +566,9 @@ namespace sogen
             return true;
         }
 
-        bool protect_module_memory(memory_manager& memory, const mapped_module& binary, const size_t headers_size)
+        bool protect_module_memory(memory_manager& memory, const mapped_module& binary, const size_t read_only_size)
         {
-            if (!memory.protect_memory(binary.image_base, headers_size, memory_permission::read))
+            if (!memory.protect_memory(binary.image_base, read_only_size, memory_permission::read))
             {
                 return false;
             }
@@ -603,8 +609,8 @@ namespace sogen
 
             const auto mapped_as_one_region = is_mapped_as_one_region(optional_header);
             const auto headers_size = static_cast<size_t>(page_align_up(optional_header.SizeOfHeaders));
-            const auto initial_commit_size = mapped_as_one_region ? image_size : headers_size;
-            if (!memory.commit_image_memory(binary.image_base, initial_commit_size, memory_permission::read_write))
+            const auto backed_size = is_backed_up_to_size_of_image(optional_header) ? image_size : headers_size;
+            if (!memory.commit_image_memory(binary.image_base, backed_size, memory_permission::read_write))
             {
                 memory.release_memory(binary.image_base, 0);
                 return false;
@@ -634,7 +640,7 @@ namespace sogen
                 // TODO: Make sure to match kernel allocation patterns to attain correct initial permissions!
                 const auto protected_ok = mapped_as_one_region
                                               ? memory.protect_memory(binary.image_base, image_size, memory_permission::all)
-                                              : protect_module_memory(memory, binary, headers_size);
+                                              : protect_module_memory(memory, binary, backed_size);
                 if (!protected_ok)
                 {
                     throw std::runtime_error("Failed to protect mapped module memory");
