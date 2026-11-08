@@ -80,6 +80,7 @@ CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
+CALL :collect mfc140u.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
 CALL :collect mobilenetworking.dll
