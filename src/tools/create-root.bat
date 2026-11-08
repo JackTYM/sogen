@@ -89,6 +89,7 @@ CALL :collect dpapi.dll
 CALL :collect dpapisrv.dll
 CALL :collect dsound.dll
 CALL :collect dsparse.dll
+CALL :collect dsrole.dll
 CALL :collect dwmapi.dll
 CALL :collect dwrite.dll
 CALL :collect dxcore.dll
