@@ -310,6 +310,33 @@ namespace sogen::test
         EXPECT_EQ(relocated.sections.front().region.permissions, memory_permission::read | memory_permission::exec);
     }
 
+    TYPED_TEST(WindowsArchitectureTest, NonRelocatableImageIsRebasedWhenItsPreferredBaseIsTaken)
+    {
+        constexpr auto machine = TypeParam::pe_machine;
+        auto image = make_test_image<uint64_t>(machine);
+
+        // An EXE with its relocations stripped, like an installer's sldim.exe: no DLL flag, no dynamic base, no fixups.
+        constexpr uint16_t relocs_stripped = 0x0001;
+        const auto characteristics_offset = image_nt_offset + offsetof(PENTHeaders_t<uint64_t>, FileHeader.Characteristics);
+        std::memcpy(image.data() + characteristics_offset, &relocs_stripped, sizeof(relocs_stripped));
+        const auto reloc_directory_offset = image_nt_offset + offsetof(PENTHeaders_t<uint64_t>, OptionalHeader.DataDirectory) +
+                                            IMAGE_DIRECTORY_ENTRY_BASERELOC * sizeof(IMAGE_DATA_DIRECTORY);
+        const IMAGE_DATA_DIRECTORY no_relocations{};
+        std::memcpy(image.data() + reloc_directory_offset, &no_relocations, sizeof(no_relocations));
+
+        const auto first = map_module_from_data<uint64_t>(this->memory_, image, "a.exe", windows_path{"C:\\a.exe"});
+        ASSERT_EQ(first.image_base, image_base);
+
+        // Without a target the map still fails; the image-section path opts in by passing the preferred base.
+        EXPECT_THROW(map_module_from_data<uint64_t>(this->memory_, image, "b.exe", windows_path{"C:\\b.exe"}), std::runtime_error);
+
+        // With the preferred base as the target it lands elsewhere, unrelocated, remembering the file's base.
+        const auto second = map_module_from_data<uint64_t>(this->memory_, image, "c.exe", windows_path{"C:\\c.exe"}, image_base);
+        EXPECT_NE(second.image_base, image_base);
+        EXPECT_EQ(second.image_base_file, image_base);
+        EXPECT_EQ(this->memory_.template read_memory<uint64_t>(second.image_base + 0x1010), image_base + 0x1200);
+    }
+
     TYPED_TEST(WindowsArchitectureTest, Pe32MemoryMappingKeepsItsNativeHeaderLayout)
     {
         const auto image = make_test_image<uint32_t>(PEMachineType::I386);

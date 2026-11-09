@@ -624,6 +624,22 @@ namespace sogen
                     }
                 }
 
+                // An image that cannot be relocated (an EXE without a dynamic base, relocations stripped) is still
+                // viewable when its preferred base is taken: Windows maps it elsewhere, applies no fixups and reports
+                // STATUS_IMAGE_NOT_AT_BASE (resource and data loads, SEC_IMAGE_NO_EXECUTE, never execute it). Passing the
+                // preferred base as the target makes map_module fall back to another base instead of failing the map.
+                bool non_relocatable = false;
+                if (section_entry->object->cached_image_info)
+                {
+                    const auto& info = *section_entry->object->cached_image_info;
+                    non_relocatable =
+                        !(info.image_characteristics & IMAGE_FILE_DLL) && !(info.dll_characteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE);
+                    if (relocation_base == 0 && non_relocatable)
+                    {
+                        relocation_base = info.image_base;
+                    }
+                }
+
                 const auto* binary =
                     c.win_emu.mod_manager.map_module(section_entry->object->file_name, c.win_emu.log, false, true, relocation_base);
                 if (!binary)
@@ -645,6 +661,11 @@ namespace sogen
                 if (!c.win_emu.process.is_wow64_process && binary->machine == IMAGE_FILE_MACHINE_I386)
                 {
                     return STATUS_IMAGE_MACHINE_TYPE_MISMATCH;
+                }
+
+                if (non_relocatable && binary->image_base != binary->image_base_file)
+                {
+                    return STATUS_IMAGE_NOT_AT_BASE;
                 }
 
                 if (c.win_emu.mod_manager.get_module_load_count_by_path(section_entry->object->file_name) > 1)
