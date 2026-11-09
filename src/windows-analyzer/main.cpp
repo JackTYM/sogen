@@ -858,6 +858,7 @@ namespace sogen
             e.type = inherited.type;
             e.set_signaled(inherited.signaled);
             e.name = inherited.name;
+            e.inherit = true;
             if (inherited.arena_slot >= 0)
             {
                 e.state.adopt(win_emu.process.shared_arena, static_cast<uint32_t>(inherited.arena_slot));

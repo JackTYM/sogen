@@ -2006,6 +2006,19 @@ namespace sogen
                 }
             }
 
+            // Same for events: a bInheritHandles CreateProcess without a handle list (kernel32 only builds the list for
+            // STARTUPINFOEX) hands the child every inheritable event, e.g. the "go"/"ready" events of a parent/child pair.
+            if (!has_handle_list_attribute && (process_flags & process_create_flags_inherit_handles))
+            {
+                for (const auto& [index, event_object] : c.proc.events)
+                {
+                    if (event_object.inherit)
+                    {
+                        inherited_handles.push_back(c.proc.events.make_handle(index));
+                    }
+                }
+            }
+
             const windows_path image_windows_path{image_path};
             if (!image_windows_path.is_absolute())
             {
