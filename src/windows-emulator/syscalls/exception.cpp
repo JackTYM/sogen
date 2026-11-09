@@ -102,6 +102,24 @@ namespace sogen
                 }
             }
 
+            // A loader hard error (missing DLL, ordinal or entry point) is a message box on Windows, not a process kill:
+            // the box returns OK, LdrLoadDll fails with the status and the caller decides. A runtime LoadLibrary or COM
+            // activation of a DLL with a missing import therefore fails softly; a failure during process initialization
+            // still ends the process, because ntdll terminates it itself after the report.
+            constexpr NTSTATUS loader_dll_not_found = static_cast<NTSTATUS>(0xC0000135L);
+            constexpr NTSTATUS loader_ordinal_not_found = static_cast<NTSTATUS>(0xC0000138L);
+            constexpr NTSTATUS loader_entrypoint_not_found = static_cast<NTSTATUS>(0xC0000139L);
+            if (error_status == loader_dll_not_found || error_status == loader_ordinal_not_found ||
+                error_status == loader_entrypoint_not_found)
+            {
+                if (response)
+                {
+                    response.try_write(ResponseOk);
+                }
+                c.win_emu.log.error("NtRaiseHardError: loader status 0x%X answered OK, process continues\n", error_status);
+                return STATUS_SUCCESS;
+            }
+
             c.proc.exit_status = error_status;
             c.win_emu.callbacks.on_exception();
             c.emu.stop();
