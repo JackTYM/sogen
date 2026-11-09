@@ -14,15 +14,15 @@ namespace sogen
         {
             constexpr uint32_t JOB_OBJECT_BASIC_LIMIT_INFORMATION_CLASS = 2;
             constexpr uint32_t JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9;
-            constexpr uint32_t JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
-            constexpr uint32_t JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800;
-            constexpr uint32_t JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000;
-            constexpr uint32_t JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x00000400;
-            constexpr uint32_t JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
-            constexpr uint32_t JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100;
+            constexpr uint32_t job_object_limit_kill_on_job_close = 0x00002000;
+            constexpr uint32_t job_object_limit_breakaway_ok = 0x00000800;
+            constexpr uint32_t job_object_limit_silent_breakaway_ok = 0x00001000;
+            constexpr uint32_t job_object_limit_die_on_unhandled_exception = 0x00000400;
+            constexpr uint32_t job_object_limit_active_process = 0x00000008;
+            constexpr uint32_t job_object_limit_process_memory = 0x00000100;
             constexpr uint32_t SUPPORTED_JOB_OBJECT_LIMIT_FLAGS =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK |
-                JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION | JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+                job_object_limit_kill_on_job_close | job_object_limit_breakaway_ok | job_object_limit_silent_breakaway_ok |
+                job_object_limit_die_on_unhandled_exception | job_object_limit_active_process | job_object_limit_process_memory;
 
             // JOBOBJECT_EXTENDED_LIMIT_INFORMATION wraps JOBOBJECT_BASIC_LIMIT_INFORMATION as its
             // first member, so LimitFlags sits at the same offset for both info classes: past the two
@@ -87,12 +87,12 @@ namespace sogen
             {
                 job_limits limits{};
 
-                if ((limit_flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS) != 0)
+                if ((limit_flags & job_object_limit_active_process) != 0)
                 {
                     limits.active_processes = c.emu.read_memory<uint32_t>(information + JOB_OBJECT_ACTIVE_PROCESS_LIMIT_OFFSET);
                 }
 
-                if ((limit_flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY) != 0)
+                if ((limit_flags & job_object_limit_process_memory) != 0)
                 {
                     limits.process_memory = c.emu.read_memory<uint64_t>(information + JOB_OBJECT_PROCESS_MEMORY_LIMIT_OFFSET);
                 }
@@ -213,13 +213,13 @@ namespace sogen
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                const bool limits_active_processes = (limit_flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS) != 0;
+                const bool limits_active_processes = (limit_flags & job_object_limit_active_process) != 0;
                 if (limits_active_processes && job_object_information_length < JOB_OBJECT_ACTIVE_PROCESS_LIMIT_OFFSET + sizeof(uint32_t))
                 {
                     return STATUS_INFO_LENGTH_MISMATCH;
                 }
 
-                const bool limits_process_memory = (limit_flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY) != 0;
+                const bool limits_process_memory = (limit_flags & job_object_limit_process_memory) != 0;
                 if (limits_process_memory && (job_object_information_class != JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS ||
                                               job_object_information_length < JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_SIZE))
                 {
@@ -230,7 +230,7 @@ namespace sogen
                 job->limits = read_job_limits(c, job_object_information, limit_flags);
                 apply_limits_to_members(c, *job);
 
-                if ((limit_flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) != 0)
+                if ((limit_flags & job_object_limit_kill_on_job_close) != 0)
                 {
                     job->kill_on_close = true;
                 }

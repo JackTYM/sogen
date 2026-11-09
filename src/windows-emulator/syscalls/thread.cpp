@@ -25,13 +25,13 @@ namespace sogen
             // is nowhere to stash a distinct per-thread right for a pseudo handle. PROCESS_SUSPEND_RESUME
             // is the closest real NT process-level right for this operation, so it is used here as the
             // required access, consistent with every other cross-process check in this codebase.
-            constexpr ACCESS_MASK PROCESS_SUSPEND_RESUME = 0x0800;
+            constexpr ACCESS_MASK process_suspend_resume = 0x0800;
 
             // Same reasoning as PROCESS_SUSPEND_RESUME above, for NtSetInformationThread's
             // ThreadImpersonationToken case: real Windows requires THREAD_SET_THREAD_TOKEN on the
             // thread, which this codebase has no per-thread model for either. PROCESS_SET_INFORMATION
             // is the closest process-level right.
-            constexpr ACCESS_MASK PROCESS_SET_INFORMATION = 0x0200;
+            constexpr ACCESS_MASK process_set_information = 0x0200;
 
             // The child answers with its whole context; the caller's buffer keeps the ContextFlags it asked with.
             NTSTATUS get_child_thread_context(const syscall_context& c, const managed_process_thread& thread, const uint64_t context,
@@ -169,7 +169,7 @@ namespace sogen
             if (info_class == ThreadImpersonationToken && thread_handle.value.is_pseudo &&
                 thread_handle.value.type == handle_types::thread && c.proc.child_processes.contains(thread_handle.value.id))
             {
-                const auto child = resolve_child_target(c, thread_handle, PROCESS_SET_INFORMATION);
+                const auto child = resolve_child_target(c, thread_handle, process_set_information);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -1009,7 +1009,7 @@ namespace sogen
             if (thread_handle.value.is_pseudo && thread_handle.value.type == handle_types::thread &&
                 c.proc.child_processes.contains(thread_handle.value.id))
             {
-                const auto child = resolve_child_target(c, thread_handle, PROCESS_SET_INFORMATION);
+                const auto child = resolve_child_target(c, thread_handle, process_set_information);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -1239,7 +1239,7 @@ namespace sogen
             if (thread_handle.value.is_pseudo && thread_handle.value.type == handle_types::thread &&
                 c.proc.child_processes.contains(thread_handle.value.id))
             {
-                const auto child = resolve_child_target(c, thread_handle, PROCESS_SUSPEND_RESUME);
+                const auto child = resolve_child_target(c, thread_handle, process_suspend_resume);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);

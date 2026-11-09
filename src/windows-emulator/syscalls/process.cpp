@@ -19,9 +19,9 @@ namespace sogen
     {
         namespace
         {
-            constexpr ACCESS_MASK PROCESS_TERMINATE = 0x0001;
-            constexpr ACCESS_MASK PROCESS_QUERY_INFORMATION = 0x0400;
-            constexpr ACCESS_MASK PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+            constexpr ACCESS_MASK process_terminate = 0x0001;
+            constexpr ACCESS_MASK process_query_information = 0x0400;
+            constexpr ACCESS_MASK process_query_limited_information = 0x1000;
 
             uint64_t spawn_race_timing_now_us()
             {
@@ -592,7 +592,7 @@ namespace sogen
 
         NTSTATUS suspend_or_resume_process(const syscall_context& c, const handle process_handle, const bool suspend)
         {
-            constexpr ACCESS_MASK PROCESS_SUSPEND_RESUME = 0x0800;
+            constexpr ACCESS_MASK process_suspend_resume = 0x0800;
 
             if (c.proc.is_current_process_handle(process_handle))
             {
@@ -616,7 +616,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            const auto child = resolve_child_target(c, process_handle, PROCESS_SUSPEND_RESUME);
+            const auto child = resolve_child_target(c, process_handle, process_suspend_resume);
             if (std::holds_alternative<NTSTATUS>(child))
             {
                 return std::get<NTSTATUS>(child);
@@ -754,7 +754,7 @@ namespace sogen
                 // away.
                 if (info_class == ProcessBasicInformation)
                 {
-                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    const auto child = resolve_child_record(c, process_handle, process_query_limited_information);
                     if (std::holds_alternative<NTSTATUS>(child))
                     {
                         return std::get<NTSTATUS>(child);
@@ -802,7 +802,7 @@ namespace sogen
 
                 if (info_class == ProcessProtectionInformation)
                 {
-                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    const auto child = resolve_child_record(c, process_handle, process_query_limited_information);
                     if (std::holds_alternative<NTSTATUS>(child))
                     {
                         return std::get<NTSTATUS>(child);
@@ -814,7 +814,7 @@ namespace sogen
 
                 if (info_class == ProcessSessionInformation)
                 {
-                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    const auto child = resolve_child_record(c, process_handle, process_query_limited_information);
                     if (std::holds_alternative<NTSTATUS>(child))
                     {
                         return std::get<NTSTATUS>(child);
@@ -857,7 +857,7 @@ namespace sogen
                         // execute_query_wow64_info. Falls through to STATUS_NOT_SUPPORTED below if no
                         // live channel exists to ask (matching this branch's own pre-existing behavior
                         // for every other unresolvable case).
-                        const auto target = resolve_child_target(c, process_handle, PROCESS_QUERY_INFORMATION);
+                        const auto target = resolve_child_target(c, process_handle, process_query_information);
                         if (std::holds_alternative<child_target>(target))
                         {
                             process_control_request request{};
@@ -894,7 +894,7 @@ namespace sogen
                     // PROCESS_QUERY_INFORMATION or PROCESS_QUERY_LIMITED_INFORMATION, so this checks
                     // for the lesser of the two - same reasoning as the ProcessBasicInformation check
                     // above.
-                    const auto record = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    const auto record = resolve_child_record(c, process_handle, process_query_limited_information);
                     if (std::holds_alternative<const process_context::child_process_record*>(record))
                     {
                         uint64_t accumulated_cycles = 0;
@@ -1708,7 +1708,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+            const auto child = resolve_child_record(c, process_handle, process_query_limited_information);
             if (std::holds_alternative<NTSTATUS>(child))
             {
                 return std::get<NTSTATUS>(child);
@@ -1814,7 +1814,7 @@ namespace sogen
                 return map_process_error(c.win_emu.processes()->terminate_process(managed->process, static_cast<uint32_t>(exit_status)));
             }
 
-            const auto child = resolve_child_target(c, process_handle, PROCESS_TERMINATE);
+            const auto child = resolve_child_target(c, process_handle, process_terminate);
             if (std::holds_alternative<NTSTATUS>(child))
             {
                 return std::get<NTSTATUS>(child);

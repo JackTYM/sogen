@@ -24,7 +24,7 @@ namespace sogen
 
         namespace
         {
-            constexpr ACCESS_MASK PROCESS_DUP_HANDLE = 0x0040;
+            constexpr ACCESS_MASK process_dup_handle = 0x0040;
 
             // DuplicateHandle of a section, event, mutant or semaphore into a child host process. On real
             // Windows the two handles refer to one kernel object. Here the object's state lives in shared
@@ -58,7 +58,7 @@ namespace sogen
                     description.granted_access = same_access ? description.granted_access : desired_access;
                 }
 
-                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                const auto child = resolve_child_target(c, target_process_handle, process_dup_handle);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -95,7 +95,7 @@ namespace sogen
                                                  const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
                                                  const ULONG options)
             {
-                const auto child = resolve_child_target(c, source_process_handle, PROCESS_DUP_HANDLE);
+                const auto child = resolve_child_target(c, source_process_handle, process_dup_handle);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);

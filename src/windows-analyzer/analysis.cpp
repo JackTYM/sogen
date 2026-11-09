@@ -5682,7 +5682,7 @@ namespace sogen
 
         void trace_create_named_pipe_hit(const analysis_context& c, const uint64_t address)
         {
-            constexpr uint32_t FILE_FLAG_OVERLAPPED = 0x40000000;
+            constexpr uint32_t file_flag_overlapped = 0x40000000;
 
             auto& emu = c.win_emu->active_x64_cpu();
             const auto rsp = emu.read_stack_pointer();
@@ -5714,7 +5714,7 @@ namespace sogen
             c.win_emu->log.error("[named-pipe-create-trace] hit at 0x%llx, name=\"%s\" dwOpenMode=0x%x overlapped=%d dwPipeMode=0x%x "
                                  "nMaxInstances=%u tid=%u return=0x%llx (%s+0x%llx)\n",
                                  static_cast<unsigned long long>(address), name.c_str(), dw_open_mode,
-                                 (dw_open_mode & FILE_FLAG_OVERLAPPED) != 0, dw_pipe_mode, n_max_instances, c.win_emu->current_thread().id,
+                                 (dw_open_mode & file_flag_overlapped) != 0, dw_pipe_mode, n_max_instances, c.win_emu->current_thread().id,
                                  static_cast<unsigned long long>(return_address), caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
         }
