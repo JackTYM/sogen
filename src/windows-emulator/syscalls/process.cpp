@@ -920,6 +920,26 @@ namespace sogen
                     }
                 }
 
+                if (info_class == ProcessTimes)
+                {
+                    // GetProcessTimes on a child/sibling handle. Chromium's
+                    // base::ProcessMetrics::GetCumulativeCPUUsage takes this path instead of
+                    // QueryProcessCycleTime whenever base::time_internal::HasConstantRateTSC() is false
+                    // or TSCTicksPerSecond() is 0 (GetImpreciseCumulativeCPUUsage), and treats a failure
+                    // as NOTREACHED (int3): the WebView2 browser process died with STATUS_BREAKPOINT at
+                    // msedge.dll 150.0.4078.105 +0x41e5d0e under the WHP backend. Answer for any process
+                    // this one knows, live or not, with the same zero times the own-process branch below
+                    // reports.
+                    const auto record = resolve_child_record(c, process_handle, process_query_limited_information);
+                    if (std::holds_alternative<const process_context::child_process_record*>(record))
+                    {
+                        return handle_query<KERNEL_USER_TIMES>(c.emu, process_information, process_information_length, return_length,
+                                                               [](KERNEL_USER_TIMES& t) {
+                                                                   t = {}; //
+                                                               });
+                    }
+                }
+
                 return STATUS_NOT_SUPPORTED;
             }
 
