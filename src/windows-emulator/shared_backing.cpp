@@ -16,6 +16,10 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+// Windows hosts: pagefile-backed file mappings (utils::host_shm); native_fd() carries the mapping handle.
+#define SOGEN_SHARED_BACKING_WIN32 1
+#include <utils/host_shared_memory.hpp>
 #endif
 
 namespace sogen
@@ -91,11 +95,20 @@ namespace sogen
             return -1;
         }
 #endif
+
+#if defined(SOGEN_SHARED_BACKING_WIN32)
+        constexpr size_t host_page_size = 0x1000;
+
+        size_t round_to_page(const size_t size)
+        {
+            return (size + host_page_size - 1) & ~(host_page_size - 1);
+        }
+#endif
     }
 
     bool shared_backing::supports_sharing()
     {
-#if defined(SOGEN_SHARED_BACKING_POSIX)
+#if defined(SOGEN_SHARED_BACKING_POSIX) || defined(SOGEN_SHARED_BACKING_WIN32)
         return true;
 #else
         return false;
@@ -137,6 +150,18 @@ namespace sogen
                 }
 
                 ::close(fd);
+            }
+        }
+#elif defined(SOGEN_SHARED_BACKING_WIN32)
+        if (size != 0)
+        {
+            const int handle = utils::host_shm::create_anonymous(round_to_page(size));
+            if (handle >= 0)
+            {
+                if (auto backing = adopt_fd(handle, size))
+                {
+                    return backing;
+                }
             }
         }
 #endif
@@ -187,6 +212,16 @@ namespace sogen
             }
             return backing;
         }
+#elif defined(SOGEN_SHARED_BACKING_WIN32)
+        // A Windows mapping name lives exactly as long as some handle to the object is open (no unlink step), so
+        // unlink_named has nothing to do; the creator's backing keeps the name alive like the POSIX object.
+        const int handle = utils::host_shm::create_unique_named(round_to_page(size), shm_name);
+        if (handle < 0)
+        {
+            return nullptr;
+        }
+
+        return adopt_fd(handle, size);
 #else
         (void)size;
         (void)shm_name;
@@ -205,6 +240,14 @@ namespace sogen
 
         ::fcntl(fd, F_SETFD, FD_CLOEXEC);
         return adopt_fd(fd, size);
+#elif defined(SOGEN_SHARED_BACKING_WIN32)
+        const int handle = utils::host_shm::open_named(shm_name);
+        if (handle < 0)
+        {
+            return nullptr;
+        }
+
+        return adopt_fd(handle, size);
 #else
         (void)shm_name;
         (void)size;
@@ -238,6 +281,21 @@ namespace sogen
         backing->mapped_size_ = mapped_size;
         backing->fd_ = fd;
         return backing;
+#elif defined(SOGEN_SHARED_BACKING_WIN32)
+        const auto mapped_size = round_to_page(size);
+        void* const mapping = utils::host_shm::map(fd, mapped_size);
+        if (!mapping)
+        {
+            utils::host_shm::close(fd);
+            return nullptr;
+        }
+
+        std::shared_ptr<shared_backing> backing{new shared_backing{}};
+        backing->data_ = static_cast<std::byte*>(mapping);
+        backing->size_ = size;
+        backing->mapped_size_ = mapped_size;
+        backing->fd_ = fd;
+        return backing;
 #else
         (void)fd;
         (void)size;
@@ -262,6 +320,12 @@ namespace sogen
         {
             ::munmap(this->data_, this->mapped_size_);
             ::close(this->fd_);
+        }
+#elif defined(SOGEN_SHARED_BACKING_WIN32)
+        if (this->fd_ >= 0)
+        {
+            utils::host_shm::unmap(this->data_);
+            utils::host_shm::close(this->fd_);
         }
 #endif
     }

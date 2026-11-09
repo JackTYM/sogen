@@ -14,7 +14,8 @@ namespace sogen
     // synchronization state, ...). On POSIX hosts it is a real MAP_SHARED mapping of an anonymous
     // shared-memory object, whose file descriptor can be passed to another sogen host process
     // (SCM_RIGHTS) so both processes map the very same physical pages - matching real Windows section
-    // semantics. Where that is unavailable (Windows/Emscripten hosts, or shm_open failing) it falls
+    // semantics. On Windows hosts it is a pagefile-backed file mapping whose handle plays the descriptor's
+    // role (passed with DuplicateHandle). Where neither is available (Emscripten, or creation failing) it falls
     // back to a plain private heap buffer, which callers can still ship across a process boundary as a
     // one-time content snapshot (content()/create_from_content()).
     class shared_backing

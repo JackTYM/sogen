@@ -291,6 +291,8 @@ namespace sogen
                 {
 #if !defined(_WIN32) && !defined(OS_EMSCRIPTEN) && !defined(__EMSCRIPTEN__)
                     ::sched_yield();
+#elif defined(_WIN32)
+                    std::this_thread::yield();
 #endif
                 }
             }
