@@ -1496,7 +1496,7 @@ namespace sogen
         uint64_t Callback;
     };
 
-    constexpr ULONG PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
+    constexpr ULONG power_throttling_current_version = 1;
 
     struct POWER_THROTTLING_PROCESS_STATE
     {

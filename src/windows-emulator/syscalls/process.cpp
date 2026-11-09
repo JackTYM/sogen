@@ -1435,7 +1435,7 @@ namespace sogen
                 }
 
                 const auto state = c.emu.read_memory<POWER_THROTTLING_PROCESS_STATE>(process_information);
-                return state.Version == PROCESS_POWER_THROTTLING_CURRENT_VERSION ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+                return state.Version == power_throttling_current_version ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
 
             if (info_class == ProcessSchedulerSharedData                     //
