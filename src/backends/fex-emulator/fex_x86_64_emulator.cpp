@@ -57,6 +57,8 @@
 #endif
 
 #include <atomic>
+#include <chrono>
+#include <time.h>
 #include <array>
 #include <bit>
 #include <cerrno>
@@ -106,6 +108,138 @@ namespace sogen::fex
 
     namespace
     {
+        // X5 TEMPORARY MEASUREMENT COUNTER - never commit upstream.
+        struct x5_counters
+        {
+            std::atomic<uint64_t> faults{0};
+            std::atomic<uint64_t> kusd{0};
+            std::atomic<uint64_t> handler_ns{0};
+            std::atomic<uint64_t> sigpath_ns{0};
+            std::atomic<int64_t> window_start_sys_ns{0};
+            std::atomic<int64_t> window_start_ns{0};
+            std::atomic<int64_t> window_start_cpu_ns{0};
+            std::atomic<uint64_t> total_faults{0};
+            std::atomic<uint64_t> total_handler_ns{0};
+            std::atomic<uint64_t> windows{0};
+            std::array<std::atomic<uint64_t>, 0x1000> per_offset{};
+        };
+
+        x5_counters g_x5{};
+        thread_local int64_t g_x5_signal_entry_ns = 0;
+
+        int64_t x5_thread_sys_ns()
+        {
+            thread_basic_info_data_t info{};
+            mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+            const auto port = mach_thread_self();
+            thread_info(port, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count);
+            mach_port_deallocate(mach_task_self(), port);
+            return static_cast<int64_t>(info.system_time.seconds) * 1000000000LL + static_cast<int64_t>(info.system_time.microseconds) * 1000LL;
+        }
+
+        int64_t x5_thread_cpu_ns()
+        {
+            timespec ts{};
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+            return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+        }
+
+        void x5_write(const char* buf, int len)
+        {
+            if (len > 0)
+            {
+                ::write(STDERR_FILENO, buf, static_cast<size_t>(len));
+            }
+        }
+
+        void x5_record(uint64_t guest_addr, int64_t start_ns, int64_t end_ns)
+        {
+            constexpr uint64_t kusd_base = 0x7FFE0000ULL;
+            const auto elapsed = static_cast<uint64_t>(end_ns - start_ns);
+            g_x5.faults.fetch_add(1, std::memory_order_relaxed);
+            g_x5.handler_ns.fetch_add(elapsed, std::memory_order_relaxed);
+            if (g_x5_signal_entry_ns != 0)
+            {
+                g_x5.sigpath_ns.fetch_add(static_cast<uint64_t>(end_ns - g_x5_signal_entry_ns), std::memory_order_relaxed);
+            }
+            g_x5.total_faults.fetch_add(1, std::memory_order_relaxed);
+            g_x5.total_handler_ns.fetch_add(elapsed, std::memory_order_relaxed);
+            if (guest_addr >= kusd_base && guest_addr < kusd_base + 0x1000)
+            {
+                g_x5.kusd.fetch_add(1, std::memory_order_relaxed);
+                g_x5.per_offset[guest_addr - kusd_base].fetch_add(1, std::memory_order_relaxed);
+            }
+
+            auto window_start = g_x5.window_start_ns.load(std::memory_order_relaxed);
+            if (window_start == 0)
+            {
+                g_x5.window_start_ns.store(end_ns, std::memory_order_relaxed);
+                g_x5.window_start_cpu_ns.store(x5_thread_cpu_ns(), std::memory_order_relaxed);
+                g_x5.window_start_sys_ns.store(x5_thread_sys_ns(), std::memory_order_relaxed);
+                return;
+            }
+
+            const auto wall = end_ns - window_start;
+            if (wall < 1000000000LL)
+            {
+                return;
+            }
+
+            const auto cpu_now = x5_thread_cpu_ns();
+            const auto cpu = cpu_now - g_x5.window_start_cpu_ns.load(std::memory_order_relaxed);
+            const auto faults = g_x5.faults.exchange(0, std::memory_order_relaxed);
+            const auto kusd = g_x5.kusd.exchange(0, std::memory_order_relaxed);
+            const auto ns = g_x5.handler_ns.exchange(0, std::memory_order_relaxed);
+            const auto sigpath = g_x5.sigpath_ns.exchange(0, std::memory_order_relaxed);
+            const auto sys_now = x5_thread_sys_ns();
+            const auto sys = sys_now - g_x5.window_start_sys_ns.load(std::memory_order_relaxed);
+            g_x5.window_start_ns.store(end_ns, std::memory_order_relaxed);
+            g_x5.window_start_cpu_ns.store(cpu_now, std::memory_order_relaxed);
+            g_x5.window_start_sys_ns.store(sys_now, std::memory_order_relaxed);
+
+            char buf[320];
+            x5_write(buf, snprintf(buf, sizeof(buf),
+                                   "[x5] mmio_faults=%llu kusd=%llu ns_in_handler=%llu ns_sigpath=%llu wall_ns=%lld thread_cpu_ns=%lld thread_sys_ns=%lld\n",
+                                   static_cast<unsigned long long>(faults), static_cast<unsigned long long>(kusd),
+                                   static_cast<unsigned long long>(ns), static_cast<unsigned long long>(sigpath), static_cast<long long>(wall),
+                                   static_cast<long long>(cpu), static_cast<long long>(sys)));
+
+            if (g_x5.windows.fetch_add(1, std::memory_order_relaxed) % 10 != 9)
+            {
+                return;
+            }
+
+            std::array<std::pair<uint64_t, uint32_t>, 5> top{};
+            for (uint32_t off = 0; off < 0x1000; ++off)
+            {
+                const auto n = g_x5.per_offset[off].load(std::memory_order_relaxed);
+                if (n > top[4].first)
+                {
+                    top[4] = {n, off};
+                    for (size_t i = 4; i > 0 && top[i].first > top[i - 1].first; --i)
+                    {
+                        std::swap(top[i], top[i - 1]);
+                    }
+                }
+            }
+
+            const int len = snprintf(buf, sizeof(buf),
+                                     "[x5top] total=%llu total_ns=%llu 0x%x=%llu 0x%x=%llu 0x%x=%llu 0x%x=%llu 0x%x=%llu\n",
+                                     static_cast<unsigned long long>(g_x5.total_faults.load(std::memory_order_relaxed)),
+                                     static_cast<unsigned long long>(g_x5.total_handler_ns.load(std::memory_order_relaxed)),
+                                     0x7FFE0000U + top[0].second, static_cast<unsigned long long>(top[0].first), 0x7FFE0000U + top[1].second,
+                                     static_cast<unsigned long long>(top[1].first), 0x7FFE0000U + top[2].second,
+                                     static_cast<unsigned long long>(top[2].first), 0x7FFE0000U + top[3].second,
+                                     static_cast<unsigned long long>(top[3].first), 0x7FFE0000U + top[4].second,
+                                     static_cast<unsigned long long>(top[4].first));
+            x5_write(buf, len);
+        }
+
+        int64_t x5_now_ns()
+        {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
+
         constexpr size_t page_size = 0x1000;
 
         // Coarse enough that streaming accesses to tracked memory fault rarely, fine enough that flushing or invalidating a
@@ -4105,6 +4239,14 @@ namespace sogen::fex
 
         bool handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
         {
+            const auto x5_start = x5_now_ns();
+            const auto x5_result = this->handle_mmio_fault_inner(uctx, region, fault_addr);
+            x5_record(fault_addr, x5_start, x5_now_ns());
+            return x5_result;
+        }
+
+        bool handle_mmio_fault_inner(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
+        {
             const uint64_t pc = get_host_pc(uctx);
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
             const auto decoded = decode_arm64_load(insn);
@@ -4947,6 +5089,7 @@ namespace sogen::fex
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext)
         {
+            g_x5_signal_entry_ns = x5_now_ns();
             auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
             const auto& previous =
                 g_previous_fault_actions[static_cast<size_t>(std::ranges::find(fault_signals, sig) - fault_signals.begin())];
