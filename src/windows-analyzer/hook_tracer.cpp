@@ -246,7 +246,7 @@ namespace sogen
             spec.module = utils::string::to_lower(std::string(tokens[0]));
             if (spec.module.ends_with("@x64"))
             {
-                spec.machine = IMAGE_FILE_MACHINE_AMD64;
+                spec.machine = static_cast<uint16_t>(IMAGE_FILE_MACHINE_AMD64);
             }
             else if (spec.module.ends_with("@x86"))
             {

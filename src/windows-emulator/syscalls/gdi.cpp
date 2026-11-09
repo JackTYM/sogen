@@ -5706,7 +5706,7 @@ namespace sogen
             }
 
             device_desc.access([&](EMU_D3DKMT_CREATEDEVICE& create_device) {
-                if (!find_dxgk_adapter_by_handle(create_device.hAdapter))
+                if (!find_dxgk_adapter_by_handle(static_cast<uint32_t>(create_device.hAdapter)))
                 {
                     dxgk_warn(c, "NtGdiDdDDICreateDevice: Invalid Adapter Handle 0x%X", create_device.hAdapter);
                 }

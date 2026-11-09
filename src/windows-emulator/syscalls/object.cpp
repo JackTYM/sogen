@@ -1229,14 +1229,15 @@ namespace sogen
             const auto second_resolved = c.proc.resolve_object_pseudo_handle(second, c.vcpu.active_thread);
             if (std::getenv("SOGEN_DEBUG_COMPARE_OBJECTS") != nullptr)
             {
+                const auto as_unsigned = [](const uint64_t value) { return static_cast<unsigned>(value); };
                 fprintf(stderr,
                         "[COMPARE_OBJECTS] first=0x%llx(id=%u,type=%u,pseudo=%u) second=0x%llx(id=%u,type=%u,pseudo=%u) "
                         "first_resolved=0x%llx(id=%u,type=%u,pseudo=%u) second_resolved=0x%llx(id=%u,type=%u,pseudo=%u)\n",
-                        static_cast<unsigned long long>(first.bits), first.value.id, first.value.type, first.value.is_pseudo,
-                        static_cast<unsigned long long>(second.bits), second.value.id, second.value.type, second.value.is_pseudo,
-                        static_cast<unsigned long long>(first_resolved.bits), first_resolved.value.id, first_resolved.value.type,
-                        first_resolved.value.is_pseudo, static_cast<unsigned long long>(second_resolved.bits), second_resolved.value.id,
-                        second_resolved.value.type, second_resolved.value.is_pseudo);
+                        static_cast<unsigned long long>(first.bits), as_unsigned(first.value.id), as_unsigned(first.value.type), as_unsigned(first.value.is_pseudo),
+                        static_cast<unsigned long long>(second.bits), as_unsigned(second.value.id), as_unsigned(second.value.type), as_unsigned(second.value.is_pseudo),
+                        static_cast<unsigned long long>(first_resolved.bits), as_unsigned(first_resolved.value.id), as_unsigned(first_resolved.value.type),
+                        as_unsigned(first_resolved.value.is_pseudo), static_cast<unsigned long long>(second_resolved.bits), as_unsigned(second_resolved.value.id),
+                        as_unsigned(second_resolved.value.type), as_unsigned(second_resolved.value.is_pseudo));
                 fflush(stderr);
             }
 
