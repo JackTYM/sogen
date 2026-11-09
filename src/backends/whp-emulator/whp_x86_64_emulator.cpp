@@ -2230,6 +2230,16 @@ namespace sogen::whp
                 values[14].XmmControlStatus.XmmStatusControlMask = 0xFFFFFFFFu;
                 values[15].Reg64 = this->syscall_hook_page_;
 
+                // A fresh WHP VP keeps the architectural reset GDTR (base 0, limit 0xFFFF), which looks like a
+                // loaded 64 KiB descriptor table at guest address 0. Until the process loads its GDT, report
+                // no table (limit 0) like the other backends, so descriptor lookups (segment bitness during
+                // exception dispatch) see an empty table instead of reading unmapped guest page 0.
+                names.push_back(WHvX64RegisterGdtr);
+                WHV_REGISTER_VALUE gdtr{};
+                gdtr.Table.Base = 0;
+                gdtr.Table.Limit = 0;
+                values.push_back(gdtr);
+
                 if (this->has_supported_xsave_features_)
                 {
                     names.push_back(WHvX64RegisterXCr0);
