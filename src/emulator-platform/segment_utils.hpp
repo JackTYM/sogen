@@ -74,8 +74,13 @@ namespace sogen::segment_utils
             return std::nullopt;
         }
 
+        // A descriptor table register can point at memory the guest never mapped (a vCPU whose GDTR was
+        // loaded before any GDT was written, or a garbage LDT): treat it like an out-of-limit selector.
         raw_segment_descriptor raw{};
-        cpu.read_memory(table.base + byte_offset, &raw, sizeof(raw));
+        if (!cpu.try_read_memory(table.base + byte_offset, &raw, sizeof(raw)))
+        {
+            return std::nullopt;
+        }
 
         descriptor desc{};
         uint64_t base = raw.base_low;
@@ -109,7 +114,10 @@ namespace sogen::segment_utils
                 }
 
                 uint32_t base_high{};
-                cpu.read_memory(table.base + byte_offset + sizeof(raw_segment_descriptor), &base_high, sizeof(base_high));
+                if (!cpu.try_read_memory(table.base + byte_offset + sizeof(raw_segment_descriptor), &base_high, sizeof(base_high)))
+                {
+                    return std::nullopt;
+                }
                 desc.base |= static_cast<uint64_t>(base_high) << 32;
             }
         }
