@@ -145,7 +145,7 @@ namespace sogen
 
         for (uint32_t i = 0; i < slot_count; ++i)
         {
-            const auto index = (start + i) % slot_count;
+            const auto index = static_cast<uint32_t>((start + i) % slot_count);
             if (!this->claim(index))
             {
                 continue;

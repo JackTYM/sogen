@@ -767,7 +767,7 @@ namespace sogen
                     {
                         process_control_request request{};
                         request.op = process_control_op::query_peb;
-                        const auto response = send_process_control_request(c, child_target{process_handle.value.id, channel}, request);
+                        const auto response = send_process_control_request(c, child_target{static_cast<uint32_t>(process_handle.value.id), channel}, request);
                         if (response && static_cast<NTSTATUS>(response->status) == STATUS_SUCCESS)
                         {
                             child_peb = response->base_address;
@@ -905,7 +905,7 @@ namespace sogen
                             process_control_request request{};
                             request.op = process_control_op::query_cycle_time;
 
-                            const auto response = send_process_control_request(c, child_target{process_handle.value.id, channel}, request);
+                            const auto response = send_process_control_request(c, child_target{static_cast<uint32_t>(process_handle.value.id), channel}, request);
                             if (response && response->status == STATUS_SUCCESS)
                             {
                                 accumulated_cycles = response->bytes_written;
