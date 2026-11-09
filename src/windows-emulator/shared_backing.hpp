@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <utils/shared_host_buffer.hpp>
+
 namespace sogen
 {
     // Host-owned memory backing a guest-visible kernel object (pagefile-backed section, shared
@@ -75,6 +77,8 @@ namespace sogen
         size_t size_{};
         size_t mapped_size_{};
         int fd_{-1};
-        std::vector<std::byte> heap_{};
+        // Heap fallback storage: page-aligned and page-granular, so a backend can map it straight into the guest
+        // (WHP and KVM reject host pointers that are not page aligned).
+        utils::shared_host_buffer heap_{};
     };
 }

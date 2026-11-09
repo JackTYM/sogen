@@ -107,8 +107,12 @@ namespace sogen
         std::shared_ptr<shared_backing> backing{new shared_backing{}};
         backing->size_ = size;
         backing->mapped_size_ = size;
-        backing->heap_.assign(size, std::byte{});
-        backing->data_ = backing->heap_.data();
+        if (size != 0)
+        {
+            backing->heap_ = utils::shared_host_buffer{size};
+            backing->data_ = reinterpret_cast<std::byte*>(backing->heap_.data());
+            backing->mapped_size_ = backing->heap_.size();
+        }
         return backing;
     }
 
