@@ -361,7 +361,19 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS query_token_information_impl(const syscall_context& c, const handle token_handle,
+                                                const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
+                                                const ULONG token_information_length, const emulator_object<ULONG> return_length);
         NTSTATUS handle_NtQueryInformationToken(const syscall_context& c, const handle token_handle,
+                                                const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
+                                                const ULONG token_information_length, const emulator_object<ULONG> return_length)
+        {
+            const auto status = query_token_information_impl(c, token_handle, token_information_class, token_information, token_information_length, return_length);
+            fprintf(stderr, "V6TOKQUERY host=%d pid=%u handle=%llx class=%d len=%u status=%x\n", static_cast<int>(getpid()), c.proc.process_id, static_cast<unsigned long long>(token_handle.bits), static_cast<int>(token_information_class), token_information_length, static_cast<unsigned>(status));
+            return status;
+        }
+
+        NTSTATUS query_token_information_impl(const syscall_context& c, const handle token_handle,
                                                 const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
                                                 const ULONG token_information_length, const emulator_object<ULONG> return_length)
         {

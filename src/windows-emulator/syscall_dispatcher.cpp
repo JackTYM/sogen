@@ -1,4 +1,5 @@
 #include "std_include.hpp"
+#include <unistd.h>
 #include "syscall_dispatcher.hpp"
 #include "syscall_utils.hpp"
 
@@ -209,7 +210,7 @@ namespace sogen
 
             if (trace_all_syscalls)
             {
-                fprintf(stderr, "[ALL_SYSCALLS] pid=%u tid=%u %s -> 0x%llx\n", trace_pid, trace_tid, entry->second.name.c_str(),
+                fprintf(stderr, "[ALL_SYSCALLS] host=%d pid=%u tid=%u %s -> 0x%llx\n", static_cast<int>(getpid()), trace_pid, trace_tid, entry->second.name.c_str(),
                         static_cast<unsigned long long>(emu.reg<uint64_t>(x86_register::rax)));
                 fflush(stderr);
             }
