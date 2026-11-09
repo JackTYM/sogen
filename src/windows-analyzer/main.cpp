@@ -67,6 +67,9 @@ namespace sogen
             analysis_options() = default;
 
             mutable bool use_gdb{false};
+            // Return as soon as the guest process ends, even while guest child processes it started still run
+            // (they are then killed on Windows hosts by the kill-on-close job, and orphaned on POSIX hosts).
+            bool no_wait_children{false};
             std::string gdb_host{"127.0.0.1"};
             uint16_t gdb_port{28960};
             std::string gdb_architecture{"64bits"};
@@ -987,7 +990,15 @@ namespace sogen
 
             context.win_emu = win_emu.get();
 
-            const auto notify_parent_of_own_exit = utils::finally([&] { win_emu->notify_own_exit(win_emu->process.exit_status); });
+            bool own_exit_notified = false;
+            const auto notify_own_exit_once = [&] {
+                if (!own_exit_notified)
+                {
+                    own_exit_notified = true;
+                    win_emu->notify_own_exit(win_emu->process.exit_status);
+                }
+            };
+            const auto notify_parent_of_own_exit = utils::finally([&] { notify_own_exit_once(); });
 
             child_process_spawn_config spawn_config{};
             if (supports_child_process_spawning())
@@ -1294,6 +1305,50 @@ namespace sogen
             }
 
             const auto success = run_emulation(context, options);
+
+            // On Windows a process outlives its parent: an installer bootstrapper that starts the real installer and
+            // exits must not take it down. So while a guest child process this analyzer started (not the boot
+            // services) still runs, keep this host process (and with it the kill-on-close job, the boot services and
+            // the routing of the children's cross-process requests) alive. The parent hears about this process's own
+            // exit first, so a guest waiting on it is not held up.
+            if (!options.no_wait_children && !options.use_gdb)
+            {
+                notify_own_exit_once();
+
+                const auto live_child = [&] {
+                    for (const auto& [record_id, record] : win_emu->process.child_processes)
+                    {
+                        if (record.exit_status != STATUS_PENDING ||
+                            std::ranges::find(boot_processes, record_id) != boot_processes.end())
+                        {
+                            continue;
+                        }
+
+                        auto* const control = win_emu->find_child_control_channel(record_id);
+                        if (control && control->host_process_alive())
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                };
+
+                if (live_child())
+                {
+                    win_emu->log.log("Guest process ended; waiting for its child processes to end\n");
+                    std::atomic_bool interrupted{false};
+                    utils::interupt_handler _{[&] { interrupted = true; }};
+                    while (!interrupted && live_child())
+                    {
+                        win_emu->pump_pipe_ipc();
+                        win_emu->pump_child_routing_channels();
+                        win_emu->pump_child_exit_notifications();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    win_emu->log.log("Child processes ended\n");
+                }
+            }
 #ifndef OS_EMSCRIPTEN
             if (options.managed_process && win_emu->process.exit_status)
             {
@@ -1345,6 +1400,8 @@ namespace sogen
                            "Chromium-style GPU-process generation once it's spawned");
 
             app.add_flag("-s,--silent", options.silent, "Silent mode");
+            app.add_flag("--no-wait-children", options.no_wait_children,
+                         "Exit when the guest process ends even while guest child processes it started still run");
             app.add_flag("-v,--verbose", options.verbose_logging, "Verbose logging");
             app.add_flag("-b,--buffer", options.buffer_stdout, "Buffer stdout");
             app.add_flag("-f,--foreign", options.log_foreign_module_access, "Log read access to foreign modules");

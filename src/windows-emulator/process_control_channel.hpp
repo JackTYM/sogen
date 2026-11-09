@@ -203,6 +203,14 @@ namespace sogen
         virtual void force_kill()
         {
         }
+
+        // Parent side: whether the real host OS process behind this channel is still running. Used to keep an
+        // analyzer alive after its own guest process ended while guest child processes it started still run (on
+        // Windows a child process outlives its parent). False for implementations with no host process.
+        virtual bool host_process_alive()
+        {
+            return false;
+        }
     };
 
 } // namespace sogen

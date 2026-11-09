@@ -783,6 +783,11 @@ namespace sogen
                 }
             }
 
+            bool host_process_alive() override
+            {
+                return this->host_pid_ >= 0 && host_ipc::process_alive(this->host_pid_);
+            }
+
           private:
             int fd_{-1};
             int host_pid_{-1};
