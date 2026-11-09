@@ -2219,7 +2219,10 @@ namespace sogen::whp
                 values[6].Reg64 = 0x80000033ull;
                 values[7].Reg64 = this->has_supported_xsave_features_ ? 0x40620ull : 0x620ull;
                 values[8].Reg64 = this->pml4_gpa_;
-                values[9].Reg64 = (1ull << 0) | (1ull << 8) | (1ull << 10);
+                // SCE | LME | LMA | NXE. NXE is set so that a #PF error code carries the instruction-fetch (I/D) bit;
+                // without it a fetch from a not-present page is indistinguishable from a data read. sogen never sets
+                // the XD bit in its page tables, so NXE does not change which pages are executable.
+                values[9].Reg64 = (1ull << 0) | (1ull << 8) | (1ull << 10) | (1ull << 11);
                 values[10].Reg64 = 0x2ull;
                 values[11].Reg64 = (0x23ull << 48) | (0x08ull << 32);
                 values[12].Reg64 = 0;
@@ -4151,7 +4154,10 @@ namespace sogen::whp
                     const auto fault_address = exception.ExceptionParameter;
                     const bool is_write = (exception.ErrorCode & 0x2u) != 0;
                     const bool is_present = (exception.ErrorCode & 0x1u) != 0;
-                    const auto operation = is_write ? memory_operation::write : memory_operation::read;
+                    // I/D bit (reported because EFER.NXE is set): the fault was an instruction fetch, e.g. jumping into a
+                    // released page. Execute faults on present pages arrive as EPT exits instead (handle_memory_access).
+                    const bool is_fetch = (exception.ErrorCode & 0x10u) != 0;
+                    const auto operation = is_fetch ? memory_operation::exec : (is_write ? memory_operation::write : memory_operation::read);
                     const auto type = is_present ? memory_violation_type::protection : memory_violation_type::unmapped;
 
                     // Under multiple vCPUs a peer may have mapped/committed/reprotected this page
