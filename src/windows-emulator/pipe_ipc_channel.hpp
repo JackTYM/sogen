@@ -19,6 +19,7 @@ namespace sogen
         window_destroyed = 6,
         window_surface = 7,
         alpc = 8,
+        peer_closed = 9,
     };
 
     // A single forwarded named-pipe event: bytes written on the sender's end (delivered verbatim

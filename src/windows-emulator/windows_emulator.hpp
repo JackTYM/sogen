@@ -658,6 +658,7 @@ namespace sogen
         void broadcast_named_pipe_connect(std::u16string_view name, uint64_t connection_id,
                                           std::optional<uint32_t> client_process_id = std::nullopt);
         void broadcast_named_pipe_server_created(std::u16string_view name);
+        void broadcast_named_pipe_close(std::u16string_view name, uint64_t connection_id, bool to_server);
 
         // Hands an ALPC transport message to the rest of the process tree (see alpc::deliver).
         void broadcast_alpc(std::u16string_view port_name, uint64_t connection_id, bool to_server, std::string data);

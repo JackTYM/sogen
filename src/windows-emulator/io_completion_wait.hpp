@@ -7,7 +7,6 @@ namespace sogen
 
     namespace io_completion_wait
     {
-        bool is_wait_completion_target_type(handle target_object_handle);
 
         bool retain_handle_reference(process_context& process, const emulator_thread* active_thread, handle source_handle,
                                      handle& retained_handle);

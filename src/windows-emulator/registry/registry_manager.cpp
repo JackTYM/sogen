@@ -574,7 +574,8 @@ namespace sogen
 
         const auto normalized_component_count = static_cast<size_t>(std::ranges::count_if(
             normal_key.get(), [&](const auto& component) { return !component.empty() && component != normal_key.get().root_directory(); }));
-        if (display_components.size() != normalized_component_count)
+        // A mapped prefix can drop components, so the normalized path can be shorter than the guest's.
+        if (display_components.size() < normalized_component_count)
         {
             throw std::logic_error("Registry path normalization changed the component count");
         }

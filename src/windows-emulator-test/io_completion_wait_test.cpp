@@ -263,9 +263,9 @@ namespace sogen::test
         EXPECT_EQ(this->associate(STDOUT_HANDLE), STATUS_OBJECT_TYPE_MISMATCH);
     }
 
-    TEST_F(ConsoleWaitCompletionTest, RealFileHandleStaysUnsupported)
+    TEST_F(ConsoleWaitCompletionTest, RealFileHandleIsAWaitTarget)
     {
         const auto file_handle = this->emu->process.files.store(file{});
-        EXPECT_EQ(this->associate(file_handle), STATUS_OBJECT_TYPE_MISMATCH);
+        EXPECT_EQ(this->associate(file_handle), STATUS_SUCCESS);
     }
 }

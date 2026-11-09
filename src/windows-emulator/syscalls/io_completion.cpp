@@ -447,9 +447,9 @@ namespace sogen
                 fflush(stderr);
             }
 
-            if (!io_completion_wait::is_wait_completion_target_type(resolved_target_handle))
+            // Console output never completes a wait on Windows.
+            if (resolved_target_handle == STDOUT_HANDLE)
             {
-                c.win_emu.log.error("Wait handle type not supported: %u\n", static_cast<uint32_t>(resolved_target_handle.value.type));
                 return STATUS_OBJECT_TYPE_MISMATCH;
             }
 
@@ -478,7 +478,7 @@ namespace sogen
                 case handle_types::timer:
                     return c.proc.timers.get(resolved_target_handle) != nullptr;
                 case handle_types::file:
-                    return resolved_target_handle == STDIN_HANDLE || resolved_target_handle == NUL_HANDLE;
+                    return resolved_target_handle == STDIN_HANDLE || resolved_target_handle == NUL_HANDLE || c.proc.files.get(resolved_target_handle) != nullptr;
                 default:
                     return false;
                 }

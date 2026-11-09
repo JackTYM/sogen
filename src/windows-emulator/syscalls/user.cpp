@@ -4084,6 +4084,7 @@ namespace sogen
             }
 
             auto* win = c.proc.windows.get(window);
+std::fprintf(stderr, "WDBG destroy_enter hwnd=0x%llx found=%d pid=%u tid=%u class=%s\n", static_cast<unsigned long long>(window), win ? 1 : 0, static_cast<unsigned>(c.proc.process_id), static_cast<unsigned>(c.thread().id), win ? u16_to_u8(win->class_name).c_str() : "-");
             if (!win)
             {
                 return FALSE;
@@ -4497,6 +4498,7 @@ namespace sogen
             auto* win = c.proc.windows.get(hwnd);
             if (!win)
             {
+std::fprintf(stderr, "WDBG stale_msgcall hwnd=0x%llx msg=0x%x pid=%u tid=%u\n", static_cast<unsigned long long>(hwnd), msg, static_cast<unsigned>(c.proc.process_id), static_cast<unsigned>(c.thread().id));
                 return 0;
             }
 
@@ -5339,6 +5341,7 @@ namespace sogen
             const auto* win = c.proc.windows.get(hwnd);
             if (!win && hwnd != 0)
             {
+std::fprintf(stderr, "WDBG stale_post hwnd=0x%llx msg=0x%x pid=%u tid=%u\n", static_cast<unsigned long long>(hwnd), msg, static_cast<unsigned>(c.proc.process_id), static_cast<unsigned>(c.thread().id));
                 return FALSE;
             }
 
@@ -7396,6 +7399,7 @@ namespace sogen
         uint64_t handle_NtUserSetTimer(const syscall_context& c, const hwnd hwnd, const uint64_t timer_id, const uint32_t elapsed_ms,
                                        const uint64_t timer_proc)
         {
+std::fprintf(stderr, "WDBG set_timer hwnd=0x%llx id=0x%llx period=%u pid=%u tid=%u\n", static_cast<unsigned long long>(hwnd), static_cast<unsigned long long>(timer_id), elapsed_ms, static_cast<unsigned>(c.proc.process_id), static_cast<unsigned>(c.thread().id));
             return set_user_timer(c, hwnd, timer_id, elapsed_ms, timer_proc, false);
         }
 
@@ -7406,6 +7410,7 @@ namespace sogen
 
         BOOL handle_NtUserKillTimer(const syscall_context& c, const hwnd hwnd, const uint64_t timer_id)
         {
+std::fprintf(stderr, "WDBG kill_timer hwnd=0x%llx id=0x%llx pid=%u tid=%u\n", static_cast<unsigned long long>(hwnd), static_cast<unsigned long long>(timer_id), static_cast<unsigned>(c.proc.process_id), static_cast<unsigned>(c.thread().id));
             auto* target_thread = c.vcpu.active_thread;
 
             if (hwnd != 0)

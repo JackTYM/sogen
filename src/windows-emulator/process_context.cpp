@@ -576,11 +576,26 @@ namespace sogen
             proc_params.StandardInput = STDIN_HANDLE.h;
             proc_params.StandardError = proc_params.StandardOutput;
 
+            if (const auto inherited_std = app_settings.environment.find(u"__SOGEN_STD_HANDLES"); inherited_std != app_settings.environment.end())
+            {
+                unsigned long long in = 0, out = 0, err = 0;
+                if (sscanf(u16_to_u8(inherited_std->second).c_str(), "%llx,%llx,%llx", &in, &out, &err) == 3)
+                {
+                    if (in) proc_params.StandardInput = in;
+                    if (out) proc_params.StandardOutput = out;
+                    if (err) proc_params.StandardError = err;
+                }
+            }
+
             proc_params.Environment = allocator.copy_string(u"=::=::\\");
 
             const auto env_map = get_environment_variables(win_emu.registry, version, app_settings);
             for (const auto& [name, value] : env_map)
             {
+                if (name == u"__SOGEN_STD_HANDLES")
+                {
+                    continue;
+                }
                 std::u16string entry;
                 entry += name;
                 entry += u"=";
@@ -1165,6 +1180,11 @@ namespace sogen
         buffer.write(this->windows);
         buffer.write(this->menus);
         buffer.write(this->timers);
+        buffer.write(static_cast<uint64_t>(this->orphaned_timers.size()));
+        for (const auto& orphan : this->orphaned_timers)
+        {
+            orphan->serialize_object(buffer);
+        }
         buffer.write(this->tokens);
         buffer.write(this->accelerator_tables);
         buffer.write(this->icons);
@@ -1326,6 +1346,15 @@ namespace sogen
         buffer.read(this->windows);
         buffer.read(this->menus);
         buffer.read(this->timers);
+        uint64_t orphaned_timer_count{};
+        buffer.read(orphaned_timer_count);
+        this->orphaned_timers.clear();
+        for (uint64_t i = 0; i < orphaned_timer_count; ++i)
+        {
+            auto orphan = std::make_unique<timer>();
+            orphan->deserialize_object(buffer);
+            this->orphaned_timers.push_back(std::move(orphan));
+        }
         buffer.read(this->tokens);
         buffer.read(this->accelerator_tables);
         buffer.read(this->icons);
@@ -2094,6 +2123,65 @@ namespace sogen
         else
         {
             knowndlls64_sections[lname] = section;
+        }
+    }
+
+    void process_context::queue_due_timer_apcs(utils::clock& clock)
+    {
+        const auto now = clock.steady_now();
+        const auto system_100ns = std::chrono::duration_cast<std::chrono::nanoseconds>(clock.system_now().time_since_epoch()).count() / 100 +
+                                  WINDOWS_EPOCH_DIFFERENCE;
+
+        const auto queue_expiry = [&](timer& expired, const uint64_t timer_source) {
+            if (expired.apc_routine == 0 || !expired.due_time || *expired.due_time > now)
+            {
+                return;
+            }
+
+            expired.is_signaled(now);
+            const auto owner = std::ranges::find_if(this->threads, [&](const auto& candidate) { return candidate.second.id == expired.apc_thread_id; });
+            if (owner == this->threads.end() || owner->second.is_terminated())
+            {
+                return;
+            }
+
+            owner->second.pending_apcs.push_back({
+                .apc_routine = expired.apc_routine,
+                .apc_argument1 = expired.apc_context,
+                .apc_argument2 = static_cast<uint32_t>(system_100ns),
+                .apc_argument3 = static_cast<uint32_t>(static_cast<uint64_t>(system_100ns) >> 32),
+                .timer_source = timer_source,
+            });
+        };
+
+        for (auto& [index, entry] : this->timers)
+        {
+            queue_expiry(entry, this->timers.make_handle(index).bits);
+        }
+
+        for (auto& orphan : this->orphaned_timers)
+        {
+            queue_expiry(*orphan, 0);
+        }
+        std::erase_if(this->orphaned_timers, [](const auto& orphan) { return orphan->apc_routine == 0 || !orphan->due_time; });
+    }
+
+    void process_context::retain_armed_timer_after_close(const handle timer_handle)
+    {
+        const auto* entry = this->timers.get(timer_handle);
+        if (!entry || entry->apc_routine == 0 || !entry->due_time)
+        {
+            return;
+        }
+
+        this->orphaned_timers.push_back(std::make_unique<timer>(*entry));
+    }
+
+    void process_context::drop_timer_apcs(const uint64_t timer_source)
+    {
+        for (auto& thread : this->threads | std::views::values)
+        {
+            std::erase_if(thread.pending_apcs, [timer_source](const auto& apc) { return apc.timer_source == timer_source; });
         }
     }
 

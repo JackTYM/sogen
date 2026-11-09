@@ -263,6 +263,10 @@ namespace sogen
     void io_device::queue_io_completion(windows_emulator& win_emu, const io_device_context& context,
                                         const IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& io_status)
     {
+        if (context.io_control_code == 0x120c7)
+        {
+            fprintf(stderr, "W15QUEUE code=%x status=%x port=%x apc_context=%llx guest_iosb=%llx\n", context.io_control_code, static_cast<unsigned>(io_status.Status), static_cast<unsigned>(context.completion_port.bits), static_cast<unsigned long long>(context.apc_context), static_cast<unsigned long long>(context.wow64_io_status_block ? context.wow64_io_status_block.value() : 0));
+        }
         if (!context.completion_port.bits || !context.io_status_block || context.suppresses_completion_packet())
         {
             return;

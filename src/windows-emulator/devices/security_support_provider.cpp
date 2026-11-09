@@ -287,6 +287,7 @@ namespace sogen
             static constexpr ULONG k_ioctl_encrypt_same_logon = 0x39001E;
             static constexpr ULONG k_ioctl_decrypt_same_logon = 0x390022;
             static constexpr ULONG k_ioctl_get_queued_function_call = 0x39006A;
+            static constexpr ULONG k_ioctl_connect_lsa = 0x398000;
 
             static bool is_memory_crypt_ioctl(const ULONG code)
             {
@@ -358,6 +359,13 @@ namespace sogen
                 if (c.io_control_code == k_ioctl_get_queued_function_call)
                 {
                     return STATUS_PENDING;
+                }
+
+                // lsass (26100) registers itself with KsecDD at start-up; the request carries no input and has a 4-byte output.
+                // Only the success status is known to be needed; that the output is a status dword is a guess, not verified against Windows.
+                if (c.io_control_code == k_ioctl_connect_lsa)
+                {
+                    return complete_status_ioctl(win_emu, c, STATUS_SUCCESS);
                 }
 
                 if (c.io_control_code != 0x390400)

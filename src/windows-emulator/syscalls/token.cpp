@@ -3,6 +3,8 @@
 #include "../syscall_utils.hpp"
 
 #include <limits>
+#include <map>
+#include <set>
 
 namespace sogen
 {
@@ -37,6 +39,11 @@ namespace sogen
 
             constexpr ULONG se_group_enabled = 0x7; // SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
             constexpr ULONG se_group_owner = 0x8;
+            constexpr NTSTATUS status_no_such_logon_session = 0xC000005F;
+            constexpr ULONG se_group_logon_id = 0xC0000000;
+            constexpr std::array<uint8_t, 12> everyone_sid = {
+                0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            };
 
             struct token_group
             {
@@ -50,6 +57,18 @@ namespace sogen
                 return token_handle != ANONYMOUS_IMPERSONATION_TOKEN && (c.win_emu.runs_elevated() || c.win_emu.runs_as_local_system());
             }
 
+            struct created_group
+            {
+                std::vector<uint8_t> sid;
+                ULONG attributes;
+            };
+
+            std::map<uint64_t, std::vector<created_group>>& created_token_groups()
+            {
+                static std::map<uint64_t, std::vector<created_group>> groups;
+                return groups;
+            }
+
             std::vector<token_group> get_token_groups(const syscall_context& c, const handle token_handle)
             {
                 if (token_handle == ANONYMOUS_IMPERSONATION_TOKEN)
@@ -57,8 +76,19 @@ namespace sogen
                     return {};
                 }
 
+                if (const auto it = created_token_groups().find(token_handle.bits); it != created_token_groups().end())
+                {
+                    std::vector<token_group> stored;
+                    for (const auto& g : it->second)
+                    {
+                        stored.push_back(token_group{.sid = g.sid, .attributes = g.attributes});
+                    }
+                    return stored;
+                }
+
                 std::vector<token_group> groups{
                     token_group{.sid = c.proc.sid, .attributes = 0},
+                    token_group{.sid = everyone_sid, .attributes = se_group_enabled},
                     token_group{.sid = interactive_sid, .attributes = se_group_enabled},
                 };
 
@@ -67,6 +97,7 @@ namespace sogen
                     groups.push_back(token_group{.sid = administrators_sid, .attributes = se_group_enabled | se_group_owner});
                 }
 
+                groups.push_back(token_group{.sid = logon_sid, .attributes = se_group_enabled | se_group_logon_id});
                 return groups;
             }
 
@@ -322,17 +353,110 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // Tokens another process handed over (a service logon token) are tracked apart from tokens the process made itself (a restricted sandbox token).
+        namespace
+        {
+            std::set<uint64_t>& adopted_tokens()
+            {
+                static std::set<uint64_t> tokens;
+                return tokens;
+            }
+        }
+
+        void mark_adopted_token(const uint64_t handle_bits)
+        {
+            adopted_tokens().insert(handle_bits);
+        }
+
+        bool is_adopted_or_process_token(const uint64_t handle_bits)
+        {
+            return handle_bits == CURRENT_PROCESS_TOKEN.bits || adopted_tokens().contains(handle_bits);
+        }
+
+        std::vector<uint8_t> export_created_token_groups(const uint64_t handle_bits)
+        {
+            std::vector<uint8_t> out;
+            const auto it = created_token_groups().find(handle_bits);
+            if (it == created_token_groups().end())
+            {
+                return out;
+            }
+            const auto put = [&](const uint32_t v) {
+                const auto* p = reinterpret_cast<const uint8_t*>(&v);
+                out.insert(out.end(), p, p + sizeof(v));
+            };
+            put(static_cast<uint32_t>(it->second.size()));
+            for (const auto& g : it->second)
+            {
+                put(g.attributes);
+                put(static_cast<uint32_t>(g.sid.size()));
+                out.insert(out.end(), g.sid.begin(), g.sid.end());
+            }
+            return out;
+        }
+
+        void import_created_token_groups(const uint64_t handle_bits, const std::vector<uint8_t>& in)
+        {
+            if (in.size() < 4)
+            {
+                return;
+            }
+            size_t off = 0;
+            const auto get = [&]() {
+                uint32_t v{};
+                std::memcpy(&v, in.data() + off, sizeof(v));
+                off += sizeof(v);
+                return v;
+            };
+            const auto count = get();
+            std::vector<created_group> list;
+            for (uint32_t i = 0; i < count && off + 8 <= in.size(); ++i)
+            {
+                const auto attributes = get();
+                const auto len = get();
+                if (off + len > in.size())
+                {
+                    return;
+                }
+                list.push_back({.sid = std::vector<uint8_t>(in.begin() + off, in.begin() + off + len), .attributes = attributes});
+                off += len;
+            }
+            created_token_groups()[handle_bits] = std::move(list);
+        }
+
         NTSTATUS handle_NtCreateTokenEx(const syscall_context& c, const emulator_object<handle> token_handle,
                                         ACCESS_MASK /*desired_access*/,
                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
                                         /*object_attributes*/,
-                                        const TOKEN_TYPE type)
+                                        const TOKEN_TYPE type, uint64_t /*authentication_id*/, uint64_t /*expiration_time*/,
+                                        uint64_t /*user*/, const uint64_t groups)
         {
             if (type == TokenPrimary)
             {
                 process_token token{};
                 token.privileges = c.proc.privileges;
-                token_handle.write(c.proc.tokens.store(std::move(token)));
+                const auto stored_handle = c.proc.tokens.store(std::move(token));
+                if (groups)
+                {
+                    ULONG count{};
+                    c.emu.memory().read_memory(groups, &count, sizeof(count));
+                    std::vector<created_group> list;
+                    for (ULONG i = 0; i < count && i < 64; ++i)
+                    {
+                        SID_AND_ATTRIBUTES64 entry{};
+                        c.emu.memory().read_memory(groups + offsetof(TOKEN_GROUPS64, Groups) + i * sizeof(SID_AND_ATTRIBUTES64), &entry,
+                                                   sizeof(entry));
+                        std::array<uint8_t, 8> header{};
+                        c.emu.memory().read_memory(entry.Sid, header.data(), header.size());
+                        std::vector<uint8_t> sid(8 + static_cast<size_t>(header[1]) * sizeof(uint32_t));
+                        c.emu.memory().read_memory(entry.Sid, sid.data(), sid.size());
+                        const bool is_logon = (entry.Attributes & se_group_logon_id) == se_group_logon_id;
+                        list.push_back({.sid = is_logon ? std::vector<uint8_t>(logon_sid.begin(), logon_sid.end()) : std::move(sid),
+                                        .attributes = entry.Attributes});
+                    }
+                    created_token_groups()[stored_handle.bits] = std::move(list);
+                }
+                token_handle.write(stored_handle);
             }
             else if (type == TokenImpersonation)
             {
@@ -357,7 +481,19 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS query_token_information_impl(const syscall_context& c, const handle requested_token,
+                                                const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
+                                                const ULONG token_information_length, const emulator_object<ULONG> return_length);
         NTSTATUS handle_NtQueryInformationToken(const syscall_context& c, const handle requested_token,
+                                                const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
+                                                const ULONG token_information_length, const emulator_object<ULONG> return_length)
+        {
+            const auto status = query_token_information_impl(c, requested_token, token_information_class, token_information, token_information_length, return_length);
+            fprintf(stderr, "V6TOKQUERY host=%d pid=%u handle=%llx class=%d len=%u status=%x\n", static_cast<int>(getpid()), c.proc.process_id, static_cast<unsigned long long>(requested_token.bits), static_cast<int>(token_information_class), token_information_length, static_cast<unsigned>(status));
+            return status;
+        }
+
+        NTSTATUS query_token_information_impl(const syscall_context& c, const handle requested_token,
                                                 const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
                                                 const ULONG token_information_length, const emulator_object<ULONG> return_length)
         {
@@ -644,6 +780,12 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (token_information_class == TokenLinkedToken)
+            {
+                // Windows reports no linked token for a token without a UAC split.
+                return status_no_such_logon_session;
+            }
+
             if (token_information_class == TokenElevationType)
             {
                 constexpr auto required_size = sizeof(ULONG);
@@ -771,8 +913,8 @@ namespace sogen
             if (token_information_class == TokenIntegrityLevel)
             {
                 // S-1-16-8192 (medium) or S-1-16-12288 (high)
-                std::array<uint8_t, 20> integrity_sid = {
-                    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                std::array<uint8_t, 12> integrity_sid = {
+                    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x20, 0x00, 0x00,
                 };
                 if (is_elevated_token(c, token_handle))
                 {
@@ -898,6 +1040,24 @@ namespace sogen
             granted_access.write(decision.granted);
             access_status.write(decision.status);
             return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAccessCheckByType(const syscall_context& c, const uint64_t security_descriptor,
+                                            const uint64_t /*principal_self_sid*/, const handle client_token,
+                                            const ACCESS_MASK desired_access, const uint64_t object_type_list,
+                                            const ULONG object_type_list_length, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                            const uint64_t privilege_set, const emulator_object<ULONG> privilege_set_length,
+                                            const emulator_object<ACCESS_MASK> granted_access,
+                                            const emulator_object<NTSTATUS> access_status)
+        {
+            if (object_type_list != 0 || object_type_list_length != 0)
+            {
+                c.win_emu.log.error("NtAccessCheckByType with an object type list is not supported\n");
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            return handle_NtAccessCheck(c, security_descriptor, client_token, desired_access, generic_mapping, privilege_set,
+                                        privilege_set_length, granted_access, access_status);
         }
 
         NTSTATUS handle_NtAccessCheckByTypeAndAuditAlarm(

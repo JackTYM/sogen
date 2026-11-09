@@ -219,6 +219,14 @@ namespace sogen
                 }
             }
 
+            if (value.type == handle_types::timer)
+            {
+                if (const auto* timer_entry = c.proc.timers.get(h); timer_entry && timer_entry->ref_count == 1)
+                {
+                    c.proc.retain_armed_timer_after_close(h);
+                }
+            }
+
             if (value.type == handle_types::worker_factory)
             {
                 auto* factory = c.proc.worker_factories.get(h);
@@ -275,11 +283,18 @@ namespace sogen
                 auto* device = c.proc.devices.get(h);
                 if (device && device->ref_count == 1)
                 {
-                    const auto* pipe = device->is_last_file_reference() ? device->get_internal_device<named_pipe>() : nullptr;
+                    const bool last_reference = device->is_last_file_reference();
+                    const auto* pipe = last_reference ? device->get_internal_device<named_pipe>() : nullptr;
                     if (pipe)
                     {
+                        pipe->announce_closure(c.win_emu);
                         device->cancel_io(c.win_emu, 0);
                         pipe->complete_waits_if_last_server_end(c.win_emu);
+                    }
+                    else if (last_reference)
+                    {
+                        // Closing the last handle cancels outstanding requests, so a socket closed on a receive timeout wakes its pending recv.
+                        device->cancel_io(c.win_emu, 0);
                     }
                     device->release_references(c.proc);
                 }
@@ -292,7 +307,7 @@ namespace sogen
                 {
                     if (port->alpc_port_id() != 0)
                     {
-                        alpc::close_port(c.win_emu, port->alpc_port_id());
+                        alpc::close_port(c.win_emu, port->alpc_port_id(), false);
                     }
                     else
                     {
@@ -1341,6 +1356,7 @@ namespace sogen
                                                  const WAIT_TYPE wait_type, const BOOLEAN alertable,
                                                  const emulator_object<LARGE_INTEGER> timeout)
         {
+            fprintf(stderr, "V2WAITN pid=%u count=%u type=%d alertable=%d\n", c.proc.process_id, count, static_cast<int>(wait_type), static_cast<int>(alertable));
             if (count == 0 || count > 64) // MAXIMUM_WAIT_OBJECTS
             {
                 return STATUS_INVALID_PARAMETER_1;
@@ -1456,6 +1472,7 @@ namespace sogen
         NTSTATUS handle_NtWaitForSingleObject(const syscall_context& c, const handle h, const BOOLEAN alertable,
                                               const emulator_object<LARGE_INTEGER> timeout)
         {
+            fprintf(stderr, "V2WAIT1 pid=%u h=%llx alertable=%d\n", c.proc.process_id, static_cast<unsigned long long>(h.bits), static_cast<int>(alertable));
             const auto resolved_handle = resolve_wait_handle(c, h);
             const auto validation_status = validate_wait_handle(c, resolved_handle);
             if (!NT_SUCCESS(validation_status))
@@ -1543,7 +1560,7 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, const handle, const SECURITY_INFORMATION security_information,
+        NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, const handle h, const SECURITY_INFORMATION security_information,
                                               const emulator_pointer security_descriptor, const ULONG length,
                                               const emulator_object<ULONG> length_needed)
         {
@@ -1553,6 +1570,10 @@ namespace sogen
             {
                 return STATUS_ACCESS_DENIED;
             }
+
+            // Files have no mandatory label; a Low-integrity label here makes urlmon map every existing file to the Internet zone.
+            const bool file_object = c.proc.files.get(h) != nullptr;
+            const bool include_label = (security_information & LABEL_SECURITY_INFORMATION) && !file_object;
 
             const auto& owner_sid = c.proc.sid;
             const auto& group_sid = c.proc.sid;
@@ -1591,7 +1612,7 @@ namespace sogen
                 total_size += sizeof(dacl_data);
             }
 
-            if (security_information & LABEL_SECURITY_INFORMATION)
+            if (include_label)
             {
                 total_size += sizeof(sacl_data);
             }
@@ -1636,7 +1657,7 @@ namespace sogen
                 current_offset += sizeof(dacl_data);
             }
 
-            if (security_information & LABEL_SECURITY_INFORMATION)
+            if (include_label)
             {
                 sd.Control |= SE_SACL_PRESENT | SE_SACL_AUTO_INHERITED;
                 sd.Sacl = current_offset;

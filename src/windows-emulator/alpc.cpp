@@ -31,6 +31,7 @@ namespace sogen::alpc
         constexpr uint32_t srm_register_logon_session_command = 2;
         constexpr uint32_t srm_set_logon_session_names_command = 4;
         constexpr NTSTATUS status_no_such_logon_session = 0xC000005F;
+        constexpr NTSTATUS status_request_abandoned_by_owner_exit = 0xC0000707;
         constexpr uint32_t srm_apply_global_sacl_update_command = 5;
         constexpr uint32_t srm_apply_cap_update_command = 6;
         // The system pid is also the root process's pid, so a kernel-side connection id must not reuse it as its
@@ -57,6 +58,7 @@ namespace sogen::alpc
             NTSTATUS status{};
             uint64_t max_message_length{};
             bool expects_reply{};
+            bool owner_exited{};
             std::vector<uint8_t> data{};
             std::optional<std::vector<uint8_t>> view{};
 
@@ -72,6 +74,7 @@ namespace sogen::alpc
                 buffer.write(this->status);
                 buffer.write(this->max_message_length);
                 buffer.write(this->expects_reply);
+                buffer.write(this->owner_exited);
                 buffer.write_vector(this->data);
                 buffer.write(this->view.has_value());
                 if (this->view)
@@ -98,6 +101,7 @@ namespace sogen::alpc
                 buffer.read(result.status);
                 buffer.read(result.max_message_length);
                 buffer.read(result.expects_reply);
+                buffer.read(result.owner_exited);
                 buffer.read_vector(result.data);
                 if (buffer.read<bool>())
                 {
@@ -367,6 +371,7 @@ namespace sogen::alpc
                 }
 
                 endpoint->disconnected = true;
+                endpoint->owner_exited = t.payload.owner_exited;
 
                 if (t.to_server)
                 {
@@ -1428,10 +1433,10 @@ namespace sogen::alpc
                 return status;
             }
 
-            if (p->disconnected)
+            if (p->owner_exited)
             {
                 p->awaited_replies.erase(wait.message_id);
-                return STATUS_PORT_DISCONNECTED;
+                return status_request_abandoned_by_owner_exit;
             }
             break;
 
@@ -1455,10 +1460,6 @@ namespace sogen::alpc
                 }
             }
 
-            if (p->kind == port_kind::client_communication && p->disconnected)
-            {
-                return STATUS_PORT_DISCONNECTED;
-            }
             break;
         }
 
@@ -1660,7 +1661,7 @@ namespace sogen::alpc
         return STATUS_SUCCESS;
     }
 
-    void close_port(windows_emulator& win_emu, const uint64_t port_id)
+    void close_port(windows_emulator& win_emu, const uint64_t port_id, const bool owner_exited)
     {
         auto& s = win_emu.process.alpc;
         auto* p = find_port(s, port_id);
@@ -1677,6 +1678,7 @@ namespace sogen::alpc
                 transport payload{};
                 payload.kind = transport_kind::closed;
                 payload.sender_process_id = win_emu.process.process_id;
+                payload.owner_exited = owner_exited;
                 route(win_emu, {.port_name = p->name, .connection_id = p->connection_id, .to_server = !server_side, .payload = payload});
             }
 
@@ -1700,7 +1702,7 @@ namespace sogen::alpc
 
         for (const auto port_id : port_ids)
         {
-            close_port(win_emu, port_id);
+            close_port(win_emu, port_id, true);
         }
     }
 

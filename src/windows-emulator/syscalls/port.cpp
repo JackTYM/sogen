@@ -351,6 +351,11 @@ namespace sogen
             auto port_name = read_unicode_string(c.emu, server_port_name);
             c.win_emu.callbacks.on_generic_access("Connecting port", port_name);
 
+            if (port_name == srm_command_port_name)
+            {
+                alpc::create_kernel_listener(c.proc, port_name, srm_command_port_max_message_length, lsa_command_port_name);
+            }
+
             if (alpc::is_guest_port_name(c.proc, port_name))
             {
                 return alpc::connect_port(c, port_name, port_attributes.value(), flags, connection_message, buffer_length.value(),
@@ -361,6 +366,11 @@ namespace sogen
             {
                 fprintf(stderr, "[alpc-connect-trace] pid=%u tid=%u connecting to \"%s\"\n", c.proc.process_id, c.thread().id,
                         u16_to_u8(port_name).c_str());
+            }
+
+            if (is_placeholder_rpc_port(port_name))
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
             port_creation_data data{};
@@ -497,7 +507,7 @@ namespace sogen
 
             if (port->alpc_port_id() != 0)
             {
-                alpc::close_port(c.win_emu, port->alpc_port_id());
+                alpc::close_port(c.win_emu, port->alpc_port_id(), false);
                 return STATUS_SUCCESS;
             }
 

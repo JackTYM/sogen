@@ -9,6 +9,11 @@
 
 namespace sogen
 {
+    namespace syscalls
+    {
+        bool is_adopted_or_process_token(uint64_t handle_bits);
+        void mark_adopted_token(uint64_t handle_bits);
+    }
 
     namespace syscalls
     {
@@ -1696,7 +1701,10 @@ namespace sogen
         {
             if (c.proc.is_current_process_handle(process_handle))
             {
-                token_handle.write(c.proc.tokens.store({}));
+                const auto own_token = c.proc.tokens.store({});
+                // A token opened from the process's own primary token keeps its LocalSystem identity when handed to a child.
+                mark_adopted_token(own_token.bits);
+                token_handle.write(own_token);
                 return STATUS_SUCCESS;
             }
 
@@ -1934,7 +1942,9 @@ namespace sogen
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> client_id_attribute{};
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> image_info_attribute{};
             std::vector<handle> inherited_handles{};
+            bool has_handle_list_attribute = false;
             bool has_explicit_token = false;
+            uint64_t explicit_token_bits = 0;
 
             if (attribute_list)
             {
@@ -1964,6 +1974,7 @@ namespace sogen
                             }
                             else if (type == PsAttributeHandleList)
                             {
+                                has_handle_list_attribute = true;
                                 const auto handle_count = attribute.Size / sizeof(handle);
                                 inherited_handles.resize(handle_count);
                                 c.emu.read_memory(attribute.Value, inherited_handles.data(), attribute.Size);
@@ -1971,6 +1982,7 @@ namespace sogen
                             else if (type == PsAttributeToken)
                             {
                                 has_explicit_token = true;
+                                explicit_token_bits = attribute.Value;
                             }
                             else
                             {
@@ -1979,6 +1991,18 @@ namespace sogen
                             }
                         },
                         i);
+                }
+            }
+
+            // bInheritHandles without a handle list passes every inheritable handle; anonymous pipes used as standard handles rely on it.
+            if (!has_handle_list_attribute && (process_flags & process_create_flags_inherit_handles))
+            {
+                for (const auto& [index, device] : c.proc.devices)
+                {
+                    if (device.inherit && device.get_internal_device<named_pipe>())
+                    {
+                        inherited_handles.push_back(c.proc.devices.make_handle(index));
+                    }
                 }
             }
 
@@ -2008,8 +2032,10 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
+            fprintf(stderr, "V2JOBCHECK pid=%u flags=%x\n", c.proc.process_id, process_flags);
             if (!job_allows_another_process(c.proc))
             {
+                fprintf(stderr, "V2JOBREFUSED pid=%u\n", c.proc.process_id);
                 return STATUS_QUOTA_EXCEEDED;
             }
 
@@ -2035,7 +2061,8 @@ namespace sogen
                 .start_suspended = (thread_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) != 0,
                 // Without PsAttributeToken the child runs on a copy of the creator's primary token. Token handles
                 // carry no identity here, so a child created with an explicit token keeps the default user.
-                .local_system = !has_explicit_token && c.win_emu.runs_as_local_system(),
+                // A logon or copied primary token keeps the creator's identity; only a token the process made for itself means the default user.
+                .local_system = c.win_emu.runs_as_local_system() && (!has_explicit_token || syscalls::is_adopted_or_process_token(explicit_token_bits)),
                 .process_id = child_pid,
             };
 
@@ -2183,6 +2210,23 @@ namespace sogen
                 }
             }
 
+            // The child builds its own RTL_USER_PROCESS_PARAMETERS, so an inherited pipe end used as a standard handle is passed in __SOGEN_STD_HANDLES.
+            {
+                const auto is_inherited_pipe = [&](const uint64_t bits) {
+                    return bits != 0 && std::ranges::any_of(inherited_pipes, [&](const auto& pipe) { return pipe.target_handle.bits == bits; });
+                };
+                const uint64_t standard_handles[3] = {params.StandardInput, params.StandardOutput, params.StandardError};
+                if (std::ranges::any_of(standard_handles, is_inherited_pipe))
+                {
+                    char value[80]{};
+                    snprintf(value, sizeof(value), "%llx,%llx,%llx",
+                             static_cast<unsigned long long>(is_inherited_pipe(standard_handles[0]) ? standard_handles[0] : 0),
+                             static_cast<unsigned long long>(is_inherited_pipe(standard_handles[1]) ? standard_handles[1] : 0),
+                             static_cast<unsigned long long>(is_inherited_pipe(standard_handles[2]) ? standard_handles[2] : 0));
+                    child_settings.environment[u"__SOGEN_STD_HANDLES"] = u8_to_u16(value);
+                }
+            }
+
             const auto trace_spawn_race_timing = std::getenv("SOGEN_TRACE_SPAWN_RACE_TIMING") != nullptr;
             if (trace_spawn_race_timing)
             {
@@ -2231,6 +2275,7 @@ namespace sogen
             record.granted_access = resolve_granted_process_access(process_desired_access);
 
             c.win_emu.log.log("NtCreateUserProcess: child %u started\n", record_id);
+            fprintf(stderr, "V2CHILD started parent=%u child_pid=%u image=%s\n", c.proc.process_id, child_pid, u16_to_u8(image_path).c_str());
 
             if (process_handle)
             {

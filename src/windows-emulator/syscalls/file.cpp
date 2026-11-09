@@ -424,6 +424,17 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == FileIoCompletionNotificationInformation)
+            {
+                if (length < sizeof(ULONG))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                f->completion_notification_flags |= c.emu.read_memory<ULONG>(file_information);
+                return STATUS_SUCCESS;
+            }
+
             c.win_emu.log.error("Unsupported set file info class: 0x%X\n", info_class);
             c.emu.stop();
 
@@ -459,27 +470,28 @@ namespace sogen
                         else
                         {
                             info.DeviceType = FILE_DEVICE_DISK;
-                            info.Characteristics = 0x20020;
+                            info.Characteristics = 0x220020;
                         }
                     });
 
             case FileFsSizeInformation:
                 return handle_query<FILE_FS_SIZE_INFORMATION>(c.emu, fs_information, length, io_status_block,
                                                               [&](FILE_FS_SIZE_INFORMATION& info) {
-                                                                  info.BytesPerSector = 0x1000;
-                                                                  info.SectorsPerAllocationUnit = 0x1000;
-                                                                  info.TotalAllocationUnits.QuadPart = 0x10000;
-                                                                  info.AvailableAllocationUnits.QuadPart = 0x1000;
+                                                                  // NTFS geometry: 512-byte sectors, 8 per cluster.
+                                                                  info.BytesPerSector = 0x200;
+                                                                  info.SectorsPerAllocationUnit = 8;
+                                                                  info.TotalAllocationUnits.QuadPart = 0x10000000;
+                                                                  info.AvailableAllocationUnits.QuadPart = 0x1000000;
                                                               });
 
             case FileFsFullSizeInformation:
                 return handle_query<FILE_FS_FULL_SIZE_INFORMATION>(c.emu, fs_information, length, io_status_block,
                                                                    [&](FILE_FS_FULL_SIZE_INFORMATION& info) {
-                                                                       info.BytesPerSector = 0x1000;
-                                                                       info.SectorsPerAllocationUnit = 0x1000;
-                                                                       info.TotalAllocationUnits.QuadPart = 0x10000;
-                                                                       info.CallerAvailableAllocationUnits.QuadPart = 0x1000;
-                                                                       info.ActualAvailableAllocationUnits.QuadPart = 0x1000;
+                                                                       info.BytesPerSector = 0x200;
+                                                                       info.SectorsPerAllocationUnit = 8;
+                                                                       info.TotalAllocationUnits.QuadPart = 0x10000000;
+                                                                       info.CallerAvailableAllocationUnits.QuadPart = 0x1000000;
+                                                                       info.ActualAvailableAllocationUnits.QuadPart = 0x1000000;
                                                                    });
 
             case FileFsVolumeInformation:
@@ -971,9 +983,10 @@ namespace sogen
 
                 const uint32_t required_length = offsetof(FILE_STREAM_INFORMATION, StreamName) + stream_name_len;
 
+                // FindFirstStreamW retries with a larger buffer on STATUS_BUFFER_OVERFLOW; INFO_LENGTH_MISMATCH makes it give up.
                 if (length < required_length)
                 {
-                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                    return ret(STATUS_BUFFER_OVERFLOW);
                 }
 
                 struct compat_stat file_stat{};
@@ -1560,7 +1573,7 @@ namespace sogen
         // for an APC-based request (ReadFileEx/WriteFileEx), queue the I/O completion APC on the issuing thread.
         // The APC routine follows the PIO_APC_ROUTINE contract (ApcContext, IoStatusBlock, Reserved); it is
         // delivered the next time the thread enters an alertable wait.
-        void deliver_file_io_completion(const syscall_context& c, const uint64_t event, const uint64_t apc_routine,
+        void deliver_file_io_completion(const syscall_context& c, const handle file_handle, const uint64_t event, const uint64_t apc_routine,
                                         const uint64_t apc_context,
                                         const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
                                         const uint64_t wow64_io_status_block, const NTSTATUS status, const uint64_t information)
@@ -1571,6 +1584,12 @@ namespace sogen
             {
                 c.emu.write_memory(wow64_io_status_block, &status32, sizeof(status32));
                 c.emu.write_memory(wow64_io_status_block + sizeof(status32), &information32, sizeof(information32));
+            }
+
+            if (auto* file = c.proc.files.get(file_handle))
+            {
+                constexpr ULONG file_skip_set_event_on_handle = 0x2;
+                file->signaled = event == 0 && !(file->completion_notification_flags & file_skip_set_event_on_handle);
             }
 
             if (event)
@@ -1699,7 +1718,7 @@ namespace sogen
             if (bytes_read > 0)
             {
                 commit_file_data(std::string_view(temp_buffer.data(), bytes_read), c.emu, io_status_block, buffer);
-                deliver_file_io_completion(c, event, apc_routine, apc_context, io_status_block, wow64_io_status_block, STATUS_SUCCESS,
+                deliver_file_io_completion(c, file_handle, event, apc_routine, apc_context, io_status_block, wow64_io_status_block, STATUS_SUCCESS,
                                            bytes_read);
                 return STATUS_SUCCESS;
             }
@@ -1714,7 +1733,7 @@ namespace sogen
                 io_status_block.write(block);
             }
 
-            deliver_file_io_completion(c, event, apc_routine, apc_context, io_status_block, wow64_io_status_block, status, 0);
+            deliver_file_io_completion(c, file_handle, event, apc_routine, apc_context, io_status_block, wow64_io_status_block, status, 0);
             return status;
         }
 
@@ -1923,7 +1942,7 @@ namespace sogen
                 io_status_block.write(block);
             }
 
-            deliver_file_io_completion(c, event, apc_routine, apc_context, io_status_block, wow64_io_status_block, status, bytes_written);
+            deliver_file_io_completion(c, file_handle, event, apc_routine, apc_context, io_status_block, wow64_io_status_block, status, bytes_written);
             return status;
         }
 
@@ -2243,6 +2262,13 @@ namespace sogen
 
             filename = resolve_volume_device_path(resolve_system_root_path(c, std::move(filename)));
 
+            // CreateFile on \\.\C: arrives as \??\C: without a trailing backslash; the volume is served as the drive's root directory.
+            if (filename.size() == 6 && filename.starts_with(u"\\??\\") && filename[5] == u':' && std::isalpha(static_cast<unsigned char>(filename[4])))
+            {
+                filename.push_back(u'\\');
+                create_options &= ~static_cast<ULONG>(FILE_NON_DIRECTORY_FILE);
+            }
+
             if (pipe_io_trace_enabled())
             {
                 c.win_emu.log.info("[pipe-io-trace] NtCreateFile pid=%u tid=%u path='%s'\n", c.proc.process_id, c.thread().id,
@@ -2270,7 +2296,8 @@ namespace sogen
                     container.granted_access = desired_access;
                     pipe_device->create_options = create_options;
                     container.inherit = (attributes.Attributes & OBJ_INHERIT) != 0;
-                    pipe_device->endpoint = std::move(root_pipe->unopened_peer);
+                    // Both ends of an anonymous pipe share one connection id, as a client of a local server instance does; find_connected_peer needs it for inherited ends.
+                    connect_named_pipe_ends(c.proc, *root_pipe, *pipe_device);
 
                     file_handle.write(c.proc.devices.store(std::move(container)));
 

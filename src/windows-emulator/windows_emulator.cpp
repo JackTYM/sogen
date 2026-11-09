@@ -1414,6 +1414,25 @@ namespace sogen
         }
     }
 
+    void windows_emulator::broadcast_named_pipe_close(const std::u16string_view name, const uint64_t connection_id, const bool to_server)
+    {
+        if (this->pipe_ipc_peers_.empty())
+        {
+            return;
+        }
+
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::peer_closed;
+        message.pipe_name = name;
+        message.connection_id = connection_id;
+        message.to_server = to_server;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
     void windows_emulator::broadcast_alpc(const std::u16string_view port_name, const uint64_t connection_id, const bool to_server,
                                           std::string data)
     {
@@ -1635,6 +1654,10 @@ namespace sogen
                     deliver_bytes_to_named_pipe(this->process, message->pipe_name, message->connection_id, message->to_server,
                                                 message->data);
                 }
+                else if (message->type == pipe_ipc_message_type::peer_closed)
+                {
+                    deliver_peer_closure_to_named_pipe(*this, message->pipe_name, message->connection_id, message->to_server);
+                }
                 else if (message->type == pipe_ipc_message_type::connect)
                 {
                     connect_named_pipe_client(*this, this->process, message->pipe_name, message->connection_id, message->client_process_id);
@@ -1765,6 +1788,7 @@ namespace sogen
             return;
         }
 
+        announce_named_pipe_closures(*this);
         alpc::close_all_ports(*this);
 
         this->process_control_server_->notify_exit(static_cast<int32_t>(exit_status.value_or(STATUS_UNSUCCESSFUL)));
@@ -1858,8 +1882,12 @@ namespace sogen
         // that unexpectedly never reaches its sentinel cannot hang the vCPU forever; falling back
         // to the pre-existing racy scheduling behavior here is never worse than never having
         // deferred at all.
+        // Readiness is read, not evaluated: is_thread_ready() completes a satisfied wait and stores its status, and
+        // the return below runs the thread without applying it. A status belongs to the syscall return of the wait
+        // it completes, so a thread that has just blocked goes through the normal switch, which applies it once.
         if (needed_switch && vcpu.active_thread && vcpu.active_thread->pending_guest_call.has_value() &&
-            vcpu.active_thread->is_thread_ready(*this))
+            !vcpu.active_thread->is_terminated() && vcpu.active_thread->suspended == 0 && !vcpu.active_thread->is_waiting() &&
+            !vcpu.active_thread->await_file_io && !vcpu.active_thread->await_debug_event.has_value())
         {
             auto& pending_call = *vcpu.active_thread->pending_guest_call;
             if (++pending_call.deferred_preemptions <= MAX_PENDING_GUEST_CALL_DEFERRED_PREEMPTIONS)
@@ -3999,6 +4027,7 @@ namespace sogen
         static const std::map<std::string, uint16_t, std::less<>> named_keys{
             {"Backspace", keyboard_layout::vk_back}, {"Enter", keyboard_layout::vk_return}, {"Escape", keyboard_layout::vk_escape},
             {"Space", keyboard_layout::vk_space},    {"Tab", keyboard_layout::vk_tab},
+            {"F5", keyboard_layout::vk_f5},
         };
 
         for (size_t start = 0; start <= specification.size();)

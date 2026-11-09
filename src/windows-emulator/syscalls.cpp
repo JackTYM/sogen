@@ -566,7 +566,8 @@ namespace sogen
                                 /*object_attributes*/,
                                 BOOLEAN /*effective_only*/, TOKEN_TYPE type, emulator_object<handle> new_token_handle);
         NTSTATUS handle_NtCreateTokenEx(const syscall_context& c, emulator_object<handle> token_handle, ACCESS_MASK /*desired_access*/,
-                                        emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/, TOKEN_TYPE type);
+                                        emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/, TOKEN_TYPE type,
+                                        uint64_t /*authentication_id*/, uint64_t /*expiration_time*/, uint64_t /*user*/, uint64_t groups);
         NTSTATUS handle_NtFilterToken(const syscall_context&, handle existing_token_handle, ULONG /*flags*/, uint64_t /*sids_to_disable*/,
                                       uint64_t /*privileges_to_delete*/, uint64_t /*restricted_sids*/,
                                       emulator_object<handle> new_token_handle);
@@ -584,6 +585,11 @@ namespace sogen
                                       ACCESS_MASK desired_access, emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
                                       uint64_t privilege_set, emulator_object<ULONG> privilege_set_length,
                                       emulator_object<ACCESS_MASK> granted_access, emulator_object<NTSTATUS> access_status);
+        NTSTATUS handle_NtAccessCheckByType(const syscall_context& c, uint64_t security_descriptor, uint64_t principal_self_sid,
+                                            handle client_token, ACCESS_MASK desired_access, uint64_t object_type_list,
+                                            ULONG object_type_list_length, emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
+                                            uint64_t privilege_set, emulator_object<ULONG> privilege_set_length,
+                                            emulator_object<ACCESS_MASK> granted_access, emulator_object<NTSTATUS> access_status);
         NTSTATUS handle_NtAccessCheckByTypeAndAuditAlarm(const syscall_context& c, uint64_t subsystem_name, uint64_t handle_id,
                                                          uint64_t object_type_name, uint64_t object_name, uint64_t security_descriptor,
                                                          uint64_t principal_self_sid, ACCESS_MASK desired_access, ULONG audit_type,
@@ -1351,6 +1357,17 @@ namespace sogen
                 {
                     if (const auto* f = c.proc.files.get(resolved_file_handle))
                     {
+                        // CreateFile on \\.\C: opens the volume root; any other handle fails with ERROR_INVALID_PARAMETER, which GetVolumePathNameW relies on.
+                        std::u16string_view file_name = f->name;
+                        if (file_name.starts_with(u"\\??\\"))
+                        {
+                            file_name.remove_prefix(4);
+                        }
+                        if (!(file_name.size() == 3 && file_name[1] == u':' && file_name[2] == u'\\'))
+                        {
+                            return STATUS_INVALID_PARAMETER;
+                        }
+
                         const auto device_name = u8_to_u16("\\Device\\HarddiskVolume" + std::to_string(f->drive_number));
                         const auto name_bytes = static_cast<USHORT>(device_name.size() * sizeof(char16_t));
                         const auto total_length = static_cast<ULONG>(offsetof(MOUNTDEV_NAME, Name) + name_bytes);
@@ -1404,6 +1421,10 @@ namespace sogen
                 {
                     context.wow64_io_status_block.set_address(static_cast<emulator_pointer>(native_iosb.Pointer));
                 }
+            }
+            if ((io_control_code >> 16) == 0x12)
+            {
+                fprintf(stderr, "W15SUBMIT code=%x event=%llx apc_routine=%llx apc_context=%llx native_iosb=%llx guest_iosb=%llx\n", io_control_code, static_cast<unsigned long long>(event.bits), static_cast<unsigned long long>(apc_routine), static_cast<unsigned long long>(apc_context), static_cast<unsigned long long>(io_status_block.value()), static_cast<unsigned long long>(context.wow64_io_status_block ? context.wow64_io_status_block.value() : 0));
             }
 
             try
@@ -2015,6 +2036,7 @@ namespace sogen
         add_handler(NtQueryKey);
         add_handler(NtGetNlsSectionPtr);
         add_handler(NtAccessCheck);
+        add_handler(NtAccessCheckByType);
         add_handler(NtAccessCheckByTypeAndAuditAlarm);
         add_handler(NtCloseObjectAuditAlarm);
         add_handler(NtPrivilegedServiceAuditAlarm);

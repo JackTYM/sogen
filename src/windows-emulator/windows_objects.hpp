@@ -45,6 +45,9 @@ namespace sogen
         bool signaled{};
         std::optional<std::chrono::steady_clock::time_point> due_time{};
         int64_t period_nanoseconds{};
+        uint64_t apc_routine{};
+        uint64_t apc_context{};
+        uint32_t apc_thread_id{};
 
         bool is_signaled(utils::clock& clock)
         {
@@ -95,6 +98,9 @@ namespace sogen
             buffer.write(this->signaled);
             buffer.write_optional(this->due_time);
             buffer.write(this->period_nanoseconds);
+            buffer.write(this->apc_routine);
+            buffer.write(this->apc_context);
+            buffer.write(this->apc_thread_id);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -105,6 +111,9 @@ namespace sogen
             buffer.read(this->signaled);
             buffer.read_optional(this->due_time);
             buffer.read(this->period_nanoseconds);
+            buffer.read(this->apc_routine);
+            buffer.read(this->apc_context);
+            buffer.read(this->apc_thread_id);
         }
     };
 
@@ -1055,6 +1064,8 @@ namespace sogen
         uint32_t file_mode{}; // FileModeInformation
         uint8_t drive_number{'c' - 'a' + 1};
         std::vector<directory_change_watch> change_watches{};
+        bool signaled{true};
+        ULONG completion_notification_flags{};
 
         bool is_file() const
         {
@@ -1070,6 +1081,8 @@ namespace sogen
             copy.granted_access = desired_access;
             copy.file_mode = this->file_mode;
             copy.drive_number = this->drive_number;
+            copy.signaled = this->signaled;
+            copy.completion_notification_flags = this->completion_notification_flags;
             return copy;
         }
 
@@ -1087,6 +1100,8 @@ namespace sogen
             buffer.write(this->drive_number);
             buffer.write(this->handle);
             buffer.write_vector(this->change_watches);
+            buffer.write(this->signaled);
+            buffer.write(this->completion_notification_flags);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -1098,6 +1113,8 @@ namespace sogen
             buffer.read(this->drive_number);
             buffer.read(this->handle);
             buffer.read_vector(this->change_watches);
+            buffer.read(this->signaled);
+            buffer.read(this->completion_notification_flags);
         }
     };
 

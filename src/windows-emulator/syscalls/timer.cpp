@@ -221,8 +221,13 @@ namespace sogen
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
+        void drop_timer_apcs(const syscall_context& c, const handle timer_handle)
+        {
+            c.proc.drop_timer_apcs(timer_handle.bits);
+        }
+
         NTSTATUS handle_NtSetTimer(const syscall_context& c, const handle timer_handle, const emulator_object<LARGE_INTEGER> due_time,
-                                   const uint64_t apc_routine, const uint64_t /*apc_context*/, const BOOLEAN /*resume_timer*/,
+                                   const uint64_t apc_routine, const uint64_t apc_context, const BOOLEAN /*resume_timer*/,
                                    const LONG period, const emulator_object<BOOLEAN> previous_state)
         {
             const auto [entry, status] = find_timer(c, timer_handle, false);
@@ -234,10 +239,9 @@ namespace sogen
             {
                 return STATUS_INVALID_PARAMETER_6;
             }
-            if (apc_routine != 0)
-            {
-                return STATUS_NOT_SUPPORTED;
-            }
+            entry->apc_routine = apc_routine;
+            entry->apc_context = apc_context;
+            entry->apc_thread_id = c.vcpu.active_thread ? c.vcpu.active_thread->id : 0;
             const auto due = due_time.read();
             previous_state.write_if_valid(static_cast<BOOLEAN>(entry->is_signaled(c.win_emu.clock())));
             entry->due_time = timer_deadline(c.win_emu.clock(), due);
@@ -255,7 +259,8 @@ namespace sogen
                 return status;
             }
             const auto options = emulator_object<timer_set_parameters>{c.emu, parameters}.read();
-            if (options.version != 0 || options.reserved != 0)
+            // Reserved is not zeroed by callers (the thread pool passes stack garbage), so only the version is validated.
+            if (options.version != 0)
             {
                 return STATUS_INVALID_PARAMETER_4;
             }
@@ -343,6 +348,7 @@ namespace sogen
             }
             current_state.write_if_valid(static_cast<BOOLEAN>(entry->is_signaled(c.win_emu.clock())));
             entry->cancel();
+            drop_timer_apcs(c, timer_handle);
             return STATUS_SUCCESS;
         }
 
@@ -354,6 +360,7 @@ namespace sogen
                 return status;
             }
             entry->cancel();
+            drop_timer_apcs(c, timer_handle);
             return STATUS_SUCCESS;
         }
     }

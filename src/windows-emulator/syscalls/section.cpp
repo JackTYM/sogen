@@ -320,6 +320,7 @@ namespace sogen
             s.object->section_page_protection = section_page_protection;
             s.object->allocation_attributes = allocation_attributes;
             s.granted_access = desired_access;
+            if (file_handle.bits && c.proc.files.get(file_handle) && c.proc.files.get(file_handle)->name.find(u"sldim.exe") != std::u16string::npos) std::fprintf(stderr, "W34SEC pid=%u alloc=%x prot=%x access=%x\n", c.proc.process_id, allocation_attributes, section_page_protection, desired_access);
 
             const auto* file = c.proc.files.get(file_handle);
             if (file)
@@ -539,7 +540,7 @@ namespace sogen
                                            const emulator_object<LARGE_INTEGER> section_offset,
                                            const emulator_object<EMULATOR_CAST(EmulatorTraits<Emu64>::SIZE_T, SIZE_T)> view_size,
                                            const SECTION_INHERIT /*inherit_disposition*/, const ULONG allocation_type,
-                                           const ULONG /*win32_protect*/)
+                                           const ULONG win32_protect)
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
@@ -598,6 +599,21 @@ namespace sogen
             if (section_entry->object->is_image())
             {
                 const auto file_path = module_manager::module_identity(section_entry->object->file_name);
+                if (section_entry->object->file_name.find(u"sldim.exe") != std::u16string::npos)
+                {
+                    uint64_t sp{};
+                    uint64_t ret0{};
+                    uint64_t ret1{};
+                    c.emu.read_raw_register(static_cast<int>(x86_register::rsp), &sp, sizeof(sp));
+                    c.win_emu.emu().try_read_memory(sp, &ret0, 8);
+                    c.win_emu.emu().try_read_memory(sp + 8, &ret1, 8);
+                    const auto* m0 = c.win_emu.mod_manager.find_by_address(ret0);
+                    const auto* m1 = c.win_emu.mod_manager.find_by_address(ret1);
+                    std::fprintf(stderr, "W34MAP pid=%u base=%llx alloc_type=%x prot=%x ret0=%llx(%s) ret1=%llx(%s)\n", c.proc.process_id,
+                                 static_cast<unsigned long long>(base_address.value()), allocation_type, win32_protect,
+                                 static_cast<unsigned long long>(ret0), m0 ? m0->name.c_str() : "?",
+                                 static_cast<unsigned long long>(ret1), m1 ? m1->name.c_str() : "?");
+                }
                 uint64_t relocation_base{};
                 for (const auto& loaded_module : c.win_emu.mod_manager.modules() | std::views::values)
                 {

@@ -17,6 +17,7 @@ namespace sogen
         constexpr uint16_t vk_menu = 0x12;
         constexpr uint16_t vk_capital = 0x14;
         constexpr uint16_t vk_escape = 0x1B;
+        constexpr uint16_t vk_f5 = 0x74;
         constexpr uint16_t vk_space = 0x20;
         constexpr uint16_t vk_numpad0 = 0x60;
         constexpr uint16_t vk_multiply = 0x6A;

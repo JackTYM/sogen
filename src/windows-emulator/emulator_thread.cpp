@@ -46,13 +46,6 @@ namespace sogen
             return gs_segment.reserve<nls_cache_placeholder>().value();
         }
 
-        enum class wait_state
-        {
-            not_signaled,
-            signaled,
-            abandoned,
-        };
-
         void setup_wow64_fs_segment(memory_manager& memory, uint64_t teb32_addr, uint64_t gdt_base)
         {
             const uint64_t base = teb32_addr;
@@ -104,7 +97,9 @@ namespace sogen
             }
         }
 
-        wait_state observe_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
+    }
+
+    wait_state observe_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
         {
             auto& c = win_emu.process;
             const auto type = h.value.type;
@@ -180,7 +175,7 @@ namespace sogen
 
                 if (const auto* f = c.files.get(h))
                 {
-                    return f->change_watches.empty() ? wait_state::signaled : wait_state::not_signaled;
+                    return f->signaled && f->change_watches.empty() ? wait_state::signaled : wait_state::not_signaled;
                 }
 
                 break;
@@ -248,7 +243,7 @@ namespace sogen
             return wait_state::not_signaled;
         }
 
-        std::optional<wait_state> consume_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
+    std::optional<wait_state> consume_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
         {
             auto& c = win_emu.process;
             switch (h.value.type)
@@ -317,7 +312,7 @@ namespace sogen
                 }
 
                 const auto* f = c.files.get(h);
-                if (!f || !f->change_watches.empty())
+                if (!f || !f->signaled || !f->change_watches.empty())
                 {
                     return std::nullopt;
                 }
@@ -400,6 +395,9 @@ namespace sogen
                 throw std::runtime_error("Bad object: " + std::to_string(h.value.type));
             }
         }
+
+    namespace
+    {
 
         uint32_t get_message_queue_status_bits(const msg& queued_message)
         {
@@ -1378,6 +1376,8 @@ namespace sogen
 
         auto& process = win_emu.process;
         auto& clock = win_emu.clock();
+
+        process.queue_due_timer_apcs(clock);
 
         const auto complete_if_timed_out = [&](const NTSTATUS status) {
             if (!this->is_await_time_over(clock) || this->has_pending_alertable_apc())

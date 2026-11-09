@@ -6,6 +6,7 @@
 #include "memory_manager.hpp"
 
 #include <functional>
+#include <optional>
 
 #include "process_manager.hpp"
 #include <utils/moved_marker.hpp>
@@ -18,6 +19,17 @@ namespace sogen
     struct process_context;
     struct vcpu_context;
     struct windows_arch_abi;
+    class windows_emulator;
+
+    enum class wait_state
+    {
+        not_signaled,
+        signaled,
+        abandoned,
+    };
+
+    wait_state observe_object_signal(windows_emulator& win_emu, handle h, uint32_t current_thread_id);
+    std::optional<wait_state> consume_object_signal(windows_emulator& win_emu, handle h, uint32_t current_thread_id);
 
     // Thrown by emulator_thread's constructor when a guest memory allocation it needs (stack, GS
     // segment/TEB, ...) fails - distinguishable from an ordinary std::runtime_error so a syscall
@@ -126,6 +138,9 @@ namespace sogen
         int32_t io_status{};
         uint32_t io_information{};
 
+        // Handle of the timer whose expiry queued this APC; zero for other APC sources.
+        uint64_t timer_source{};
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->flags);
@@ -136,6 +151,7 @@ namespace sogen
             buffer.write(this->restamp_io_status_block);
             buffer.write(this->io_status);
             buffer.write(this->io_information);
+            buffer.write(this->timer_source);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -148,6 +164,7 @@ namespace sogen
             buffer.read(this->restamp_io_status_block);
             buffer.read(this->io_status);
             buffer.read(this->io_information);
+            buffer.read(this->timer_source);
         }
     };
 

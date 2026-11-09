@@ -560,6 +560,7 @@ namespace sogen
     };
 
     std::unique_ptr<port> create_port(std::u16string_view port);
+    bool is_placeholder_rpc_port(std::u16string_view port);
 
     class port_container : public port
     {

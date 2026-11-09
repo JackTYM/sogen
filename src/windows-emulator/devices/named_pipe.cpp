@@ -31,6 +31,15 @@ namespace sogen
             }
         }
 
+        NTSTATUS translate_completion(const utils::pipe_io_status status, const bool writing)
+        {
+            if (writing && status == utils::pipe_io_status::broken)
+            {
+                return STATUS_PIPE_CLOSING;
+            }
+            return translate_pipe_status(status);
+        }
+
         constexpr auto wait_name_offset = static_cast<ULONG>(offsetof(file_pipe_wait_for_buffer, name));
 
         std::optional<file_pipe_wait_for_buffer> read_wait_header(const windows_emulator& win_emu, const io_device_context& context)
@@ -84,6 +93,21 @@ namespace sogen
         bool is_same_pipe(const named_pipe& pipe, const windows_path& path)
         {
             return windows_path(pipe.name) == path;
+        }
+
+        std::string read_all_available(utils::host_pipe& pipe)
+        {
+            std::string data;
+            for (;;)
+            {
+                const auto operation = pipe.read(relay_read_size, false);
+                const auto result = operation->check_completion();
+                if (result.status != utils::pipe_io_status::success || !result.transferred)
+                {
+                    return data;
+                }
+                data.append(operation->data());
+            }
         }
 
         // GetNamedPipeClientProcessId and its siblings pass the attribute name as a plain, not necessarily
@@ -264,6 +288,42 @@ namespace sogen
         auto endpoints = utils::host_pipe::create_pair(true, std::max<ULONG>({this->inbound_quota, this->outbound_quota, 4096}));
         this->endpoint = std::move(endpoints.first);
         this->relay = std::move(endpoints.second);
+    }
+
+    named_pipe::host_pipe_leftovers named_pipe::detach_host_pipes()
+    {
+        host_pipe_leftovers leftovers{};
+        if (this->endpoint)
+        {
+            leftovers.readable_here = read_all_available(*this->endpoint);
+        }
+        for (const auto& queued : this->relay_outbox_)
+        {
+            leftovers.readable_here += queued;
+        }
+        leftovers.readable_there = std::move(this->relay_message_);
+        if (this->relay)
+        {
+            leftovers.readable_there += read_all_available(*this->relay);
+        }
+
+        this->endpoint.reset();
+        this->relay.reset();
+        this->relay_outbox_.clear();
+        this->relay_write_.reset();
+        this->relay_message_.clear();
+        return leftovers;
+    }
+
+    void named_pipe::rebind_pending_reads()
+    {
+        for (auto& operation : this->pending_)
+        {
+            if (operation.kind == operation_kind::read)
+            {
+                operation.operation = this->endpoint->read(operation.context.output_buffer_length, this->reads_messages());
+            }
+        }
     }
 
     void named_pipe::queue_relay_bytes(const std::string_view data)
@@ -598,7 +658,7 @@ namespace sogen
                                                                  : utils::pipe_io_result{.status = utils::pipe_io_status::pending};
         if (result.status != utils::pipe_io_status::pending)
         {
-            const auto status = translate_pipe_status(result.status);
+            const auto status = translate_completion(result.status, pending.kind == operation_kind::write);
             this->complete(win_emu, pending, {.status = status, .transferred = result.transferred}, false);
             return status;
         }
@@ -648,7 +708,7 @@ namespace sogen
         }
         default: {
             const auto result = operation.operation->check_completion();
-            return {.status = translate_pipe_status(result.status), .transferred = result.transferred};
+            return {.status = translate_completion(result.status, operation.kind == operation_kind::write), .transferred = result.transferred};
         }
         }
     }
@@ -706,7 +766,7 @@ namespace sogen
                 ++it;
                 continue;
             }
-            this->complete(win_emu, *it, {.status = translate_pipe_status(result.status), .transferred = result.transferred}, true);
+            this->complete(win_emu, *it, {.status = translate_completion(result.status, it->kind == operation_kind::write), .transferred = result.transferred}, true);
             release_operation(win_emu.process, *it);
             it = this->pending_.erase(it);
             cancelled = true;
@@ -985,6 +1045,26 @@ namespace sogen
         client.client_process_id = process.process_id;
     }
 
+    void connect_imported_ends_locally(process_context& process, named_pipe& pipe, named_pipe& peer, const std::string& unread_data)
+    {
+        const auto leftovers = peer.detach_host_pipes();
+        named_pipe& server = pipe.server_end ? pipe : peer;
+        named_pipe& client = pipe.server_end ? peer : pipe;
+        server.create_endpoints();
+        connect_named_pipe_ends(process, server, client);
+
+        const auto readable_by_pipe = unread_data + leftovers.readable_there;
+        if (!readable_by_pipe.empty())
+        {
+            peer.endpoint->write(readable_by_pipe)->check_completion();
+        }
+        if (!leftovers.readable_here.empty())
+        {
+            pipe.endpoint->write(leftovers.readable_here)->check_completion();
+        }
+        peer.rebind_pending_reads();
+    }
+
     NTSTATUS connect_named_pipe_client_end(windows_emulator& win_emu, named_pipe& client)
     {
         auto& process = win_emu.process;
@@ -1064,6 +1144,54 @@ namespace sogen
         pending_connections.erase(pending);
     }
 
+    void named_pipe::announce_closure(windows_emulator& win_emu) const
+    {
+        if (!this->relay || this->connection_id == 0)
+        {
+            return;
+        }
+        // Peers read until the break, so pending relay bytes must be forwarded before the closure is broadcast.
+        const_cast<named_pipe*>(this)->forward_relay_bytes(win_emu);
+        win_emu.broadcast_named_pipe_close(this->name, this->connection_id, !this->server_end);
+    }
+
+    void named_pipe::break_relay(windows_emulator& win_emu)
+    {
+        // Bytes received before the closure reach the reader before the pipe breaks.
+        this->flush_relay_outbox();
+        this->relay.reset();
+        this->relay_outbox_.clear();
+        this->relay_write_.reset();
+        this->relay_message_.clear();
+        this->work(win_emu);
+    }
+
+    void deliver_peer_closure_to_named_pipe(windows_emulator& win_emu, const std::u16string_view name, const uint64_t connection_id,
+                                            const bool to_server)
+    {
+        const windows_path path{name};
+        for (auto& device : win_emu.process.devices | std::views::values)
+        {
+            auto* pipe = device.get_internal_device<named_pipe>();
+            if (pipe && pipe->relay && pipe->server_end == to_server && pipe->connection_id == connection_id && is_same_pipe(*pipe, path))
+            {
+                pipe->break_relay(win_emu);
+                return;
+            }
+        }
+    }
+
+    void announce_named_pipe_closures(windows_emulator& win_emu)
+    {
+        for (auto& device : win_emu.process.devices | std::views::values)
+        {
+            if (const auto* pipe = device.get_internal_device<named_pipe>())
+            {
+                pipe->announce_closure(win_emu);
+            }
+        }
+    }
+
     void deliver_bytes_to_named_pipe(process_context& process, const std::u16string_view name, const uint64_t connection_id,
                                      const bool to_server, const std::string_view data)
     {
@@ -1078,6 +1206,9 @@ namespace sogen
             }
         }
 
+        if (connection_id == 17660905521165ULL)
+        {
+        }
         if (!to_server)
         {
             return;
@@ -1137,6 +1268,13 @@ namespace sogen
 
     void import_named_pipe_end(process_context& process, named_pipe& pipe, const named_pipe_end_transfer& transfer)
     {
+        for (auto& device : process.devices | std::views::values)
+        {
+            auto* other = device.get_internal_device<named_pipe>();
+            if (other && other != &pipe)
+            {
+            }
+        }
         pipe.name = transfer.name;
         pipe.server_end = transfer.server_end;
         pipe.connection_id = transfer.connection_id;
@@ -1152,10 +1290,17 @@ namespace sogen
 
         if (transfer.connection_id)
         {
-            pipe.create_relay();
-            if (!transfer.unread_data.empty())
+            if (auto* peer = find_connected_peer(process, pipe))
             {
-                pipe.queue_relay_bytes(transfer.unread_data);
+                connect_imported_ends_locally(process, pipe, *peer, transfer.unread_data);
+            }
+            else
+            {
+                pipe.create_relay();
+                if (!transfer.unread_data.empty())
+                {
+                    pipe.queue_relay_bytes(transfer.unread_data);
+                }
             }
         }
         else if (transfer.server_end)

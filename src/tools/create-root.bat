@@ -51,6 +51,7 @@ MKDIR %EMU_GLOBALIZATION_SORTING%
 MKDIR "%EMU_WEBVIEW2DIR%"
 MKDIR "%EMU_FILESYS%\c\program files\common files"
 MKDIR "%EMU_FILESYS%\c\program files (x86)\common files"
+MKDIR "%EMU_FILESYS%\c\users\public"
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
 
@@ -70,6 +71,7 @@ CALL "%~dp0grab-registry.bat" "%EMU_REGDIR%"
 
 CALL :collect advapi32.dll
 CALL :collect apisetschema.dll
+CALL :collect attrib.exe
 CALL :collect audioeng.dll
 CALL :collect audiokse.dll
 CALL :collect authz.dll
@@ -99,6 +101,7 @@ CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
 CALL :collect cryptsp.dll
 CALL :collect CRYPTUI.dll
+CALL :collect cscript.exe
 CALL :collect d2d1.dll
 CALL :collect d3d10.dll
 CALL :collect d3d10core.dll
@@ -136,6 +139,7 @@ CALL :collect gdiplus.dll
 CALL :collect glu32.dll
 CALL :collect hal.dll
 CALL :collect hid.dll
+CALL :collect icacls.exe
 CALL :collect imageres.dll
 CALL :collect imm32.dll
 CALL :collect imagehlp.dll
@@ -157,8 +161,16 @@ CALL :collect mfreadwrite.dll
 CALL :collect MFSENSORGROUP.dll
 CALL :collect mmdevapi.dll
 CALL :collect appxdeploymentclient.dll
+CALL :collect virtdisk.dll
+CALL :collect appresolver.dll
+CALL :collect mfc140u.dll
 CALL :collect audioses.dll
 CALL :collect avrt.dll
+CALL :collect mshta.exe
+CALL :collect net.exe
+CALL :collect netsh.exe
+CALL :collect reg.exe
+CALL :collect regsvr32.exe
 CALL :collect resourcepolicyclient.dll
 CALL :collect rmclient.dll
 CALL :collect mobilenetworking.dll
@@ -185,7 +197,10 @@ CALL :collect msvcr120_clr0400.dll
 CALL :collect msvcp120_clr0400.dll
 CALL :collect msvcp140_clr0400.dll
 CALL :collect msvcr100_clr0400.dll
+CALL :collect rundll32.exe
+CALL :collect sc.exe
 CALL :collect ucrtbase_clr0400.dll
+CALL :collect ulib.dll
 CALL :collect vcruntime140_clr0400.dll
 CALL :collect vcruntime140_1_clr0400.dll
 CALL :collect msvcrt.dll
@@ -212,6 +227,8 @@ CALL :collect ntmarta.dll
 CALL :collect ntoskrnl.exe
 CALL :collect ole32.dll
 CALL :collect oleacc.dll
+CALL :collect oledlg.dll
+CALL :collect odbc32.dll
 CALL :collect oleaccrc.dll
 CALL :collect oleaut32.dll
 CALL :collect opengl32.dll
@@ -318,6 +335,7 @@ CALL :collect wow64con.dll
 CALL :collect wow64cpu.dll
 CALL :collect wow64win.dll
 CALL :collect ws2_32.dll
+CALL :collect wscript.exe
 CALL :collect wshbth.dll
 CALL :collect wsock32.dll
 CALL :collect wtsapi32.dll

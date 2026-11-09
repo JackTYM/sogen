@@ -12,116 +12,29 @@ namespace sogen
     {
         namespace
         {
+            // A wait packet owns nothing, so a mutant is observed without an owner.
+            constexpr uint32_t wait_packet_observer_thread = 0;
+
             bool is_wait_completion_target_signaled(windows_emulator& win_emu, const handle target_object_handle)
             {
-                auto& process = win_emu.process;
-                switch (target_object_handle.value.type)
-                {
-                case handle_types::process: {
-                    if (target_object_handle == GUEST_PROCESS_HANDLE)
-                    {
-                        return process.exit_status.has_value();
-                    }
-                    if (const auto* entry = process.processes.get(target_object_handle); entry && entry->process && win_emu.processes())
-                    {
-                        const auto status = win_emu.processes()->exit_status(entry->process);
-                        return status && status.status.has_value();
-                    }
-
-                    const auto child = process.child_processes.find(target_object_handle.value.id);
-                    return child != process.child_processes.end() && child->second.exit_status != STATUS_PENDING;
-                }
-                case handle_types::managed_thread: {
-                    const auto* entry = process.managed_threads.get(target_object_handle);
-                    if (!entry || !win_emu.processes())
-                    {
-                        return false;
-                    }
-                    const auto status = win_emu.processes()->exit_status(entry->process);
-                    return status && status.status.has_value();
-                }
-
-                case handle_types::event: {
-                    const auto* e = process.events.get(target_object_handle);
-                    return e && e->is_signaled();
-                }
-                case handle_types::thread: {
-                    const auto* thread = process.threads.get(target_object_handle);
-                    return thread && thread->is_terminated();
-                }
-
-                case handle_types::semaphore: {
-                    const auto* semaphore = process.semaphores.get(target_object_handle);
-                    return semaphore && semaphore->current_count() > 0;
-                }
-
-                case handle_types::port: {
-                    const auto* port = process.ports.get(target_object_handle);
-                    return port != nullptr && (port->has_pending_reply() || alpc::has_queued_message(process, port->alpc_port_id()));
-                }
-
-                case handle_types::mutant: {
-                    const auto* mutant = process.mutants.get(target_object_handle);
-                    return mutant && mutant->locked_count() == 0;
-                }
-
-                case handle_types::timer: {
-                    auto* entry = process.timers.get(target_object_handle);
-                    return entry && entry->is_signaled(win_emu.clock());
-                }
-
-                case handle_types::file: {
-                    // Only STDIN_HANDLE and NUL_HANDLE reach here; see is_wait_completion_target_type.
-                    if (target_object_handle == STDIN_HANDLE)
-                    {
-                        return win_emu.console().input_available();
-                    }
-
-                    return true;
-                }
-
-                default:
-                    return false;
-                }
+                return observe_object_signal(win_emu, target_object_handle, wait_packet_observer_thread) == wait_state::signaled;
             }
 
             // Delivering a wait-completion-packet completion is a satisfied wait, so it must consume the
             // target's signal exactly like NtWaitForSingleObject would: an auto-reset event resets and a
             // semaphore decrements. Without this, an edge-triggered target stays signaled and floods the
             // completion port with spurious packets (e.g. a games's async scheduler busy-spins forever).
-            void consume_wait_completion_target(process_context& process, const handle target_object_handle)
+            void consume_wait_completion_target(windows_emulator& win_emu, const handle target_object_handle)
             {
                 switch (target_object_handle.value.type)
                 {
-                case handle_types::event: {
-                    auto* e = process.events.get(target_object_handle);
-                    if (e && e->type == SynchronizationEvent)
-                    {
-                        (void)e->try_consume_signal();
-                    }
+                case handle_types::event:
+                case handle_types::semaphore:
+                case handle_types::timer:
+                    (void)consume_object_signal(win_emu, target_object_handle, wait_packet_observer_thread);
                     break;
-                }
-
-                case handle_types::semaphore: {
-                    auto* semaphore = process.semaphores.get(target_object_handle);
-                    if (semaphore)
-                    {
-                        (void)semaphore->try_lock();
-                    }
-                    break;
-                }
-
-                case handle_types::timer: {
-                    if (auto* entry = process.timers.get(target_object_handle))
-                    {
-                        entry->consume_signal();
-                    }
-                    break;
-                }
 
                 default:
-                    // process/thread are terminal; ports and mutants are left
-                    // untouched (a wait packet does not take mutant ownership).
                     break;
                 }
             }
@@ -151,32 +64,6 @@ namespace sogen
                 }
 
                 completion.enqueue(message);
-            }
-        }
-
-        bool is_wait_completion_target_type(const handle target_object_handle)
-        {
-            switch (target_object_handle.value.type)
-            {
-            case handle_types::process:
-            case handle_types::event:
-            case handle_types::thread:
-            case handle_types::managed_thread:
-            case handle_types::semaphore:
-            case handle_types::port:
-            case handle_types::mutant:
-            case handle_types::timer:
-                return true;
-
-            // libuv registers a thread-pool wait on the console input handle to read a raw TTY, so
-            // without this a guest cannot start a terminal UI. Only console input and NUL are accepted:
-            // a wait on console output never completes on Windows, and a real file object carries no
-            // signal the emulator tracks.
-            case handle_types::file:
-                return target_object_handle == STDIN_HANDLE || target_object_handle == NUL_HANDLE;
-
-            default:
-                return false;
             }
         }
 
@@ -321,7 +208,7 @@ namespace sogen
                     continue;
                 }
 
-                consume_wait_completion_target(process, wait_packet.target_object_handle);
+                consume_wait_completion_target(win_emu, wait_packet.target_object_handle);
 
                 static const bool trace_wait_packets = std::getenv("SOGEN_TRACE_WAIT_PACKETS") != nullptr;
                 if (trace_wait_packets)

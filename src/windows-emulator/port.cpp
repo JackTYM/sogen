@@ -383,6 +383,16 @@ namespace sogen
         return std::make_unique<dummy_port>(std::u16string(port));
     }
 
+    bool is_placeholder_rpc_port(const std::u16string_view port)
+    {
+        if (!utils::string::starts_with_ignore_case(port, std::u16string_view(u"\\RPC Control\\")))
+        {
+            return false;
+        }
+
+        return dynamic_cast<const dummy_port*>(create_port(port).get()) != nullptr;
+    }
+
     void port_container::post_completion(windows_emulator& win_emu) const
     {
         auto* completion = win_emu.process.io_completions.get(this->completion_port_);

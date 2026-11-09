@@ -1041,6 +1041,11 @@ namespace sogen
         user_handle_store<handle_types::window, window> windows{user_handles};
         user_handle_store<handle_types::type::menu, menu> menus{user_handles};
         handle_store<handle_types::timer, timer> timers{};
+        std::vector<std::unique_ptr<timer>> orphaned_timers{};
+
+        void queue_due_timer_apcs(utils::clock& clock);
+        void drop_timer_apcs(uint64_t timer_source);
+        void retain_armed_timer_after_close(handle timer_handle);
 
         // Client connections to a pipe name this process serves while every server instance of that name is busy;
         // the next instance to listen takes the oldest one, with any bytes the client already wrote.

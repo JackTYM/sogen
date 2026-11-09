@@ -13,6 +13,20 @@
 #include <utils/finally.hpp>
 #include <utils/time.hpp>
 
+namespace {
+std::string afd_debug_text(const std::vector<std::byte>& data, size_t limit)
+{
+    std::string text;
+    for (size_t i = 0; i < data.size() && i < limit; ++i)
+    {
+        const auto c = static_cast<unsigned char>(data[i]);
+        text.push_back(c >= 0x20 && c < 0x7f ? static_cast<char>(c) : '.');
+    }
+    return text;
+}
+}
+
+
 namespace sogen
 {
 
@@ -478,7 +492,10 @@ namespace sogen
             afd_endpoint(afd_endpoint&&) = delete;
             afd_endpoint& operator=(afd_endpoint&&) = delete;
 
-            ~afd_endpoint() override = default;
+            ~afd_endpoint() override
+            {
+                fprintf(stderr, "AFDLOG close ep=%p\n", static_cast<const void*>(this));
+            }
 
             void create(windows_emulator& win_emu, const io_device_creation_data& data) override
             {
@@ -503,6 +520,13 @@ namespace sogen
                        });
             }
 
+            // CancelIoEx matches the caller's OVERLAPPED IO_STATUS_BLOCK, which for a WoW64 caller differs from the block the request was issued with.
+            static bool names_request(const io_device_context& context, const uint64_t io_status_block)
+            {
+                return context.io_status_block.value() == io_status_block ||
+                       (context.wow64_io_status_block && context.wow64_io_status_block.value() == io_status_block);
+            }
+
             bool cancel_io(windows_emulator& win_emu, const uint64_t io_status_block,
                            const std::optional<uint32_t> issuing_thread_id = {}) override
             {
@@ -510,7 +534,7 @@ namespace sogen
 
                 for (auto it = this->pending_polls_.begin(); it != this->pending_polls_.end();)
                 {
-                    if ((io_status_block && it->context.io_status_block.value() != io_status_block) ||
+                    if ((io_status_block && !names_request(it->context, io_status_block)) ||
                         (issuing_thread_id && it->context.issuing_thread_id != *issuing_thread_id))
                     {
                         ++it;
@@ -523,7 +547,7 @@ namespace sogen
                     cancelled = true;
                 }
 
-                if (!this->delayed_ioctl_ || (io_status_block && this->delayed_ioctl_->io_status_block.value() != io_status_block) ||
+                if (!this->delayed_ioctl_ || (io_status_block && !names_request(*this->delayed_ioctl_, io_status_block)) ||
                     (issuing_thread_id && this->delayed_ioctl_->issuing_thread_id != *issuing_thread_id))
                 {
                     return cancelled;
@@ -545,6 +569,7 @@ namespace sogen
 
             void complete_io(windows_emulator& win_emu, const io_device_context& context, const NTSTATUS status)
             {
+                fprintf(stderr, "W14IO complete ep=%p code=%x status=%x iosb=%llx thread=%u pending_polls=%zu\n", static_cast<const void*>(this), context.io_control_code, static_cast<unsigned>(status), static_cast<unsigned long long>(context.io_status_block.value()), context.issuing_thread_id, this->pending_polls_.size());
                 write_io_status(context, status);
                 if (auto* event = win_emu.process.events.get(context.event))
                 {
@@ -808,6 +833,7 @@ namespace sogen
                     const auto [info, handles] = get_poll_info<Traits>(win_emu, it->context);
                     const auto endpoints = resolve_endpoints(win_emu, handles);
                     auto status = perform_poll(win_emu, it->context, endpoints, handles);
+                    fprintf(stderr, "W14POLL recheck ep=%p status=%x connecting=%d delayed=%d\n", static_cast<const void*>(this), static_cast<unsigned>(status), static_cast<int>(this->is_connecting()), static_cast<int>(this->delayed_ioctl_.has_value()));
 
                     if (status == STATUS_PENDING)
                     {
@@ -903,6 +929,7 @@ namespace sogen
                         status = STATUS_TIMEOUT;
                     }
 
+                    fprintf(stderr, "W14DELAYED done ep=%p code=%x status=%x\n", static_cast<const void*>(this), this->delayed_ioctl_->io_control_code, static_cast<unsigned>(status));
                     this->complete_io(win_emu, *this->delayed_ioctl_, status);
                     this->clear_pending_state(win_emu);
                 }
@@ -945,6 +972,16 @@ namespace sogen
             }
 
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
+            {
+                const auto status = this->io_control_impl(win_emu, c);
+                const auto info = c.io_status_block ? static_cast<unsigned long long>(c.io_status_block.read().Information) : 0ULL;
+                fprintf(stderr, "W25IOCTL ep=%p req=%u status=%x info=%llu in_len=%u out_len=%u\n", static_cast<const void*>(this),
+                        static_cast<unsigned>(_AFD_REQUEST(c.io_control_code)), static_cast<unsigned>(status), info,
+                        static_cast<unsigned>(c.input_buffer_length), static_cast<unsigned>(c.output_buffer_length));
+                return status;
+            }
+
+            NTSTATUS io_control_impl(windows_emulator& win_emu, const io_device_context& c)
             {
                 if (_AFD_BASE(c.io_control_code) != FSCTL_AFD_BASE)
                 {
@@ -1232,7 +1269,9 @@ namespace sogen
             NTSTATUS start_connect(windows_emulator& win_emu, const io_device_context& c, const network::address& addr)
             {
                 report_socket_activity(win_emu, network::socket_activity::connect, addr);
+                fprintf(stderr, "AFDLOG connect ep=%p %s\n", static_cast<const void*>(this), addr.to_string().c_str());
                 const auto connected = this->s_->connect(addr);
+                fprintf(stderr, "W14CONNECT result ep=%p connected=%d err=%d\n", static_cast<const void*>(this), static_cast<int>(connected), connected ? 0 : static_cast<int>(this->s_->get_last_error()));
                 if (!connected)
                 {
                     const auto error = this->s_->get_last_error();
@@ -1461,6 +1500,7 @@ namespace sogen
                     const auto error = this->s_->get_last_error();
                     if (error == SERR(EWOULDBLOCK))
                     {
+                        fprintf(stderr, "AFDLOG recv ep=%p would_block requested=%zu\n", static_cast<const void*>(this), host_buffer.size());
                         return this->pend_or_would_block(win_emu, c, true);
                     }
 
@@ -1471,6 +1511,8 @@ namespace sogen
 
                     return STATUS_UNSUCCESSFUL;
                 }
+
+                fprintf(stderr, "AFDLOG recv ep=%p bytes=%lld text=%s\n", static_cast<const void*>(this), static_cast<long long>(bytes_received), afd_debug_text(host_buffer, 256).c_str());
 
                 size_t source_offset = 0;
                 for (const auto& wsabuf : buffers)
@@ -1551,6 +1593,7 @@ namespace sogen
                 }
 
                 const auto bytes_sent = this->s_->send(host_buffer);
+                fprintf(stderr, "AFDLOG send ep=%p requested=%zu sent=%lld text=%s\n", static_cast<const void*>(this), host_buffer.size(), static_cast<long long>(bytes_sent), afd_debug_text(host_buffer, 512).c_str());
 
                 if (bytes_sent < 0)
                 {
@@ -1700,6 +1743,10 @@ namespace sogen
                 }
 
                 const auto status = perform_poll(win_emu, c, endpoints, handles);
+                for (const auto& h : handles)
+                {
+                    fprintf(stderr, "W14POLL submit ep=%p handle=%llx events=%x timeout=%lld status=%x\n", static_cast<const void*>(this), static_cast<unsigned long long>(h.Handle), static_cast<unsigned>(h.PollEvents), static_cast<long long>(info.Timeout.QuadPart), static_cast<unsigned>(status));
+                }
                 if (status != STATUS_PENDING)
                 {
                     return status;
@@ -1876,6 +1923,8 @@ namespace sogen
                 }
 
                 const auto win_address = convert_to_win_address(win_emu, *local_address);
+                fprintf(stderr, "W25LOCAL ep=%p host=%s guest_port=%u\n", static_cast<const void*>(this), local_address->to_string().c_str(),
+                        static_cast<unsigned>(win_emu.get_emulator_port(local_address->get_port())));
                 return write_address(win_emu, c, win_address, static_cast<ULONG>(win_address.size()));
             }
 
@@ -1892,6 +1941,8 @@ namespace sogen
                     return STATUS_INVALID_CONNECTION;
                 }
 
+                fprintf(stderr, "W25REMOTE ep=%p host=%s guest_port=%u\n", static_cast<const void*>(this), remote_address->to_string().c_str(),
+                        static_cast<unsigned>(win_emu.get_emulator_port(remote_address->get_port())));
                 // Windows reports the length of the AFD_SET_CONTEXT socket context here, not the address length.
                 return write_address(win_emu, c, convert_to_win_address(win_emu, *remote_address),
                                      static_cast<ULONG>(this->shared_context_.size()));

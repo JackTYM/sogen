@@ -944,9 +944,12 @@ namespace sogen
                 const auto is_current_process = process.bits != 0 && c.proc.is_current_process_handle(process);
                 const auto* other_process =
                     !is_current_process && process.value.type == handle_types::process ? c.proc.processes.get(process) : nullptr;
-                const auto is_other_process = other_process != nullptr;
-                const auto process_is_wow64 =
-                    is_current_process ? c.proc.is_wow64_process : is_other_process && other_process->is_wow64_process;
+                // A process handle opened for a child or sibling is not tied to a machine; guest callers only need the call to succeed.
+                const bool is_child_record = !is_current_process && other_process == nullptr && process.value.type == handle_types::process &&
+                                             c.proc.child_processes.contains(process.value.id);
+                const auto is_other_process = other_process != nullptr || is_child_record;
+                const auto process_is_wow64 = is_current_process ? c.proc.is_wow64_process
+                                                                 : other_process != nullptr && other_process->is_wow64_process;
                 if (process.bits != 0 && !is_current_process && !is_other_process)
                 {
                     return process == CURRENT_THREAD || process.value.type == handle_types::thread ? STATUS_OBJECT_TYPE_MISMATCH

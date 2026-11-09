@@ -7,6 +7,12 @@
 
 namespace sogen
 {
+    namespace syscalls
+    {
+        std::vector<uint8_t> export_created_token_groups(uint64_t handle_bits);
+        void import_created_token_groups(uint64_t handle_bits, const std::vector<uint8_t>& in);
+        void mark_adopted_token(uint64_t handle_bits);
+    }
     namespace
     {
         template <typename Object>
@@ -211,6 +217,7 @@ namespace sogen
 
             utils::buffer_serializer buffer{};
             buffer.write(impersonation);
+            buffer.write_vector(impersonation ? std::vector<uint8_t>{} : syscalls::export_created_token_groups(resolved_handle.bits));
             description.object_bytes = buffer.get_buffer();
             return STATUS_SUCCESS;
         }
@@ -322,9 +329,13 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            std::vector<uint8_t> carried_groups{};
+            buffer.read_vector(carried_groups);
             process_token token{};
             token.privileges = process.privileges;
             adopted_handle = process.tokens.store(std::move(token));
+            syscalls::import_created_token_groups(adopted_handle.bits, carried_groups);
+            syscalls::mark_adopted_token(adopted_handle.bits);
             return STATUS_SUCCESS;
         }
 

@@ -137,6 +137,10 @@ namespace sogen
                 status_block.Information = static_cast<EmulatorTraits<Emu32>::ULONG_PTR>(native_status.Information);
             });
         }
+        if (context.io_control_code == 0x120c7)
+        {
+            fprintf(stderr, "W15WRITE status=%x guest_overlapped=%llx guest_internal_after=%x\n", static_cast<unsigned>(status), static_cast<unsigned long long>(context.wow64_io_status_block ? context.wow64_io_status_block.value() : 0), static_cast<unsigned>(context.wow64_io_status_block ? context.wow64_io_status_block.read().Status : 0));
+        }
 
         return result;
     }

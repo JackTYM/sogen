@@ -68,6 +68,7 @@ namespace sogen
             uint64_t connection_max_message_length{};
             bool asynchronous_connect{};
             bool disconnected{};
+            bool owner_exited{};
 
             std::deque<message> queue{};
 
@@ -171,7 +172,7 @@ namespace sogen
         NTSTATUS query_information(const syscall_context& c, uint64_t port_id, uint32_t info_class, uint64_t information, uint32_t length,
                                    uint64_t return_length);
         NTSTATUS set_information(const syscall_context& c, uint64_t port_id, uint32_t info_class, uint64_t information, uint32_t length);
-        void close_port(windows_emulator& win_emu, uint64_t port_id);
+        void close_port(windows_emulator& win_emu, uint64_t port_id, bool owner_exited);
         void close_all_ports(windows_emulator& win_emu);
 
         bool has_queued_message(const process_context& proc, uint64_t port_id);

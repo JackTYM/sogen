@@ -20,6 +20,18 @@ namespace sogen::test
             0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
         };
 
+        constexpr std::array<uint8_t, 12> everyone_sid = {
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        };
+
+        constexpr std::array<uint8_t, 12> interactive_sid = {
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x00,
+        };
+
+        constexpr ULONG se_group_enabled = 0x7;
+        constexpr ULONG se_group_owner = 0x8;
+        constexpr ULONG se_group_logon_id = 0xC0000000;
+
         class ElevatedTokenTest : public testing::TestWithParam<bool>
         {
           protected:
@@ -61,6 +73,32 @@ namespace sogen::test
             {
                 EXPECT_EQ(STATUS_BUFFER_TOO_SMALL, this->query(token, information_class, 0));
                 return emulator_object<ULONG>{this->emu->memory, this->storage}.read();
+            }
+
+            std::vector<SID_AND_ATTRIBUTES64> read_process_groups()
+            {
+                const auto size = this->required_size(CURRENT_PROCESS_TOKEN, TokenGroups);
+                EXPECT_EQ(STATUS_SUCCESS, this->query(CURRENT_PROCESS_TOKEN, TokenGroups, size));
+
+                const auto base = this->storage + 0x100;
+                const auto count = emulator_object<TOKEN_GROUPS64>{this->emu->memory, base}.read().GroupCount;
+
+                std::vector<SID_AND_ATTRIBUTES64> groups{};
+                for (ULONG index = 0; index < count; index++)
+                {
+                    groups.push_back(emulator_object<SID_AND_ATTRIBUTES64>{this->emu->memory, base + offsetof(TOKEN_GROUPS64, Groups) +
+                                                                                                  index * sizeof(SID_AND_ATTRIBUTES64)}
+                                         .read());
+                }
+                return groups;
+            }
+
+            std::vector<uint8_t> read_sid(const uint64_t sid)
+            {
+                const auto sub_authority_count = this->emu->memory.read_memory<uint8_t>(sid + 1);
+                std::vector<uint8_t> bytes(8 + 4 * sub_authority_count);
+                this->emu->memory.read_memory(sid, bytes.data(), bytes.size());
+                return bytes;
             }
 
             // A self-relative descriptor with a single allow ACE for the given SID.
@@ -118,35 +156,54 @@ namespace sogen::test
 
     TEST_P(ElevatedTokenTest, GroupsIncludeAdministratorsOnlyWhenElevated)
     {
-        const auto size = this->required_size(CURRENT_PROCESS_TOKEN, TokenGroups);
-        ASSERT_EQ(STATUS_SUCCESS, this->query(CURRENT_PROCESS_TOKEN, TokenGroups, size));
+        const auto groups = this->read_process_groups();
+        ASSERT_EQ(this->elevated() ? 5u : 4u, groups.size());
 
-        const auto groups = emulator_object<TOKEN_GROUPS64>{this->emu->memory, this->storage + 0x100}.read();
-        ASSERT_EQ(this->elevated() ? 3u : 2u, groups.GroupCount);
+        std::vector<SID_AND_ATTRIBUTES64> administrators{};
+        for (const auto& group : groups)
+        {
+            if (this->read_sid(group.Sid) == std::vector<uint8_t>(administrators_sid.begin(), administrators_sid.end()))
+            {
+                administrators.push_back(group);
+            }
+        }
 
+        ASSERT_EQ(this->elevated() ? 1u : 0u, administrators.size());
         if (!this->elevated())
         {
             return;
         }
 
-        const auto administrators =
-            emulator_object<SID_AND_ATTRIBUTES64>{this->emu->memory,
-                                                  this->storage + 0x100 + sizeof(TOKEN_GROUPS64) + sizeof(SID_AND_ATTRIBUTES64)}
-                .read();
-
         // SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_OWNER
-        EXPECT_EQ(0xFu, administrators.Attributes);
+        EXPECT_EQ(se_group_enabled | se_group_owner, administrators.front().Attributes);
+    }
 
-        std::array<uint8_t, administrators_sid.size()> read_sid{};
-        this->emu->memory.read_memory(administrators.Sid, read_sid.data(), read_sid.size());
-        EXPECT_EQ(administrators_sid, read_sid);
+    TEST_P(ElevatedTokenTest, GroupListHasTheWindowsDefaultGroups)
+    {
+        const auto groups = this->read_process_groups();
+        ASSERT_GE(groups.size(), 4u);
+
+        const auto everyone = groups[1];
+        EXPECT_EQ(se_group_enabled, everyone.Attributes);
+        EXPECT_EQ(std::vector<uint8_t>(everyone_sid.begin(), everyone_sid.end()), this->read_sid(everyone.Sid));
+
+        const auto interactive = groups[2];
+        EXPECT_EQ(se_group_enabled, interactive.Attributes);
+        EXPECT_EQ(std::vector<uint8_t>(interactive_sid.begin(), interactive_sid.end()), this->read_sid(interactive.Sid));
+
+        const auto logon = groups.back();
+        EXPECT_EQ(se_group_enabled | se_group_logon_id, logon.Attributes);
+        const auto logon_bytes = this->read_sid(logon.Sid);
+        EXPECT_EQ(3u, logon_bytes[1]);
+        EXPECT_EQ(5u, logon_bytes[8]);
     }
 
     TEST_P(ElevatedTokenTest, StatisticsAgreeWithTheGroupList)
     {
         ASSERT_EQ(STATUS_SUCCESS, this->query(CURRENT_PROCESS_TOKEN, TokenStatistics, sizeof(TOKEN_STATISTICS)));
         const auto stats = emulator_object<TOKEN_STATISTICS>{this->emu->memory, this->storage + 0x100}.read();
-        EXPECT_EQ(this->elevated() ? 3u : 2u, stats.GroupCount);
+        EXPECT_EQ(this->read_process_groups().size(), stats.GroupCount);
+        EXPECT_EQ(this->elevated() ? 5u : 4u, stats.GroupCount);
     }
 
     TEST_P(ElevatedTokenTest, AdministratorsMembershipFollowsTheElevatedFlag)

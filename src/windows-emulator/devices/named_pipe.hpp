@@ -96,7 +96,18 @@ namespace sogen
         void complete_waits_if_last_server_end(windows_emulator& win_emu) const;
         void create_endpoints();
         void create_relay();
+
+        struct host_pipe_leftovers
+        {
+            std::string readable_here;
+            std::string readable_there;
+        };
+
+        host_pipe_leftovers detach_host_pipes();
+        void rebind_pending_reads();
         void queue_relay_bytes(std::string_view data);
+        void announce_closure(windows_emulator& win_emu) const;
+        void break_relay(windows_emulator& win_emu);
         void publish_server_name(process_context& process);
 
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override;
@@ -200,6 +211,9 @@ namespace sogen
     // Applies bytes forwarded from another host process to the end of the connection they are headed to.
     void deliver_bytes_to_named_pipe(process_context& process, std::u16string_view name, uint64_t connection_id, bool to_server,
                                      std::string_view data);
+
+    void deliver_peer_closure_to_named_pipe(windows_emulator& win_emu, std::u16string_view name, uint64_t connection_id, bool to_server);
+    void announce_named_pipe_closures(windows_emulator& win_emu);
 
     named_pipe_end_transfer export_named_pipe_end(process_context& process, named_pipe& pipe);
     void import_named_pipe_end(process_context& process, named_pipe& pipe, const named_pipe_end_transfer& transfer);

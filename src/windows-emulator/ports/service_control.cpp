@@ -60,6 +60,7 @@ namespace sogen
             NTSTATUS handle_rpc(windows_emulator& win_emu, const uint32_t procedure_id, const lpc_request_context& c,
                                 utils::aligned_binary_writer& writer, std::vector<alpc_reply_handle>& /*reply_handles*/) override
             {
+                fprintf(stderr, "V8NTSVCS opnum=%u\n", procedure_id);
                 switch (procedure_id)
                 {
                 case k_svcctl_open_sc_manager_w:

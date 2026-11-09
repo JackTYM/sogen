@@ -119,30 +119,13 @@ namespace sogen
             static NTSTATUS query_points(windows_emulator& win_emu, const io_device_context& c)
             {
                 const auto drives = win_emu.file_sys.list_drives();
-                const auto struct_size = sizeof(MOUNTMGR_MOUNT_POINTS) + sizeof(MOUNTMGR_MOUNT_POINT) * drives.size();
+                // MOUNTMGR_MOUNT_POINTS embeds the first entry.
+                const auto struct_size = sizeof(MOUNTMGR_MOUNT_POINTS) + sizeof(MOUNTMGR_MOUNT_POINT) * (drives.size() * 2 - 1);
 
                 std::vector<MOUNTMGR_MOUNT_POINT> mount_points{};
 
                 std::vector<uint8_t> buffer{};
                 buffer.resize(struct_size);
-
-                {
-                    MOUNTMGR_MOUNT_POINT point{};
-                    const auto symlink = write_string<char16_t>(buffer, u"\\DosDevices\\");
-                    const auto id = write_string<char>(buffer, make_drive_id(0, 1));
-                    const auto name = write_string<char16_t>(buffer, u"\\Device\\HarddiskVolume0");
-
-                    point.SymbolicLinkNameOffset = symlink.first;
-                    point.SymbolicLinkNameLength = symlink.second;
-
-                    point.UniqueIdOffset = id.first;
-                    point.UniqueIdLength = id.second;
-
-                    point.DeviceNameOffset = name.first;
-                    point.DeviceNameLength = name.second;
-
-                    mount_points.push_back(point);
-                }
 
                 for (const auto drive : drives)
                 {
@@ -162,6 +145,13 @@ namespace sogen
                     point.DeviceNameLength = name.second;
 
                     mount_points.push_back(point);
+
+                    MOUNTMGR_MOUNT_POINT letter_point = point;
+                    const auto letter = write_string<char16_t>(
+                        buffer, u"\\DosDevices\\" + std::u16string{static_cast<char16_t>(std::toupper(static_cast<unsigned char>(drive)))} + u":");
+                    letter_point.SymbolicLinkNameOffset = letter.first;
+                    letter_point.SymbolicLinkNameLength = letter.second;
+                    mount_points.push_back(letter_point);
                 }
 
                 MOUNTMGR_MOUNT_POINTS points{};
