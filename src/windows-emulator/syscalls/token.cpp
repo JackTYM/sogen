@@ -429,7 +429,7 @@ namespace sogen
                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
                                         /*object_attributes*/,
                                         const TOKEN_TYPE type, uint64_t /*authentication_id*/, uint64_t /*expiration_time*/,
-                                        uint64_t /*user*/, const uint64_t groups)
+                                        uint64_t /*user*/, uint64_t groups)
         {
             if (type == TokenPrimary)
             {
