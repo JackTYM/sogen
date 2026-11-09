@@ -1,5 +1,7 @@
 #include "std_include.hpp"
+#ifndef OS_WINDOWS
 #include <unistd.h>
+#endif
 #include "syscall_dispatcher.hpp"
 #include "syscall_utils.hpp"
 
