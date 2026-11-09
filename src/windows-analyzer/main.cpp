@@ -28,6 +28,7 @@
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
 #include <utils/executable_path.hpp>
+#include <utils/host_ipc.hpp>
 #include <utils/io.hpp>
 
 #if defined(OS_EMSCRIPTEN) && !defined(SOGEN_EMSCRIPTEN_SUPPORT_NODEJS)
@@ -482,12 +483,10 @@ namespace sogen
                 if (options.use_gdb)
                 {
                     auto gdb_port = options.gdb_port;
-#ifndef _WIN32
                     if (options.child_ipc_fd >= 0)
                     {
-                        gdb_port = static_cast<uint16_t>(options.gdb_port + (static_cast<uint32_t>(::getpid()) % 1000));
+                        gdb_port = static_cast<uint16_t>(options.gdb_port + (static_cast<uint32_t>(host_ipc::current_process_id()) % 1000));
                     }
-#endif
                     const auto address = network::address{options.gdb_host, gdb_port};
                     win_emu.log.force_print(color::pink, "Waiting for GDB connection on %s...\n", address.to_string().c_str());
 
@@ -893,7 +892,12 @@ namespace sogen
 
 #ifndef OS_EMSCRIPTEN
             const auto is_x86_64_target = get_target_machine(options, args) != PEMachineType::ARM64;
-            if (is_x86_64_target && options.backend.value_or(get_x86_64_emulator_backend_from_environment()) == backend_type::whp)
+            // The sandbox.exe process manager is the upstream way of running guest child processes under WHP. Where this
+            // host can spawn analyzer children itself (child_process_spawn: one host process per guest process, the
+            // same machinery as on POSIX, which the services/lsass boot and the kernel arena depend on), guest
+            // NtCreateUserProcess must go through that instead, so the manager is not installed.
+            if (is_x86_64_target && !supports_child_process_spawning() &&
+                options.backend.value_or(get_x86_64_emulator_backend_from_environment()) == backend_type::whp)
             {
                 manager = std::make_unique<subprocess_process_manager>(get_sandbox_executable(), [&](const auto port, const auto& token) {
                     return create_managed_process_arguments(options, port, token);
@@ -917,9 +921,7 @@ namespace sogen
 
                 if (child_bootstrap)
                 {
-#ifndef _WIN32
-                    win_emu->log.set_prefix("[pid " + std::to_string(::getpid()) + "] ");
-#endif
+                    win_emu->log.set_prefix("[pid " + std::to_string(host_ipc::current_process_id()) + "] ");
 
                     win_emu->file_sys.pin_image_for_process_lifetime(child_application);
 
@@ -1024,7 +1026,6 @@ namespace sogen
                                                           : uint64_t{0};
                 send_child_ready(options.child_ipc_fd, win_emu->process.peb64.value(), win_emu->process.process_params64.value(),
                                  peb32_address, process_params32_address);
-#ifndef _WIN32
                 win_emu->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(options.child_ipc_fd));
 
                 if (options.child_control_fd >= 0)
@@ -1036,7 +1037,6 @@ namespace sogen
                 {
                     win_emu->set_process_control_router(create_fd_process_control_channel(options.child_router_fd));
                 }
-#endif
             }
 
             std::vector<std::unique_ptr<analysis_reporter>> reporters{};

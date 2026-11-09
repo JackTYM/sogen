@@ -15,200 +15,30 @@
 #include <span>
 #include <thread>
 
-#if !defined(_WIN32) && !defined(OS_EMSCRIPTEN)
+#include <utils/host_ipc.hpp>
+
+// Every host-OS call (channels, descriptor passing, process creation and lifetime) lives in utils/host_ipc; this file
+// is the same on POSIX and Windows hosts.
+#if !defined(OS_EMSCRIPTEN)
 #define SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING 1
-#include <poll.h>
-#include <csignal>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
 #endif
 
 namespace sogen
 {
     namespace
     {
-#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-        bool write_all(const int fd, const void* data, size_t size)
-        {
-            const auto* p = static_cast<const std::byte*>(data);
-            while (size > 0)
-            {
-                const auto n = ::write(fd, p, size);
-                if (n < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    return false;
-                }
-
-                if (n == 0)
-                {
-                    return false;
-                }
-
-                p += n;
-                size -= static_cast<size_t>(n);
-            }
-
-            return true;
-        }
-
-        bool read_all(const int fd, void* data, size_t size)
-        {
-            auto* p = static_cast<std::byte*>(data);
-            while (size > 0)
-            {
-                const auto n = ::read(fd, p, size);
-                if (n < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    return false;
-                }
-
-                if (n == 0)
-                {
-                    return false;
-                }
-
-                p += n;
-                size -= static_cast<size_t>(n);
-            }
-
-            return true;
-        }
-#else
-        bool write_all(int, const void*, size_t)
-        {
-            return false;
-        }
-
-        bool read_all(int, void*, size_t)
-        {
-            return false;
-        }
-#endif
-
-        // A frame may carry file descriptors (shared-memory section backings) out of band: they ride
-        // as SCM_RIGHTS ancillary data on the length prefix, which the receiver always reads with
-        // recvmsg so a descriptor can never be silently dropped by a plain read().
-        constexpr size_t max_fds_per_frame = 128;
-
-#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-        bool write_length_with_fds(const int fd, const uint64_t length, const std::span<const int> fds)
-        {
-            iovec iov{const_cast<uint64_t*>(&length), sizeof(length)};
-            alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int) * max_fds_per_frame)> control{};
-
-            msghdr message{};
-            message.msg_iov = &iov;
-            message.msg_iovlen = 1;
-            message.msg_control = control.data();
-            message.msg_controllen = CMSG_SPACE(sizeof(int) * fds.size());
-
-            auto* const header = CMSG_FIRSTHDR(&message);
-            header->cmsg_level = SOL_SOCKET;
-            header->cmsg_type = SCM_RIGHTS;
-            header->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
-            std::memcpy(CMSG_DATA(header), fds.data(), sizeof(int) * fds.size());
-
-            while (true)
-            {
-                const auto sent = ::sendmsg(fd, &message, 0);
-                if (sent < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    return false;
-                }
-
-                const auto remaining = sizeof(length) - static_cast<size_t>(sent);
-                return remaining == 0 || write_all(fd, reinterpret_cast<const std::byte*>(&length) + sent, remaining);
-            }
-        }
-
-        bool read_length_with_fds(const int fd, uint64_t& length, std::vector<int>& received_fds)
-        {
-            size_t received = 0;
-            while (received < sizeof(length))
-            {
-                iovec iov{reinterpret_cast<std::byte*>(&length) + received, sizeof(length) - received};
-                alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int) * max_fds_per_frame)> control{};
-
-                msghdr message{};
-                message.msg_iov = &iov;
-                message.msg_iovlen = 1;
-                message.msg_control = control.data();
-                message.msg_controllen = control.size();
-
-                const auto n = ::recvmsg(fd, &message, 0);
-                if (n < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    return false;
-                }
-
-                if (n == 0)
-                {
-                    return false;
-                }
-
-                for (auto* header = CMSG_FIRSTHDR(&message); header; header = CMSG_NXTHDR(&message, header))
-                {
-                    if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS)
-                    {
-                        continue;
-                    }
-
-                    const auto count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-                    for (size_t i = 0; i < count; ++i)
-                    {
-                        int received_fd{};
-                        std::memcpy(&received_fd, CMSG_DATA(header) + i * sizeof(int), sizeof(int));
-                        ::fcntl(received_fd, F_SETFD, FD_CLOEXEC);
-                        received_fds.push_back(received_fd);
-                    }
-                }
-
-                received += static_cast<size_t>(n);
-            }
-
-            return true;
-        }
-#else
-        bool write_length_with_fds(int, uint64_t, std::span<const int>)
-        {
-            return false;
-        }
-
-        bool read_length_with_fds(int, uint64_t&, std::vector<int>&)
-        {
-            return false;
-        }
-#endif
+        using host_ipc::max_fds_per_frame;
+        using host_ipc::read_all;
+        using host_ipc::read_length_with_fds;
+        using host_ipc::write_all;
+        using host_ipc::write_length_with_fds;
 
         void close_fds(const std::vector<int>& fds)
         {
-#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
             for (const auto fd : fds)
             {
-                ::close(fd);
+                host_ipc::close_fd(fd);
             }
-#else
-            (void)fds;
-#endif
         }
 
         bool send_framed(const int fd, const std::vector<std::byte>& payload, const std::span<const int> fds = {})
@@ -230,33 +60,10 @@ namespace sogen
         std::optional<std::vector<std::byte>> recv_framed(const int fd, const int timeout_ms,
                                                           std::vector<int>* const received_fds = nullptr)
         {
-#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-            if (timeout_ms >= 0)
+            if (!host_ipc::wait_readable(fd, timeout_ms))
             {
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-                while (true)
-                {
-                    const auto remaining =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-                    pollfd pfd{fd, POLLIN, 0};
-                    const auto rc = ::poll(&pfd, 1, static_cast<int>(std::max<decltype(remaining)>(remaining, 0)));
-                    if (rc > 0)
-                    {
-                        break;
-                    }
-
-                    if (rc < 0 && errno == EINTR)
-                    {
-                        continue;
-                    }
-
-                    return std::nullopt;
-                }
+                return std::nullopt;
             }
-#else
-            (void)fd;
-            (void)timeout_ms;
-#endif
 
             std::vector<int> fds{};
             uint64_t length = 0;
@@ -292,26 +99,10 @@ namespace sogen
         }
 
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-        void install_sigchld_reaper()
-        {
-            static std::once_flag flag{};
-            std::call_once(flag, [] {
-                struct sigaction action{};
-                action.sa_handler = [](int) {
-                    int status = 0;
-                    while (::waitpid(-1, &status, WNOHANG) > 0)
-                    {
-                    }
-                };
-                sigemptyset(&action.sa_mask);
-                action.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-                ::sigaction(SIGCHLD, &action, nullptr);
-            });
-        }
-
         std::string to_lower(std::string value)
         {
-            std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) { return std::tolower(c); });
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return value;
         }
 
@@ -508,11 +299,7 @@ namespace sogen
             explicit fd_pipe_ipc_channel(const int fd)
                 : fd_(fd)
             {
-                const auto flags = ::fcntl(this->fd_, F_GETFL, 0);
-                if (flags >= 0)
-                {
-                    ::fcntl(this->fd_, F_SETFL, flags | O_NONBLOCK);
-                }
+                host_ipc::set_nonblocking(this->fd_);
             }
 
             fd_pipe_ipc_channel(const fd_pipe_ipc_channel&) = delete;
@@ -522,7 +309,7 @@ namespace sogen
             {
                 if (this->fd_ >= 0)
                 {
-                    ::close(this->fd_);
+                    host_ipc::close_fd(this->fd_);
                 }
             }
 
@@ -628,19 +415,15 @@ namespace sogen
             {
                 while (!this->pending_send_.empty())
                 {
-                    const auto n = ::write(this->fd_, this->pending_send_.data(), this->pending_send_.size());
-                    if (n > 0)
+                    const auto result = host_ipc::write_some(this->fd_, this->pending_send_.data(), this->pending_send_.size());
+                    if (result.status == host_ipc::io_status::done)
                     {
-                        this->pending_send_.erase(this->pending_send_.begin(), this->pending_send_.begin() + n);
+                        this->pending_send_.erase(this->pending_send_.begin(),
+                                                  this->pending_send_.begin() + static_cast<ptrdiff_t>(result.bytes));
                         continue;
                     }
 
-                    if (n < 0 && errno == EINTR)
-                    {
-                        continue;
-                    }
-
-                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    if (result.status == host_ipc::io_status::would_block)
                     {
                         return;
                     }
@@ -651,7 +434,8 @@ namespace sogen
                         std::fprintf(stderr,
                                      "[pipe-relay-health-trace] pid=%d fd=%d flush_pending_send DROPPING %zu queued bytes (first "
                                      "occurrence for this channel): write() returned %zd errno=%d (%s)\n",
-                                     ::getpid(), this->fd_, this->pending_send_.size(), n, errno, std::strerror(errno));
+                                     host_ipc::current_process_id(), this->fd_, this->pending_send_.size(), result.raw, result.error_code,
+                                     host_ipc::describe_error(result.error_code).c_str());
                     }
 
                     this->dead_ = true;
@@ -665,23 +449,18 @@ namespace sogen
                 std::vector<std::byte> chunk(65536);
                 while (true)
                 {
-                    const auto n = ::read(this->fd_, chunk.data(), chunk.size());
-                    if (n > 0)
+                    const auto result = host_ipc::read_some(this->fd_, chunk.data(), chunk.size());
+                    if (result.status == host_ipc::io_status::done)
                     {
-                        this->recv_buffer_.insert(this->recv_buffer_.end(), chunk.data(), chunk.data() + n);
-                        if (static_cast<size_t>(n) == chunk.size())
+                        this->recv_buffer_.insert(this->recv_buffer_.end(), chunk.data(), chunk.data() + result.bytes);
+                        if (result.bytes == chunk.size())
                         {
                             continue;
                         }
                         return;
                     }
 
-                    if (n < 0 && errno == EINTR)
-                    {
-                        continue;
-                    }
-
-                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    if (result.status == host_ipc::io_status::would_block)
                     {
                         return;
                     }
@@ -690,13 +469,13 @@ namespace sogen
 
                     if (!this->recv_eof_or_error_logged_ && std::getenv("SOGEN_TRACE_PIPE_RELAY_HEALTH"))
                     {
-                        if (n == 0)
+                        if (result.status == host_ipc::io_status::eof)
                         {
                             this->recv_eof_or_error_logged_ = true;
                             std::fprintf(stderr,
                                          "[pipe-relay-health-trace] pid=%d fd=%d fill_recv_buffer EOF (first occurrence for this "
                                          "channel) - peer closed its write end, %zu bytes still buffered unparsed\n",
-                                         ::getpid(), this->fd_, this->recv_buffer_.size());
+                                         host_ipc::current_process_id(), this->fd_, this->recv_buffer_.size());
                         }
                         else
                         {
@@ -704,7 +483,8 @@ namespace sogen
                             std::fprintf(stderr,
                                          "[pipe-relay-health-trace] pid=%d fd=%d fill_recv_buffer read() error (first occurrence for "
                                          "this channel) errno=%d (%s)\n",
-                                         ::getpid(), this->fd_, errno, std::strerror(errno));
+                                         host_ipc::current_process_id(), this->fd_, result.error_code,
+                                         host_ipc::describe_error(result.error_code).c_str());
                         }
                     }
 
@@ -853,7 +633,7 @@ namespace sogen
             {
                 if (this->fd_ >= 0)
                 {
-                    ::close(this->fd_);
+                    host_ipc::close_fd(this->fd_);
                 }
             }
 
@@ -999,7 +779,7 @@ namespace sogen
             {
                 if (this->host_pid_ >= 0)
                 {
-                    ::kill(this->host_pid_, SIGKILL);
+                    host_ipc::kill_process(this->host_pid_);
                 }
             }
 
@@ -1040,7 +820,7 @@ namespace sogen
     bool supports_child_process_spawning()
     {
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-        return true;
+        return host_ipc::supported();
 #else
         return false;
 #endif
@@ -1061,86 +841,78 @@ namespace sogen
         (void)kernel_arena_backing;
         return {.success = false, .failure_detail = "Child process spawning is not supported on this platform"};
 #else
-        install_sigchld_reaper();
+        host_ipc::prepare_child_spawning();
 
-        int fds[2]{-1, -1};
-        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
+        std::string channel_error{};
+        const auto ipc_channel = host_ipc::create_channel_pair(channel_error);
+        if (!ipc_channel)
         {
-            return {.success = false, .failure_detail = std::string("socketpair() failed: ") + std::strerror(errno)};
+            return {.success = false, .failure_detail = channel_error};
         }
 
-        const auto parent_fd = fds[0];
-        const auto child_fd = fds[1];
+        const auto parent_fd = ipc_channel->parent_end;
+        const auto child_fd = ipc_channel->child_end;
 
-        int control_fds[2]{-1, -1};
-        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, control_fds) != 0)
+        const auto control_channel = host_ipc::create_channel_pair(channel_error);
+        if (!control_channel)
         {
-            const auto error = std::string("socketpair() failed: ") + std::strerror(errno);
-            ::close(parent_fd);
-            ::close(child_fd);
-            return {.success = false, .failure_detail = error};
+            host_ipc::close_fd(parent_fd);
+            host_ipc::close_fd(child_fd);
+            return {.success = false, .failure_detail = channel_error};
         }
 
-        const auto parent_control_fd = control_fds[0];
-        const auto child_control_fd = control_fds[1];
+        const auto parent_control_fd = control_channel->parent_end;
+        const auto child_control_fd = control_channel->child_end;
 
-        int router_fds[2]{-1, -1};
-        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, router_fds) != 0)
+        const auto router_channel = host_ipc::create_channel_pair(channel_error);
+        if (!router_channel)
         {
-            const auto error = std::string("socketpair() failed: ") + std::strerror(errno);
-            ::close(parent_fd);
-            ::close(child_fd);
-            ::close(parent_control_fd);
-            ::close(child_control_fd);
-            return {.success = false, .failure_detail = error};
+            host_ipc::close_fd(parent_fd);
+            host_ipc::close_fd(child_fd);
+            host_ipc::close_fd(parent_control_fd);
+            host_ipc::close_fd(child_control_fd);
+            return {.success = false, .failure_detail = channel_error};
         }
 
-        const auto parent_router_fd = router_fds[0];
-        const auto child_router_fd = router_fds[1];
+        const auto parent_router_fd = router_channel->parent_end;
+        const auto child_router_fd = router_channel->child_end;
 
         const auto argv_strings = build_child_argv(config, settings, child_fd, child_control_fd, child_router_fd);
-        std::vector<char*> argv{};
-        argv.reserve(argv_strings.size() + 1);
-        for (const auto& arg : argv_strings)
-        {
-            argv.push_back(const_cast<char*>(arg.c_str()));
-        }
-        argv.push_back(nullptr);
 
-        const auto executable_path = config.executable_path.string();
+        const std::array child_fds{child_fd, child_control_fd, child_router_fd};
+        const std::array parent_fds{parent_fd, parent_control_fd, parent_router_fd};
+        const auto spawned = host_ipc::spawn_process(config.executable_path, argv_strings, child_fds, parent_fds);
 
-        const auto pid = ::fork();
-        if (pid < 0)
+        if (spawned.pid < 0)
         {
-            const auto error = std::string("fork() failed: ") + std::strerror(errno);
-            ::close(parent_fd);
-            ::close(child_fd);
-            ::close(parent_control_fd);
-            ::close(child_control_fd);
-            ::close(parent_router_fd);
-            ::close(child_router_fd);
-            return {.success = false, .failure_detail = error};
+            for (const auto fd : child_fds)
+            {
+                host_ipc::close_fd(fd);
+            }
+            for (const auto fd : parent_fds)
+            {
+                host_ipc::close_fd(fd);
+            }
+            return {.success = false, .failure_detail = spawned.error};
         }
 
-        if (pid == 0)
+        for (const auto fd : child_fds)
         {
-            ::close(parent_fd);
-            ::close(parent_control_fd);
-            ::close(parent_router_fd);
-            ::execv(executable_path.c_str(), argv.data());
-            _exit(127);
+            host_ipc::close_fd(fd);
         }
 
-        ::close(child_fd);
-        ::close(child_control_fd);
-        ::close(child_router_fd);
+        const auto pid = spawned.pid;
+        for (const auto fd : parent_fds)
+        {
+            host_ipc::bind_channel_peer(fd, pid);
+        }
 
         if (!send_child_bootstrap_data(parent_fd, settings, inherited_pipes, std::move(inherited_sections), inherited_events,
                                        std::move(kernel_arena_backing)))
         {
-            ::close(parent_fd);
-            ::close(parent_control_fd);
-            ::close(parent_router_fd);
+            host_ipc::close_fd(parent_fd);
+            host_ipc::close_fd(parent_control_fd);
+            host_ipc::close_fd(parent_router_fd);
             return {.success = false, .failure_detail = "Failed to send bootstrap data to child"};
         }
 
@@ -1149,9 +921,9 @@ namespace sogen
 
         if (!response)
         {
-            ::close(parent_fd);
-            ::close(parent_control_fd);
-            ::close(parent_router_fd);
+            host_ipc::close_fd(parent_fd);
+            host_ipc::close_fd(parent_control_fd);
+            host_ipc::close_fd(parent_router_fd);
             return {.success = false,
                     .failure_detail = "Child did not report readiness within " + std::to_string(ready_timeout_ms) +
                                       "ms (or exited/closed the IPC channel early)"};
@@ -1167,9 +939,9 @@ namespace sogen
         }
         else
         {
-            ::close(parent_fd);
-            ::close(parent_control_fd);
-            ::close(parent_router_fd);
+            host_ipc::close_fd(parent_fd);
+            host_ipc::close_fd(parent_control_fd);
+            host_ipc::close_fd(parent_router_fd);
         }
 
         return outcome;
@@ -1393,7 +1165,7 @@ namespace sogen
             const auto deadline = boot_started + lsass_signal_timeout;
             while (lsa_initialized.word(0).load(std::memory_order_acquire) == 0)
             {
-                if (::kill(lsass.host_pid, 0) != 0)
+                if (!host_ipc::process_alive(lsass.host_pid))
                 {
                     throw std::runtime_error("lsass.exe exited before signalling \\SECURITY\\LSA_AUTHENTICATION_INITIALIZED");
                 }

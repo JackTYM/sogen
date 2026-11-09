@@ -60,11 +60,11 @@ namespace sogen
     };
 
     // True on platforms where a child can genuinely be spawned as a separate host OS process
-    // running its own copy of this same binary (POSIX hosts only - not Windows, not Emscripten).
+    // running its own copy of this same binary (POSIX and Windows hosts, not Emscripten; see utils/host_ipc.hpp).
     bool supports_child_process_spawning();
 
-    // Forks+execs config.executable_path as a child running in --child-ipc-fd mode, hands it
-    // settings/inherited_pipes/inherited_sections over a real socketpair, and blocks (bounded by a
+    // Starts config.executable_path (fork+execv, or CreateProcess on Windows) as a child running in --child-ipc-fd mode, hands it
+    // settings/inherited_pipes/inherited_sections over a real channel (socketpair, or named pipe on Windows), and blocks (bounded by a
     // timeout) until the child reports it has completed its own initial setup or failed. Does NOT
     // wait for the child to exit - once it answers, it keeps running independently.
     child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
