@@ -250,7 +250,7 @@ namespace sogen
             }
             else if (spec.module.ends_with("@x86"))
             {
-                spec.machine = IMAGE_FILE_MACHINE_I386;
+                spec.machine = static_cast<uint16_t>(IMAGE_FILE_MACHINE_I386);
             }
 
             if (spec.machine)
