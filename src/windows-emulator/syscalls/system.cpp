@@ -1064,6 +1064,15 @@ namespace sogen
                 return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
             }
 
+            case SystemVsmProtectionInformation: {
+                // SYSTEM_VSM_PROTECTION_INFORMATION is { BOOLEAN DmaProtectionsAvailable; BOOLEAN DmaProtectionsInUse;
+                // BOOLEAN HardwareMbecAvailable; BOOLEAN ApicVirtualizationAvailable; }. vbsapi.dll (loaded by lsasrv in lsass)
+                // asks with exactly 4 bytes right after SystemSecureBootInformation; a machine without VBS answers all clear.
+                const auto status = handle_query<std::array<uint8_t, 4>>(c.emu, system_information, system_information_length,
+                                                                        return_length, [](std::array<uint8_t, 4>&) {});
+                return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
+            }
+
             default:
                 c.win_emu.log.error("Unsupported system info class: 0x%X\n", info_class);
                 c.emu.stop();
