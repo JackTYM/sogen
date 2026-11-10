@@ -87,6 +87,7 @@ namespace sogen
             std::optional<std::vector<uint8_t>> srm_system_policy{};
             std::map<uint64_t, srm_logon_session> srm_logon_sessions{};
             uint32_t last_received_sender_pid{};
+            uint32_t last_received_sender_tid{};
         };
 
         struct pending_message
@@ -177,6 +178,7 @@ namespace sogen
 
         bool has_queued_message(const process_context& proc, uint64_t port_id);
         std::optional<uint32_t> last_received_sender_pid(const process_context& proc, uint64_t port_id);
+        std::optional<uint32_t> last_received_sender_tid(const process_context& proc, uint64_t port_id);
         std::optional<NTSTATUS> try_complete_wait(windows_emulator& win_emu, emulator_thread& thread, const pending_wait& wait);
 
         bool deliver(windows_emulator& win_emu, const pipe_ipc_message& message);

@@ -555,6 +555,64 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // services.exe (rpcrt4) opens the client's thread after NtAlpcOpenSenderProcess while it handles a
+        // service process's StartServiceCtrlDispatcher call on \RPC Control\ntsvcs; without a handler the
+        // dispatcher stopped the whole services.exe emulation ("Unimplemented syscall: NtAlpcOpenSenderThread").
+        // Same sender rules as NtAlpcOpenSenderProcess: own threads, or a thread of a process this one created.
+        NTSTATUS handle_NtAlpcOpenSenderThread(const syscall_context& c, const emulator_object<handle> thread_handle,
+                                               const handle port_handle, const emulator_pointer /*port_message*/, const ULONG /*flags*/,
+                                               const ACCESS_MASK /*desired_access*/, const uint64_t /*object_attributes*/)
+        {
+            const auto* port = c.proc.ports.get(port_handle);
+            if (!port || port->alpc_port_id() == 0)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            const auto sender_pid = alpc::last_received_sender_pid(c.proc, port->alpc_port_id());
+            const auto sender_tid = alpc::last_received_sender_tid(c.proc, port->alpc_port_id());
+            if (!sender_pid || !sender_tid)
+            {
+                return STATUS_NOT_FOUND;
+            }
+
+            if (*sender_pid == c.proc.process_id)
+            {
+                for (auto& [h_val, t] : c.proc.threads)
+                {
+                    if (t.id == *sender_tid)
+                    {
+                        const auto duplicated = c.proc.threads.duplicate(c.proc.threads.make_handle(h_val), std::nullopt);
+                        if (!duplicated)
+                        {
+                            return STATUS_INVALID_HANDLE;
+                        }
+                        thread_handle.write(*duplicated);
+                        return STATUS_SUCCESS;
+                    }
+                }
+                return STATUS_INVALID_CID;
+            }
+
+            for (auto& [h_val, process] : c.proc.processes)
+            {
+                if (process.id == *sender_pid)
+                {
+                    managed_process_thread thread{};
+                    thread.process = process.process;
+                    thread.process_id = *sender_pid;
+                    thread.thread_id = *sender_tid;
+                    thread.resume_observed = true;
+                    thread_handle.write(c.proc.managed_threads.store(std::move(thread)));
+                    return STATUS_SUCCESS;
+                }
+            }
+
+            // A sender this process did not create (a sibling, or a child whose process handle is closed): no
+            // thread object can be named here; report the client as gone rather than stopping the emulation.
+            return STATUS_ACCESS_DENIED;
+        }
+
         // Locate the HANDLE attribute inside an ALPC attribute buffer: an 8-byte {Allocated; Valid} header
         // followed by the per-attribute structs, laid out highest-bit-first for the attributes the caller
         // allocated room for. Returns nothing when the caller reserved no room for a handle attribute.

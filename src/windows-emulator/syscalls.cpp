@@ -304,6 +304,9 @@ namespace sogen
         NTSTATUS handle_NtAlpcOpenSenderProcess(const syscall_context& c, emulator_object<handle> process_handle, handle port_handle,
                                                 emulator_pointer port_message, ULONG flags, ACCESS_MASK desired_access,
                                                 uint64_t object_attributes);
+        NTSTATUS handle_NtAlpcOpenSenderThread(const syscall_context& c, emulator_object<handle> thread_handle, handle port_handle,
+                                               emulator_pointer port_message, ULONG flags, ACCESS_MASK desired_access,
+                                               uint64_t object_attributes);
         NTSTATUS handle_NtAlpcQueryInformation(const syscall_context& c, handle port_handle, uint32_t port_information_class,
                                                emulator_pointer port_information, uint32_t length, emulator_object<ULONG> return_length);
         NTSTATUS handle_NtAlpcCreateResourceReserve(const syscall_context& c, handle port_handle, ULONG flags,
@@ -2109,6 +2112,7 @@ namespace sogen
         add_handler(NtAlpcDisconnectPort);
         add_handler(NtAlpcImpersonateClientOfPort);
         add_handler(NtAlpcOpenSenderProcess);
+        add_handler(NtAlpcOpenSenderThread);
         add_handler(NtAlpcQueryInformation);
         add_handler(NtAlpcAcceptConnectPort);
         add_handler(NtListenPort);

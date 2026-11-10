@@ -1453,6 +1453,7 @@ namespace sogen::alpc
                     if (status != STATUS_BUFFER_TOO_SMALL)
                     {
                         p->last_received_sender_pid = entry->sender_process_id;
+                        p->last_received_sender_tid = entry->sender_thread_id;
                         queue->erase(entry);
                     }
 
@@ -1721,6 +1722,17 @@ namespace sogen::alpc
         }
 
         return it->second.last_received_sender_pid;
+    }
+
+    std::optional<uint32_t> last_received_sender_tid(const process_context& proc, const uint64_t port_id)
+    {
+        const auto it = proc.alpc.ports.find(port_id);
+        if (it == proc.alpc.ports.end() || it->second.last_received_sender_tid == 0)
+        {
+            return std::nullopt;
+        }
+
+        return it->second.last_received_sender_tid;
     }
 
     bool deliver(windows_emulator& win_emu, const pipe_ipc_message& message)
