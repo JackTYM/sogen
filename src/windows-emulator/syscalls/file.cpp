@@ -1423,6 +1423,25 @@ namespace sogen
             return ret(STATUS_NOT_SUPPORTED);
         }
 
+        // FILE_STAT_INFORMATION (FileStatInformation = 68, 0x44): the layout of the class GetFileInformationByName
+        // (FileStatByNameInfo) asks for. apphelp queries it for c:\windows\AppPatch\<id>.msimain.sdb while msiexec /V
+        // checks the package (laneB regasm6); stopping on it killed the MSI server and left the client waiting forever.
+        struct EMU_FILE_STAT_INFORMATION
+        {
+            LARGE_INTEGER FileId;
+            LARGE_INTEGER CreationTime;
+            LARGE_INTEGER LastAccessTime;
+            LARGE_INTEGER LastWriteTime;
+            LARGE_INTEGER ChangeTime;
+            LARGE_INTEGER AllocationSize;
+            LARGE_INTEGER EndOfFile;
+            ULONG FileAttributes;
+            ULONG ReparseTag;
+            ULONG NumberOfLinks;
+            ACCESS_MASK EffectiveAccess;
+        };
+        static_assert(sizeof(EMU_FILE_STAT_INFORMATION) == 72);
+
         NTSTATUS handle_NtQueryInformationByName(const syscall_context& c,
                                                  const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                                  const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
@@ -1448,6 +1467,50 @@ namespace sogen
                 block.Status = status;
                 return status;
             };
+
+            if (info_class == FileStatInformation)
+            {
+                block.Information = sizeof(EMU_FILE_STAT_INFORMATION);
+
+                if (length < block.Information)
+                {
+                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                }
+
+                const auto filepath = windows_path(filename);
+                if (filepath.is_relative())
+                {
+                    block.Information = 0;
+                    return ret(STATUS_OBJECT_NAME_NOT_FOUND);
+                }
+
+                const auto file_stat_result = c.win_emu.file_sys.stat(filepath);
+                if (!file_stat_result)
+                {
+                    block.Information = 0;
+                    return ret(STATUS_OBJECT_NAME_NOT_FOUND);
+                }
+
+                const auto& file_stat = *file_stat_result;
+                const auto is_directory = (file_stat.st_mode & S_IFDIR) != 0;
+
+                EMU_FILE_STAT_INFORMATION i{};
+                i.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
+                i.ChangeTime = i.LastWriteTime;
+                i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                i.NumberOfLinks = 1;
+                i.EffectiveAccess = FILE_ALL_ACCESS;
+
+                const auto file_size = is_directory ? 0LL : file_stat.st_size;
+                i.EndOfFile.QuadPart = file_size;
+                i.AllocationSize.QuadPart = static_cast<LONGLONG>(align_up(file_size, 512));
+
+                c.emu.write_memory(file_information, i);
+
+                return ret(STATUS_SUCCESS);
+            }
 
             if (info_class == FileStatBasicInformation)
             {
