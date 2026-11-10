@@ -1409,6 +1409,12 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            case ProcessJobMemoryInformation:
+                // rpcss (svchost -k RPCSS) asks for this at start-up and continues on a failure. Stopping the emulation here
+                // killed rpcss in laneB regasm4/5 (MsiInstallProduct 1601, RPC_E_DISCONNECTED); when the stop happened not to
+                // take effect (regasm3) rpcss ran on with this status and served the msiserver activation.
+                return STATUS_NOT_SUPPORTED;
+
             case ProcessCycleTime:
                 return handle_query<PROCESS_CYCLE_TIME_INFORMATION>(c.emu, process_information, process_information_length, return_length,
                                                                     [&](PROCESS_CYCLE_TIME_INFORMATION& info) {
