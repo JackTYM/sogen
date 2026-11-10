@@ -332,7 +332,9 @@ namespace sogen
                 if (file && file->ref_count == 1)
                 {
                     // A delete-pending file stays alive until its last handle closes, not just the one that marked it.
-                    if (file->handle.take_delete_on_close())
+                    // POSIX-semantics deletes are the exception: they unlink when the marking handle closes (the
+                    // remove runs in this handle's guest_file destructor; open host handles share delete).
+                    if (!file->handle.has_posix_delete() && file->handle.take_delete_on_close())
                     {
                         auto remaining = std::ranges::find_if(c.proc.files, [&](auto& entry) {
                             return &entry.second != file && entry.second.is_file() && entry.second.handle.path() == file->handle.path();

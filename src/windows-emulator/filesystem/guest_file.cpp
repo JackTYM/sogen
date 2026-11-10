@@ -96,14 +96,25 @@ namespace sogen
         this->state_->rename_target = new_path.lexically_normal();
     }
 
-    void guest_file::set_delete_on_close(const bool delete_on_close) const
+    void guest_file::set_delete_on_close(const bool delete_on_close, const bool posix) const
     {
         this->state_->delete_on_close = delete_on_close;
+        this->state_->posix_delete = delete_on_close && posix;
     }
 
     bool guest_file::take_delete_on_close() const
     {
+        if (this->state_)
+        {
+            this->state_->posix_delete = false;
+        }
+
         return this->state_ && std::exchange(this->state_->delete_on_close, false);
+    }
+
+    bool guest_file::has_posix_delete() const
+    {
+        return this->state_ && this->state_->delete_on_close && this->state_->posix_delete;
     }
 
     void guest_file::serialize(utils::buffer_serializer& buffer) const

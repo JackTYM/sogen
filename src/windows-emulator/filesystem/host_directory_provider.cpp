@@ -17,6 +17,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 #if defined(OS_WINDOWS) && !defined(__MINGW64__)
@@ -30,6 +32,85 @@ namespace sogen
 
     namespace
     {
+#ifdef OS_WINDOWS
+        // The CRT's _wfsopen(_SH_DENYNO) shares read and write but not delete. Every guest handle keeps such a host
+        // handle open, so on a Windows host each rename or delete of that file - and each rename of a directory above
+        // it - fails while any guest handle (in any guest process) is open, and the deferred rename/delete at close
+        // drops that failure silently. NTFS lets guests do these things when their handles share delete, which the
+        // Windows loader, fusion and MSI rely on (laneA VSTA: GAC commit 0x80070002, RemoveDirectoryAndChildren
+        // 0x80070091). Open host files with FILE_SHARE_DELETE, as layered_provider already does for its own handles.
+        int open_host_file(FILE** handle, const std::filesystem::path& path, const std::u16string& mode)
+        {
+            *handle = nullptr;
+
+            const auto update = mode.find(u'+') != std::u16string::npos;
+            DWORD access{};
+            DWORD disposition{};
+            int flags = _O_BINARY;
+
+            switch (mode.empty() ? u'r' : mode.front())
+            {
+            case u'w':
+                access = update ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_WRITE;
+                disposition = CREATE_ALWAYS;
+                flags |= update ? _O_RDWR : _O_WRONLY;
+                break;
+            case u'a':
+                access = update ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_WRITE;
+                disposition = OPEN_ALWAYS;
+                flags |= _O_APPEND | (update ? _O_RDWR : _O_WRONLY);
+                break;
+            default:
+                access = update ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
+                disposition = OPEN_EXISTING;
+                flags |= update ? _O_RDWR : _O_RDONLY;
+                break;
+            }
+
+            auto* const file = CreateFileW(path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                           disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE)
+            {
+                switch (GetLastError())
+                {
+                case ERROR_FILE_NOT_FOUND:
+                case ERROR_PATH_NOT_FOUND:
+                case ERROR_INVALID_NAME:
+                    return ENOENT;
+                default:
+                    return EACCES;
+                }
+            }
+
+            const auto descriptor = _open_osfhandle(reinterpret_cast<intptr_t>(file), flags);
+            if (descriptor < 0)
+            {
+                CloseHandle(file);
+                return EACCES;
+            }
+
+            std::string narrow_mode{};
+            for (const auto c : mode)
+            {
+                narrow_mode.push_back(static_cast<char>(c));
+            }
+
+            *handle = _fdopen(descriptor, narrow_mode.c_str());
+            if (!*handle)
+            {
+                _close(descriptor);
+                return EACCES;
+            }
+
+            return 0;
+        }
+#else
+        int open_host_file(FILE** handle, const std::filesystem::path& path, const std::u16string& mode)
+        {
+            return open_unicode(handle, path, mode);
+        }
+#endif
+
         // Windows junctions are reported as an implementation-defined file type rather than as symlinks.
         bool is_link(const std::filesystem::file_status status)
         {
@@ -509,7 +590,7 @@ namespace sogen
         }
 
         FILE* file{};
-        const auto error = open_unicode(&file, *host_path, mode);
+        const auto error = open_host_file(&file, *host_path, mode);
         if (!file)
         {
             return {.status = map_open_error(error)};

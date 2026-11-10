@@ -133,6 +133,9 @@ namespace sogen
         std::optional<registry_value> get_value(const registry_key& key, std::string_view name);
         std::optional<registry_value> get_value(const registry_key& key, size_t index);
         size_t get_value_count(const registry_key& key);
+        // Visits every live value once, in get_value(index) order. Use this instead of get_value(key, 0..count): with a
+        // deleted value in the overlay each indexed lookup rescans the hive key, so a full walk is quadratic.
+        void for_each_value(const registry_key& key, const std::function<void(const registry_value&)>& callback);
         void set_value(const registry_key& key, std::string name, uint32_t type, std::span<const std::byte> data);
         bool delete_value(const registry_key& key, std::string_view name);
 

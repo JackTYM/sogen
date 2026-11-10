@@ -706,18 +706,34 @@ namespace sogen
             }
             else
             {
+                // Resolve against the bucket found above: get_value(key, name) would rebuild the full key path for
+                // every backing value (the dominant cost of this loop on large keys).
                 for (size_t backing_index = 0; backing_index < backing_count; ++backing_index)
                 {
                     const auto* entry = backing_key->key.get_value(backing_key->file, backing_index);
-                    auto value = entry ? this->get_value(key, entry->name) : std::nullopt;
-                    if (!value)
+                    if (!entry)
+                    {
+                        continue;
+                    }
+
+                    const auto overlay_value = bucket->values.find(entry->name);
+                    if (overlay_value != bucket->values.end() && overlay_value->second.deleted)
                     {
                         continue;
                     }
 
                     if (overlay_index == 0)
                     {
-                        return value;
+                        if (overlay_value != bucket->values.end())
+                        {
+                            return registry_value{
+                                .type = overlay_value->second.type,
+                                .name = overlay_value->first,
+                                .data = overlay_value->second.data,
+                            };
+                        }
+
+                        return registry_value{.type = entry->type, .name = entry->name, .data = entry->data};
                     }
                     --overlay_index;
                 }
@@ -748,6 +764,59 @@ namespace sogen
         }
 
         return std::nullopt;
+    }
+
+    void registry_manager::for_each_value(const registry_key& key, const std::function<void(const registry_value&)>& callback)
+    {
+        const auto overlay_entry = this->overlay_values_.find(registry_manager::get_full_key_path(key));
+        const auto* bucket = overlay_entry == this->overlay_values_.end() ? nullptr : &overlay_entry->second;
+        const auto backing_key = this->get_hive_key(key);
+
+        if (backing_key)
+        {
+            const auto backing_count = backing_key->key.get_value_count(backing_key->file);
+            for (size_t backing_index = 0; backing_index < backing_count; ++backing_index)
+            {
+                const auto* entry = backing_key->key.get_value(backing_key->file, backing_index);
+                if (!entry)
+                {
+                    continue;
+                }
+
+                if (bucket)
+                {
+                    if (const auto overlay_value = bucket->values.find(entry->name); overlay_value != bucket->values.end())
+                    {
+                        if (!overlay_value->second.deleted)
+                        {
+                            callback(registry_value{
+                                .type = overlay_value->second.type,
+                                .name = overlay_value->first,
+                                .data = overlay_value->second.data,
+                            });
+                        }
+                        continue;
+                    }
+                }
+
+                callback(registry_value{.type = entry->type, .name = entry->name, .data = entry->data});
+            }
+        }
+
+        if (!bucket)
+        {
+            return;
+        }
+
+        for (const auto& [name, value] : bucket->values)
+        {
+            if (value.deleted || (backing_key && backing_key->key.get_value(backing_key->file, name)))
+            {
+                continue;
+            }
+
+            callback(registry_value{.type = value.type, .name = name, .data = value.data});
+        }
     }
 
     size_t registry_manager::get_value_count(const registry_key& key)

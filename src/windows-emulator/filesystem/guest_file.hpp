@@ -49,8 +49,11 @@ namespace sogen
         [[nodiscard]] std::optional<struct compat_stat> stat() const;
 
         void defer_rename(const windows_path& new_path) const;
-        void set_delete_on_close(bool delete_on_close) const;
+        // posix: FILE_DISPOSITION_POSIX_SEMANTICS. The name goes away when the marking handle closes, even while other
+        // handles to the file stay open (classic semantics wait for the last handle).
+        void set_delete_on_close(bool delete_on_close, bool posix = false) const;
         bool take_delete_on_close() const;
+        bool has_posix_delete() const;
 
         void serialize(utils::buffer_serializer& buffer) const;
         void deserialize(utils::buffer_deserializer& buffer);
@@ -64,6 +67,7 @@ namespace sogen
             std::unique_ptr<i_file> io{};
             std::optional<windows_path> rename_target{};
             bool delete_on_close{false};
+            bool posix_delete{false}; // not serialized: a restored handle falls back to classic semantics
 
             open_file() = default;
             open_file(const open_file&) = delete;

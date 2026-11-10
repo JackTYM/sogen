@@ -346,7 +346,10 @@ namespace sogen
 
                 c.win_emu.callbacks.on_generic_access(wants_delete ? "Marking for deletion" : "Clearing deletion marker", f->name);
 
-                f->handle.set_delete_on_close(wants_delete);
+                // DeleteFileW/RemoveDirectoryW (Windows 10 1809+) ask for POSIX semantics: the name is unlinked when this
+                // handle closes, so RemoveDirectoryAndChildren can remove the parent even while another handle (fusion's
+                // view of a staged assembly) keeps the file itself open.
+                f->handle.set_delete_on_close(wants_delete, (info.Flags & FILE_DISPOSITION_POSIX_SEMANTICS) != 0);
 
                 return STATUS_SUCCESS;
             }
