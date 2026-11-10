@@ -709,30 +709,6 @@ namespace sogen
                 reports_change = !previous || previous->type != type || !std::ranges::equal(previous->data, data_buffer);
             }
 
-            const auto describe_data = [&]() -> std::string {
-                if (type == 4 && data_buffer.size() >= 4)
-                {
-                    uint32_t dword{};
-                    memcpy(&dword, data_buffer.data(), sizeof(dword));
-                    return std::to_string(dword);
-                }
-                if (type == 1 || type == 2)
-                {
-                    std::u16string wide(data_buffer.size() / 2, u'\0');
-                    memcpy(wide.data(), data_buffer.data(), wide.size() * sizeof(char16_t));
-                    return u16_to_u8(wide);
-                }
-                std::string hex{};
-                for (size_t i = 0; i < data_buffer.size() && i < 64; ++i)
-                {
-                    char byte[4]{};
-                    snprintf(byte, sizeof(byte), "%02x", static_cast<unsigned>(std::to_integer<unsigned char>(data_buffer[i])));
-                    hex += byte;
-                }
-                return "hex:" + hex;
-            };
-            fprintf(stderr, "W27SETVAL key=%s name=%s type=%u size=%u data=%s\n", u16_to_u8(key->to_string()).c_str(), name.c_str(), type, data_size,
-                    describe_data().c_str());
             c.win_emu.registry.set_value(*key, std::move(name), type, std::span<const std::byte>{data_buffer});
             if (reports_change)
             {

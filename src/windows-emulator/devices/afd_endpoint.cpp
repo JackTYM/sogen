@@ -13,19 +13,6 @@
 #include <utils/finally.hpp>
 #include <utils/time.hpp>
 
-namespace {
-std::string afd_debug_text(const std::vector<std::byte>& data, size_t limit)
-{
-    std::string text;
-    for (size_t i = 0; i < data.size() && i < limit; ++i)
-    {
-        const auto c = static_cast<unsigned char>(data[i]);
-        text.push_back(c >= 0x20 && c < 0x7f ? static_cast<char>(c) : '.');
-    }
-    return text;
-}
-}
-
 
 namespace sogen
 {
@@ -1512,7 +1499,7 @@ namespace sogen
                     return STATUS_UNSUCCESSFUL;
                 }
 
-                fprintf(stderr, "AFDLOG recv ep=%p bytes=%lld text=%s\n", static_cast<const void*>(this), static_cast<long long>(bytes_received), afd_debug_text(host_buffer, 256).c_str());
+                fprintf(stderr, "AFDLOG recv ep=%p bytes=%lld\n", static_cast<const void*>(this), static_cast<long long>(bytes_received));
 
                 size_t source_offset = 0;
                 for (const auto& wsabuf : buffers)
@@ -1593,7 +1580,7 @@ namespace sogen
                 }
 
                 const auto bytes_sent = this->s_->send(host_buffer);
-                fprintf(stderr, "AFDLOG send ep=%p requested=%zu sent=%lld text=%s\n", static_cast<const void*>(this), host_buffer.size(), static_cast<long long>(bytes_sent), afd_debug_text(host_buffer, 512).c_str());
+                fprintf(stderr, "AFDLOG send ep=%p requested=%zu sent=%lld\n", static_cast<const void*>(this), host_buffer.size(), static_cast<long long>(bytes_sent));
 
                 if (bytes_sent < 0)
                 {
