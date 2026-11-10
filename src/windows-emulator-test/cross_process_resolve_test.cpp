@@ -83,6 +83,25 @@ namespace sogen::test
         ASSERT_EQ(std::get<NTSTATUS>(result), STATUS_NOT_SUPPORTED);
     }
 
+    // A self-alias record names this process: routing it would go to the parent with this process's own pid and
+    // come back here, so it is never resolved as a child target.
+    TEST(CrossProcessTest, SelfAliasIsNotAChildTarget)
+    {
+        auto emu = create_empty_emulator();
+
+        // With a router present, a channel-less record would otherwise resolve to a routed target.
+        emu.set_process_control_router(std::make_unique<fake_control_channel>());
+
+        const auto alias = emu.process.create_self_alias_process_handle(process_all_access);
+        ASSERT_TRUE(emu.process.is_current_process_handle(alias));
+
+        const auto c = make_context(emu);
+        const auto result = resolve_child_target(c, alias, process_vm_read);
+
+        ASSERT_TRUE(std::holds_alternative<NTSTATUS>(result));
+        ASSERT_EQ(std::get<NTSTATUS>(result), STATUS_NOT_SUPPORTED);
+    }
+
     TEST(CrossProcessTest, InsufficientAccessIsDenied)
     {
         auto emu = create_empty_emulator();

@@ -461,6 +461,18 @@ namespace sogen
 
             const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
 
+            // GUEST_PROCESS_HANDLE means "this process" in every process, so an inheritable duplicate of it handed to a
+            // child (crashpad's DuplicateHandle(self, self, self, ..., TRUE) for its handler's --initial-client-data)
+            // would name the child itself there. Such a duplicate gets a distinct self-alias handle instead, which the
+            // child inherits as a record for this process (see inherited_process_handle). Closing the source is a no-op,
+            // as for any close of the own process handle.
+            if (resolved_source_handle == GUEST_PROCESS_HANDLE && (handle_attributes & OBJ_INHERIT) != 0)
+            {
+                target_handle.write(
+                    c.proc.create_self_alias_process_handle(resolve_granted_process_access(same_access ? GENERIC_ALL : desired_access)));
+                return STATUS_SUCCESS;
+            }
+
             if (!same_access && resolved_source_handle.value.type == handle_types::section)
             {
                 const auto* section = c.proc.sections.get(resolved_source_handle);

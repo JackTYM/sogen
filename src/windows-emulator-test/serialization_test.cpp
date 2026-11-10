@@ -137,4 +137,27 @@ namespace sogen::test
         ASSERT_EQ(restored.exit_status, record.exit_status);
         ASSERT_EQ(restored.granted_access, record.granted_access);
     }
+
+    TEST(SerializationTest, InheritedProcessHandleRoundTrips)
+    {
+        inherited_process_handle inherited{};
+        inherited.target_handle = make_pseudo_handle(9, handle_types::process);
+        inherited.pid = 0x1234;
+        inherited.exit_status = STATUS_PENDING;
+        inherited.granted_access = 0x1410;
+        inherited.image_path = windows_path{u"C:\\browser.exe"};
+
+        utils::buffer_serializer serializer{};
+        serializer.write(inherited);
+
+        utils::buffer_deserializer deserializer{serializer};
+        inherited_process_handle restored{};
+        deserializer.read(restored);
+
+        ASSERT_EQ(restored.target_handle.bits, inherited.target_handle.bits);
+        ASSERT_EQ(restored.pid, inherited.pid);
+        ASSERT_EQ(restored.exit_status, inherited.exit_status);
+        ASSERT_EQ(restored.granted_access, inherited.granted_access);
+        ASSERT_EQ(restored.image_path, inherited.image_path);
+    }
 } // namespace sogen::test

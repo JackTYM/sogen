@@ -1093,4 +1093,43 @@ namespace sogen::test
         child_memory[200] = std::byte{0x6f};
         ASSERT_EQ(parent_memory[200], std::byte{0x6f});
     }
+
+    // crashpad hands its handler an inheritable DuplicateHandle(self, self, self) result: that duplicate must be a
+    // distinct handle naming this process (a self-alias record), not the GUEST_PROCESS_HANDLE constant, which would
+    // name the handler itself once inherited. A non-inheritable duplicate keeps the constant.
+    TEST(CrossProcessTest, InheritableDuplicateOfOwnProcessIsASelfAlias)
+    {
+        auto emu = create_empty_emulator();
+        const auto c = make_context(emu);
+
+        const auto handle_out = emu.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(handle_out, 0u);
+        const emulator_object<handle> target_handle{emu.memory, handle_out};
+
+        ASSERT_EQ(syscalls::handle_NtDuplicateObject(c, CURRENT_PROCESS, CURRENT_PROCESS, CURRENT_PROCESS, target_handle, 0, OBJ_INHERIT,
+                                                     DUPLICATE_SAME_ACCESS),
+                  STATUS_SUCCESS);
+
+        const auto alias = target_handle.read();
+        ASSERT_FALSE(alias == GUEST_PROCESS_HANDLE);
+        ASSERT_TRUE(alias.value.is_pseudo);
+        ASSERT_TRUE(alias.value.type == handle_types::process);
+        ASSERT_TRUE(emu.process.is_current_process_handle(alias));
+
+        const auto record = emu.process.child_processes.find(static_cast<uint32_t>(alias.value.id));
+        ASSERT_TRUE(record != emu.process.child_processes.end());
+        ASSERT_EQ(record->second.pid, emu.process.process_id);
+        ASSERT_EQ(record->second.granted_access, process_all_access);
+
+        ASSERT_EQ(syscalls::handle_NtDuplicateObject(c, CURRENT_PROCESS, CURRENT_PROCESS, CURRENT_PROCESS, target_handle, 0, 0,
+                                                     DUPLICATE_SAME_ACCESS),
+                  STATUS_SUCCESS);
+        ASSERT_TRUE(target_handle.read() == GUEST_PROCESS_HANDLE);
+
+        process_context::child_process_record child{};
+        child.pid = 0x1234;
+        child.exit_status = STATUS_PENDING;
+        emu.process.child_processes[7] = child;
+        ASSERT_FALSE(emu.process.is_current_process_handle(make_pseudo_handle(7, handle_types::process)));
+    }
 } // namespace sogen::test

@@ -835,6 +835,7 @@ namespace sogen
                                               std::vector<inherited_pipe_handle> inherited_pipes,
                                               std::vector<inherited_section_handle> inherited_sections,
                                               std::vector<inherited_event_handle> inherited_events,
+                                              std::vector<inherited_process_handle> inherited_processes,
                                               std::shared_ptr<shared_backing> kernel_arena_backing)
     {
 #if !defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
@@ -843,6 +844,7 @@ namespace sogen
         (void)inherited_pipes;
         (void)inherited_sections;
         (void)inherited_events;
+        (void)inherited_processes;
         (void)kernel_arena_backing;
         return {.success = false, .failure_detail = "Child process spawning is not supported on this platform"};
 #else
@@ -913,7 +915,7 @@ namespace sogen
         }
 
         if (!send_child_bootstrap_data(parent_fd, settings, inherited_pipes, std::move(inherited_sections), inherited_events,
-                                       std::move(kernel_arena_backing)))
+                                       inherited_processes, std::move(kernel_arena_backing)))
         {
             host_ipc::close_fd(parent_fd);
             host_ipc::close_fd(parent_control_fd);
@@ -957,6 +959,7 @@ namespace sogen
                                    const std::vector<inherited_pipe_handle>& inherited_pipes,
                                    std::vector<inherited_section_handle> inherited_sections,
                                    const std::vector<inherited_event_handle>& inherited_events,
+                                   const std::vector<inherited_process_handle>& inherited_processes,
                                    std::shared_ptr<shared_backing> kernel_arena_backing)
     {
         std::vector<int> section_fds{};
@@ -987,6 +990,7 @@ namespace sogen
         bootstrap.write_vector(inherited_pipes);
         bootstrap.write_vector(inherited_sections);
         bootstrap.write_vector(inherited_events);
+        bootstrap.write_vector(inherited_processes);
         bootstrap.write(has_arena);
         bootstrap.write(static_cast<uint64_t>(has_arena ? kernel_arena_backing->size() : 0));
 
@@ -1009,6 +1013,7 @@ namespace sogen
         buffer.read_vector(data.inherited_pipes);
         buffer.read_vector(data.inherited_sections);
         buffer.read_vector(data.inherited_events);
+        buffer.read_vector(data.inherited_processes);
 
         bool has_arena{};
         uint64_t arena_size{};
@@ -1110,7 +1115,7 @@ namespace sogen
                 .process_id = guest_pid,
             };
 
-            auto outcome = spawn_child_process(config, std::move(settings), {}, {}, {}, arena->backing());
+            auto outcome = spawn_child_process(config, std::move(settings), {}, {}, {}, {}, arena->backing());
             if (!outcome.success)
             {
                 throw std::runtime_error(std::string(name) + " failed to start: " + outcome.failure_detail);

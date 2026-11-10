@@ -105,6 +105,14 @@ namespace sogen
 
         const auto& record = c.proc.child_processes.at(*record_id);
 
+        // A self-alias record names this process: routing it would send the request to the parent with this
+        // process's own pid, which forwards it back here while this process waits on the answer. Callers handle
+        // these through process_context::is_current_process_handle before resolving a child target.
+        if (record.pid == c.proc.process_id)
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
         child_target target{.record_id = *record_id, .channel = c.win_emu.find_child_control_channel(*record_id)};
         if (!target.channel)
         {

@@ -56,6 +56,7 @@ namespace sogen
         std::vector<inherited_pipe_handle> inherited_pipes{};
         std::vector<inherited_section_handle> inherited_sections{};
         std::vector<inherited_event_handle> inherited_events{};
+        std::vector<inherited_process_handle> inherited_processes{};
         std::shared_ptr<shared_backing> kernel_arena_backing{};
     };
 
@@ -71,6 +72,7 @@ namespace sogen
                                               std::vector<inherited_pipe_handle> inherited_pipes,
                                               std::vector<inherited_section_handle> inherited_sections,
                                               std::vector<inherited_event_handle> inherited_events,
+                                              std::vector<inherited_process_handle> inherited_processes,
                                               std::shared_ptr<shared_backing> kernel_arena_backing);
 
     // Parent side of the bootstrap handshake: sends settings and inherited handles over `fd`, with every
@@ -78,6 +80,7 @@ namespace sogen
     bool send_child_bootstrap_data(int fd, const application_settings& settings, const std::vector<inherited_pipe_handle>& inherited_pipes,
                                    std::vector<inherited_section_handle> inherited_sections,
                                    const std::vector<inherited_event_handle>& inherited_events,
+                                   const std::vector<inherited_process_handle>& inherited_processes = {},
                                    std::shared_ptr<shared_backing> kernel_arena_backing = nullptr);
 
     // Used by a process running in --child-ipc-fd mode: reads the settings/inherited_pipes/

@@ -584,8 +584,10 @@ namespace sogen
                     return true;
                 }
 
-                const auto live_children = std::ranges::count_if(proc.child_processes | std::views::values,
-                                                                 [](const auto& child) { return child.exit_status == STATUS_PENDING; });
+                // A self-alias record (process_context::create_self_alias_process_handle) is this process, not a child.
+                const auto live_children = std::ranges::count_if(proc.child_processes | std::views::values, [&](const auto& child) {
+                    return child.exit_status == STATUS_PENDING && child.pid != proc.process_id;
+                });
                 return 1 + static_cast<size_t>(live_children) < *limit;
             }
         }
@@ -1654,7 +1656,7 @@ namespace sogen
 
         NTSTATUS handle_NtOpenProcess(const syscall_context& c, const emulator_object<handle> process_handle,
                                       const ACCESS_MASK desired_access,
-                                      const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
+                                      const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                       const emulator_object<CLIENT_ID64> client_id)
         {
             if (!process_handle || !client_id)
@@ -1663,6 +1665,15 @@ namespace sogen
             }
 
             const auto id = client_id.read();
+
+            // An inheritable handle to the own process must keep naming this process once a child inherits it, which the
+            // GUEST_PROCESS_HANDLE constant does not (same as the inheritable duplicate in handle_NtDuplicateObject).
+            if (id.UniqueProcess == c.proc.process_id && object_attributes &&
+                (object_attributes.read().Attributes & OBJ_INHERIT) != 0)
+            {
+                process_handle.write(c.proc.create_self_alias_process_handle(resolve_granted_process_access(desired_access)));
+                return STATUS_SUCCESS;
+            }
 
             const bool trace_open_process = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
             if (trace_open_process)
@@ -2112,16 +2123,39 @@ namespace sogen
             std::vector<inherited_pipe_handle> inherited_pipes{};
             std::vector<inherited_section_handle> inherited_sections{};
             std::vector<inherited_event_handle> inherited_events{};
+            std::vector<inherited_process_handle> inherited_processes{};
             for (const auto& src_handle : inherited_handles)
             {
-                if (src_handle.value.type == handle_types::process || src_handle.value.type == handle_types::file)
+                if (src_handle.value.type == handle_types::process)
                 {
-                    // Both of these only ever reach here as one of a handful of fixed pseudo/well-known
-                    // constants (GUEST_PROCESS_HANDLE, STDOUT_HANDLE, NUL_HANDLE, ...): every process's
-                    // syscall handlers already recognize the same bit pattern directly, without any
-                    // per-process handle_store entry backing it, so the child resolves them correctly on
-                    // its own the moment the same numeric handle value shows up in guest code. Nothing to
-                    // forward.
+                    // A pseudo process handle backed by a child_process_record (a child or sibling this process
+                    // opened, or a self-alias of this process, see process_context::create_self_alias_process_handle)
+                    // names a specific pid, which the child must keep seeing under the same handle value.
+                    // GUEST_PROCESS_HANDLE and STEAM_PROCESS_HANDLE are fixed constants every process resolves on
+                    // its own (GUEST_PROCESS_HANDLE then means the child itself, as it does for any copy of it).
+                    const auto record = src_handle.value.is_pseudo && src_handle != STEAM_PROCESS_HANDLE
+                                            ? c.proc.child_processes.find(static_cast<uint32_t>(src_handle.value.id))
+                                            : c.proc.child_processes.end();
+                    if (record != c.proc.child_processes.end())
+                    {
+                        inherited_processes.push_back({
+                            .target_handle = src_handle,
+                            .pid = record->second.pid,
+                            .exit_status = record->second.exit_status,
+                            .granted_access = record->second.granted_access,
+                            .image_path = record->second.image_path,
+                        });
+                    }
+                    continue;
+                }
+
+                if (src_handle.value.type == handle_types::file)
+                {
+                    // Only ever reaches here as one of a handful of fixed pseudo/well-known constants (STDOUT_HANDLE,
+                    // NUL_HANDLE, ...): every process's syscall handlers already recognize the same bit pattern
+                    // directly, without any per-process handle_store entry backing it, so the child resolves them
+                    // correctly on its own the moment the same numeric handle value shows up in guest code. Nothing
+                    // to forward.
                     continue;
                 }
 
@@ -2221,8 +2255,14 @@ namespace sogen
 
             if (std::getenv("SOGEN_TRACE_CHILD_PROCESS_LAUNCH") != nullptr)
             {
-                c.win_emu.log.log("NtCreateUserProcess: child %u inherited handles: %zu pipes, %zu sections, %zu events\n", record_id,
-                                  inherited_pipes.size(), inherited_sections.size(), inherited_events.size());
+                c.win_emu.log.log("NtCreateUserProcess: child %u inherited handles: %zu pipes, %zu sections, %zu events, %zu processes\n",
+                                  record_id, inherited_pipes.size(), inherited_sections.size(), inherited_events.size(),
+                                  inherited_processes.size());
+                for (const auto& p : inherited_processes)
+                {
+                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited process: 0x%" PRIx64 " pid=%u\n", record_id,
+                                      static_cast<uint64_t>(p.target_handle.bits), p.pid);
+                }
                 for (const auto& p : inherited_pipes)
                 {
                     c.win_emu.log.log("NtCreateUserProcess: child %u inherited pipe: 0x%" PRIx64 " %s\n", record_id,
@@ -2272,7 +2312,7 @@ namespace sogen
                 const auto* const arena = c.proc.ensure_shared_arena();
                 outcome = c.win_emu.callbacks.create_child_process(record_id, std::move(child_settings), std::move(inherited_pipes),
                                                                    std::move(inherited_sections), std::move(inherited_events),
-                                                                   arena ? arena->backing() : nullptr);
+                                                                   std::move(inherited_processes), arena ? arena->backing() : nullptr);
             }
             catch (const std::exception& e)
             {

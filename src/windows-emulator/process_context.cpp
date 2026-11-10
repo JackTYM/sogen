@@ -1651,10 +1651,33 @@ namespace sogen
         return current == nullptr;
     }
 
-    // NOLINTNEXTLINE(cert-dcl50-cpp,readability-convert-member-functions-to-static)
     bool process_context::is_current_process_handle(const handle handle) const
     {
-        return handle == CURRENT_PROCESS || handle == GUEST_PROCESS_HANDLE;
+        return handle == CURRENT_PROCESS || handle == GUEST_PROCESS_HANDLE || this->is_self_alias_process_handle(handle);
+    }
+
+    bool process_context::is_self_alias_process_handle(const handle handle) const
+    {
+        if (!handle.value.is_pseudo || handle.value.type != handle_types::process)
+        {
+            return false;
+        }
+
+        const auto record = this->child_processes.find(static_cast<uint32_t>(handle.value.id));
+        return record != this->child_processes.end() && record->second.pid == this->process_id;
+    }
+
+    handle process_context::create_self_alias_process_handle(const ACCESS_MASK granted_access)
+    {
+        const auto record_id = this->next_child_record_id++;
+
+        child_process_record record{};
+        record.pid = this->process_id;
+        record.exit_status = STATUS_PENDING;
+        record.granted_access = granted_access;
+        this->child_processes[record_id] = record;
+
+        return make_pseudo_handle(record_id, handle_types::process);
     }
 
     // Processes other than this one and its direct children have no control channel, so their handles

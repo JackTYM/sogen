@@ -873,6 +873,31 @@ namespace sogen
             }
         }
 
+        // The record carries no control channel here, so cross-process operations on the handle are routed to
+        // inherited.pid through the parent (resolve_child_target); a parent answers requests for its own pid itself
+        // (route_process_control_request).
+        void recreate_inherited_process(windows_emulator& win_emu, const inherited_process_handle& inherited)
+        {
+            const auto& value = inherited.target_handle.value;
+            const auto record_id = static_cast<uint32_t>(value.id);
+            if (!value.is_pseudo || value.type != handle_types::process || record_id == 0 ||
+                win_emu.process.child_processes.contains(record_id))
+            {
+                win_emu.log.error("Failed to inherit process handle 0x%" PRIx64 "\n", static_cast<uint64_t>(inherited.target_handle.bits));
+                return;
+            }
+
+            process_context::child_process_record record{};
+            record.image_path = inherited.image_path;
+            record.pid = inherited.pid;
+            record.exit_status = inherited.exit_status;
+            record.granted_access = inherited.granted_access;
+            win_emu.process.child_processes[record_id] = record;
+
+            // Records this process creates later must not reuse the inherited id.
+            win_emu.process.next_child_record_id = std::max(win_emu.process.next_child_record_id, record_id + 1);
+        }
+
         bool run(const analysis_options& options, const std::span<const std::string_view> args)
         {
             std::optional<child_bootstrap_data> child_bootstrap{};
@@ -946,6 +971,11 @@ namespace sogen
                         recreate_inherited_event(*win_emu, inherited);
                     }
 
+                    for (const auto& inherited : child_bootstrap->inherited_processes)
+                    {
+                        recreate_inherited_process(*win_emu, inherited);
+                    }
+
                     win_emu->setup_process_if_necessary();
 
                     if (child_bootstrap->settings.start_suspended)
@@ -1008,9 +1038,9 @@ namespace sogen
                     [&spawn_config, win_emu_ptr = win_emu.get()](
                         uint32_t record_id, application_settings settings, std::vector<inherited_pipe_handle> pipes,
                         std::vector<inherited_section_handle> sections, std::vector<inherited_event_handle> events,
-                        std::shared_ptr<shared_backing> kernel_arena_backing) {
+                        std::vector<inherited_process_handle> processes, std::shared_ptr<shared_backing> kernel_arena_backing) {
                         auto outcome = spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections),
-                                                           std::move(events), std::move(kernel_arena_backing));
+                                                           std::move(events), std::move(processes), std::move(kernel_arena_backing));
                         if (outcome.success && outcome.ipc_fd >= 0)
                         {
                             win_emu_ptr->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));

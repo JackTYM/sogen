@@ -150,6 +150,40 @@ namespace sogen
         }
     };
 
+    // Describes one PsAttributeHandleList process handle the child must inherit: a pseudo process handle
+    // backed by a process_context::child_process_record in the parent (a child or sibling the parent
+    // opened, or a self-alias of the parent made by an inheritable duplicate/open of its own process
+    // handle). The child recreates the record under the same handle value with the same pid, so the
+    // handle keeps naming the same process there; with no control channel for it in the child,
+    // cross-process operations are routed to that pid (resolve_child_target). Fixed constants
+    // (GUEST_PROCESS_HANDLE, STEAM_PROCESS_HANDLE) are not forwarded: every process resolves them alone.
+    struct inherited_process_handle
+    {
+        handle target_handle{};
+        uint32_t pid{};
+        NTSTATUS exit_status{STATUS_PENDING};
+        ACCESS_MASK granted_access{};
+        windows_path image_path{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->target_handle);
+            buffer.write(this->pid);
+            buffer.write(this->exit_status);
+            buffer.write(this->granted_access);
+            buffer.write(this->image_path);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->target_handle);
+            buffer.read(this->pid);
+            buffer.read(this->exit_status);
+            buffer.read(this->granted_access);
+            buffer.read(this->image_path);
+        }
+    };
+
     // Result of spawning a child process (NtCreateUserProcess) as a genuinely separate host OS
     // process. success reports whether the child got far enough through its own startup
     // (setup_process_if_necessary) to hand back real guest addresses for PS_CREATE_INFO -
@@ -212,7 +246,7 @@ namespace sogen
         // the child's pipe_ipc_channel/process_control_channel under the same id.
         opt_func<child_process_outcome(uint32_t record_id, application_settings, std::vector<inherited_pipe_handle>,
                                        std::vector<inherited_section_handle>, std::vector<inherited_event_handle>,
-                                       std::shared_ptr<shared_backing> kernel_arena_backing)>
+                                       std::vector<inherited_process_handle>, std::shared_ptr<shared_backing> kernel_arena_backing)>
             create_child_process{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};

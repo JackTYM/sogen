@@ -676,6 +676,12 @@ namespace sogen
         bool is_window_effectively_visible(hwnd window) const;
         bool is_current_process_handle(handle handle) const;
         handle get_process_handle_by_pid(uint32_t pid, ACCESS_MASK granted_access);
+        // A distinct process handle naming this process itself (a child_process_record whose pid is this
+        // process's own pid), for an inheritable duplicate/open of the own process handle: unlike the
+        // GUEST_PROCESS_HANDLE constant it keeps meaning "this process" once a child inherits it (see
+        // inherited_process_handle and handle_NtCreateUserProcess).
+        handle create_self_alias_process_handle(ACCESS_MASK granted_access);
+        bool is_self_alias_process_handle(handle handle) const;
         bool is_current_thread_handle(handle handle, const emulator_thread* active_thread) const;
         bool is_object_pseudo_handle(handle handle) const;
         handle resolve_object_pseudo_handle(handle handle, const emulator_thread* active_thread) const;
