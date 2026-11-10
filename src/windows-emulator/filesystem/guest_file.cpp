@@ -96,6 +96,14 @@ namespace sogen
         this->state_->rename_target = new_path.lexically_normal();
     }
 
+    void guest_file::set_path(const windows_path& path) const
+    {
+        if (this->state_)
+        {
+            this->state_->path = path.lexically_normal();
+        }
+    }
+
     void guest_file::set_delete_on_close(const bool delete_on_close, const bool posix) const
     {
         this->state_->delete_on_close = delete_on_close;

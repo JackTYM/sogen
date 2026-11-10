@@ -49,6 +49,8 @@ namespace sogen
         [[nodiscard]] std::optional<struct compat_stat> stat() const;
 
         void defer_rename(const windows_path& new_path) const;
+        // The file was renamed while this handle stays open (NtSetInformationFile renames immediately).
+        void set_path(const windows_path& path) const;
         // posix: FILE_DISPOSITION_POSIX_SEMANTICS. The name goes away when the marking handle closes, even while other
         // handles to the file stay open (classic semantics wait for the last handle).
         void set_delete_on_close(bool delete_on_close, bool posix = false) const;

@@ -165,7 +165,41 @@ namespace sogen
                     return STATUS_OBJECT_PATH_NOT_FOUND;
                 }
 
-                f.handle.defer_rename(new_path);
+                // NTFS renames at the syscall and returns the real status; the caller checks the new name right away
+                // (fusion's MoveAssemblyToFinalLocation stats the moved assembly). Deferring the rename to the close of
+                // this handle reported success first and lost any host failure (laneA VSTA: Error 1935, 0x80070002).
+                // Host handles share delete (331d4692), so an open handle to the file or below the directory does not
+                // block the host rename.
+                const auto old_path = f.handle.path();
+                const auto old_name = f.name;
+                const auto status = c.win_emu.file_sys.rename(old_path, new_path);
+
+                if (status != STATUS_SUCCESS)
+                {
+                    return status;
+                }
+
+                // Every open handle follows the file: retarget this process's handles to the renamed object and to
+                // anything below it (handles in other guest processes keep their old path).
+                const auto new_name_full = windows_path{new_name}.is_relative() ? u"\\??\\" + new_path.u16string() : new_name;
+                for (auto& entry : c.proc.files)
+                {
+                    auto& other = entry.second;
+                    const auto relative = other.handle.path().relative_to(old_path);
+                    if (other.handle.path().empty() || !relative)
+                    {
+                        continue;
+                    }
+
+                    other.handle.set_path(relative->empty() ? new_path : new_path / *relative);
+
+                    if (other.name.size() >= old_name.size() &&
+                        utils::string::equals_ignore_case(std::u16string_view{other.name}.substr(0, old_name.size()),
+                                                          std::u16string_view{old_name}))
+                    {
+                        other.name = new_name_full + other.name.substr(old_name.size());
+                    }
+                }
 
                 return STATUS_SUCCESS;
             }
@@ -2687,6 +2721,7 @@ namespace sogen
             }
 
             const auto file_stat_result = c.win_emu.file_sys.stat(filepath);
+
             if (!file_stat_result)
             {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
