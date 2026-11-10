@@ -1332,6 +1332,27 @@ namespace sogen
             {
                 boot_processes.push_back(boot_services(spawn_config, *win_emu));
                 boot_processes.push_back(boot_lsass(spawn_config, *win_emu));
+
+                // On Windows the auto-start services (RPCSS among them) are up long before any user program runs. Here
+                // they boot in parallel with the target, and a target that reaches COM while rpcss has created
+                // \RPC Control\epmapper but not yet registered its interfaces gets RPC_S_UNKNOWN_IF (0x800706B5; laneA
+                // vsta-b). SOGEN_BOOT_SETTLE_MS (opt-in) holds the target back for that long while the boot services run.
+                if (const auto* settle = std::getenv("SOGEN_BOOT_SETTLE_MS"))
+                {
+                    const auto settle_ms = std::strtoul(settle, nullptr, 10);
+                    win_emu->log.log("Letting the boot services settle for %lu ms before the guest starts\n", settle_ms);
+
+                    std::atomic_bool interrupted{false};
+                    utils::interupt_handler _{[&] { interrupted = true; }};
+                    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(settle_ms);
+                    while (!interrupted && std::chrono::steady_clock::now() < until)
+                    {
+                        win_emu->pump_pipe_ipc();
+                        win_emu->pump_child_routing_channels();
+                        win_emu->pump_child_exit_notifications();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                }
             }
 
             const auto success = run_emulation(context, options);
