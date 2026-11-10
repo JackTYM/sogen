@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Host paths are <emulation root>\filesys\c\ plus the guest path. Deep guest paths (GAC_MSIL assemblies:
+  ~228 characters as the guest sees them) then exceed MAX_PATH on the host, and every Win32 file call without
+  the \?\ prefix fails with "not found" (laneA VSTA: fusion's MoveAssemblyToFinalLocation 0x80070002,
+  Error 1935). longPathAware lifts that limit for this process when the host has LongPathsEnabled=1.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>

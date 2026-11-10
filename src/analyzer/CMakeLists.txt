@@ -4,6 +4,11 @@ if(WIN)
   target_sources(analyzer PRIVATE resource.rc)
 endif()
 
+# Long host paths (see analyzer.manifest). CMake hands .manifest sources to the MSVC-style linker.
+if(MSVC)
+  target_sources(analyzer PRIVATE analyzer.manifest)
+endif()
+
 sogen_assign_source_group(main.cpp)
 
 target_link_libraries(analyzer PRIVATE windows-analyzer linux-analyzer macos-analyzer)
