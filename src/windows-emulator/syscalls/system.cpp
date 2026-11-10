@@ -1073,6 +1073,15 @@ namespace sogen
                 return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
             }
 
+            case SystemIsolatedUserModeInformation: {
+                // SYSTEM_ISOLATED_USER_MODE_INFORMATION is two bytes of flag bits (SecureKernelRunning, HvciEnabled,
+                // HvciStrictMode, DebugEnabled, ...), 6 spare bytes and a ULONGLONG Spare1: 16 bytes. vbsapi.dll in lsass asks
+                // right after SystemVsmProtectionInformation; a machine without VBS/IUM answers all clear.
+                const auto status = handle_query<std::array<uint8_t, 16>>(c.emu, system_information, system_information_length,
+                                                                         return_length, [](std::array<uint8_t, 16>&) {});
+                return status == STATUS_BUFFER_TOO_SMALL ? STATUS_INFO_LENGTH_MISMATCH : status;
+            }
+
             default:
                 c.win_emu.log.error("Unsupported system info class: 0x%X\n", info_class);
                 c.emu.stop();
