@@ -1677,7 +1677,15 @@ namespace sogen
         record.granted_access = granted_access;
         this->child_processes[record_id] = record;
 
-        return make_pseudo_handle(record_id, handle_types::process);
+        // Pseudo handles carry is_pseudo in bit 31, so as a zero-extended 64-bit HANDLE the alias is above INT32_MAX.
+        // Guests narrow handles to a signed 32-bit int (crashpad's HandleToInt is a base::checked_cast<int>, used by
+        // InitialClientData::StringRepresentation for --initial-client-data): the browser hit that CHECK (int3) on
+        // the alias and its handler-start thread never launched the crashpad handler, so every child blocked in its
+        // registration TransactNamedPipe. Hand the alias out sign-extended, as WOW64 widens 32-bit handles: every
+        // lookup uses the low 32 bits (id/type/is_pseudo; handle operator== masks them), so nothing else changes.
+        auto alias = make_pseudo_handle(record_id, handle_types::process);
+        alias.value.high_bits = 0xFFFFFFFF;
+        return alias;
     }
 
     // Processes other than this one and its direct children have no control channel, so their handles

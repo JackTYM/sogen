@@ -1115,6 +1115,8 @@ namespace sogen::test
         ASSERT_TRUE(alias.value.is_pseudo);
         ASSERT_TRUE(alias.value.type == handle_types::process);
         ASSERT_TRUE(emu.process.is_current_process_handle(alias));
+        // crashpad's HandleToInt is base::checked_cast<int>(intptr_t): the value must survive a narrowing to int32.
+        ASSERT_EQ(static_cast<int64_t>(alias.bits), static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(alias.bits))));
 
         const auto record = emu.process.child_processes.find(static_cast<uint32_t>(alias.value.id));
         ASSERT_TRUE(record != emu.process.child_processes.end());
