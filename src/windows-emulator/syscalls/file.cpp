@@ -169,6 +169,22 @@ namespace sogen
 
                 return STATUS_SUCCESS;
             }
+
+            // NTFS refuses a delete disposition on a directory that still has entries (STATUS_DIRECTORY_NOT_EMPTY, so
+            // RemoveDirectory fails with ERROR_DIR_NOT_EMPTY). Accepting it here only makes the host removal at close fail
+            // silently: the guest is told the folder is gone while it still exists (MSI rollback then logs "Folder is
+            // removed. But, folder still exists" after a long stall).
+            bool is_non_empty_directory(const syscall_context& c, const file& f)
+            {
+                const auto& path = f.handle.path();
+                const auto file_stat = c.win_emu.file_sys.stat(path);
+                if (!file_stat || (file_stat->st_mode & S_IFMT) != S_IFDIR)
+                {
+                    return false;
+                }
+
+                return !c.win_emu.file_sys.list_directory(path).empty();
+            }
         }
 
         NTSTATUS handle_NtGetCachedSigningLevel(const syscall_context&, handle, emulator_object<ULONG>, emulator_object<UCHAR>, uint64_t,
@@ -296,6 +312,11 @@ namespace sogen
 
                 const auto info = c.emu.read_memory<FILE_DISPOSITION_INFORMATION>(file_information);
 
+                if (info.DeleteFile && is_non_empty_directory(c, *f))
+                {
+                    return STATUS_DIRECTORY_NOT_EMPTY;
+                }
+
                 c.win_emu.callbacks.on_generic_access(info.DeleteFile ? "Marking for deletion" : "Clearing deletion marker", f->name);
 
                 f->handle.set_delete_on_close(info.DeleteFile != FALSE);
@@ -316,6 +337,11 @@ namespace sogen
                 if (wants_delete && !(f->granted_access & DELETE))
                 {
                     return STATUS_ACCESS_DENIED;
+                }
+
+                if (wants_delete && is_non_empty_directory(c, *f))
+                {
+                    return STATUS_DIRECTORY_NOT_EMPTY;
                 }
 
                 c.win_emu.callbacks.on_generic_access(wants_delete ? "Marking for deletion" : "Clearing deletion marker", f->name);
