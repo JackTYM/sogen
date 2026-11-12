@@ -35,6 +35,7 @@ CALL :collect archiveint.dll
 CALL :collect avicap32.dll
 CALL :collect avifil32.dll
 CALL :collect concrt140.dll
+CALL :collect dciman32.dll
 CALL :collect dfscli.dll
 CALL :collect fontsub.dll
 CALL :collect hlink.dll
