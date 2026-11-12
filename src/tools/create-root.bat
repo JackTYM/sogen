@@ -31,6 +31,31 @@ REG SAVE HKLM\SOFTWARE %EMU_REGDIR%\SOFTWARE /Y
 REG SAVE HKLM\SYSTEM %EMU_REGDIR%\SYSTEM /Y
 COPY /B /Y C:\Users\Default\NTUSER.DAT "%EMU_REGDIR%\NTUSER.DAT"
 
+CALL :collect archiveint.dll
+CALL :collect avicap32.dll
+CALL :collect avifil32.dll
+CALL :collect concrt140.dll
+CALL :collect dfscli.dll
+CALL :collect fontsub.dll
+CALL :collect hlink.dll
+CALL :collect mfc140.dll
+CALL :collect mfc140u.dll
+CALL :collect msls31.dll
+CALL :collect msvcp140_1.dll
+CALL :collect msvcp140_2.dll
+CALL :collect msvcp140_codecvt_ids.dll
+CALL :collect msvfw32.dll
+CALL :collect prntvpt.dll
+CALL :collect riched20.dll
+CALL :collect shfolder.dll
+CALL :collect snmpapi.dll
+CALL :collect vccorlib140.dll
+CALL :collect vcomp140.dll
+CALL :collect wmasf.dll
+CALL :collect wmvcore.dll
+CALL :collect xmllite.dll
+CALL :collect zipfldr.dll
+CALL :collect l_intl.nls
 CALL :collect advapi32.dll
 CALL :collect bcrypt.dll
 CALL :collect bcryptprimitives.dll
