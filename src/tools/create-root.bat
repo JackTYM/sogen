@@ -128,6 +128,9 @@ CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
 CALL :collect mmdevapi.dll
 CALL :collect audioses.dll
+CALL :collect rdpendp.dll
+CALL :collect_file "%WINDIR%\System32\en-US", rdpendp.dll.mui, %EMU_SYSDIR%\en-us
+CALL :collect_file "%WINDIR%\SysWOW64\en-US", rdpendp.dll.mui, %EMU_SYSDIR_WOW64%\en-us
 CALL :collect avrt.dll
 CALL :collect resourcepolicyclient.dll
 CALL :collect mobilenetworking.dll
