@@ -50,6 +50,8 @@ CALL :collect prntvpt.dll
 CALL :collect riched20.dll
 CALL :collect shfolder.dll
 CALL :collect snmpapi.dll
+CALL :collect stdole2.tlb
+CALL :collect stdole32.tlb
 CALL :collect vccorlib140.dll
 CALL :collect vcomp140.dll
 CALL :collect wmasf.dll
