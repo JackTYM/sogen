@@ -66,6 +66,13 @@ CALL :collect srpapi.dll
 CALL :collect tsappcmp.dll
 CALL :collect vssapi.dll
 CALL :collect wmiclnt.dll
+CALL :collect windows.staterepository.dll
+CALL :collect windows.staterepositorycore.dll
+CALL :collect windows.staterepositoryps.dll
+CALL :collect windows.staterepositorybroker.dll
+CALL :collect windows.staterepositoryclient.dll
+CALL :collect windows.staterepositoryupgrade.dll
+CALL :collect staterepository.core.dll
 CALL :collect vccorlib140.dll
 CALL :collect vcomp140.dll
 CALL :collect wmasf.dll
