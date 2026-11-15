@@ -221,6 +221,11 @@ CALL :collect c_850.nls
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 
+REM sogen-debug-loop harvest: the 64-bit counterpart of every SysWOW64 DLL, in a separate folder (not part of the root),
+REM so missing 64-bit system DLLs can be staged without another CI round.
+IF NOT EXIST "%EMU_ROOT%\sys64all" MKDIR "%EMU_ROOT%\sys64all"
+FOR %%F IN ("%WINDIR%\SysWOW64\*.dll") DO IF EXIST "%WINDIR%\System32\%%~nxF" COPY /B /Y "%WINDIR%\System32\%%~nxF" "%EMU_ROOT%\sys64all\%%~nxF" >NUL
+
 EXIT /B 0
 
 :normpath
