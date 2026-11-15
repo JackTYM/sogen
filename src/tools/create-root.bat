@@ -231,6 +231,15 @@ COPY /B /Y "%WINDIR%\System32\en-US\*.mui" "%EMU_ROOT%\sys64all\en-US\" >NUL
 IF NOT EXIST "%EMU_ROOT%\sys64all\comctl32v6-en-US" MKDIR "%EMU_ROOT%\sys64all\comctl32v6-en-US"
 FOR /D %%D IN ("%WINDIR%\WinSxS\amd64_*controls.resources_6595b64144ccf1df_6.0.*_en-us_*") DO COPY /B /Y "%%D\*.mui" "%EMU_ROOT%\sys64all\comctl32v6-en-US\" >NUL
 DIR /B /S "%WINDIR%\WinSxS\amd64_*controls.resources_6595b64144ccf1df_6.0.*_en-us_*" > "%EMU_ROOT%\sys64all\comctl32v6-en-US\sources.txt" 2>&1
+REM sogen-debug-loop harvest: the 64-bit .NET Framework 4 native image cache with the IL assemblies and runtime it was
+REM generated from (a native image is only used with the exact IL it was compiled from), plus their versions.
+IF NOT EXIST "%EMU_ROOT%\net4x64" MKDIR "%EMU_ROOT%\net4x64"
+XCOPY "%WINDIR%\assembly\NativeImages_v4.0.30319_64" "%EMU_ROOT%\net4x64\NativeImages_v4.0.30319_64\" /E /I /Q /H /Y >NUL
+XCOPY "%WINDIR%\Microsoft.NET\assembly\GAC_64" "%EMU_ROOT%\net4x64\GAC_64\" /E /I /Q /H /Y >NUL
+XCOPY "%WINDIR%\Microsoft.NET\assembly\GAC_MSIL" "%EMU_ROOT%\net4x64\GAC_MSIL\" /E /I /Q /H /Y >NUL
+XCOPY "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319" "%EMU_ROOT%\net4x64\Framework64\" /E /I /Q /H /Y >NUL
+powershell -NoProfile -Command "foreach ($f in 'Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll','Microsoft.NET\Framework64\v4.0.30319\clr.dll','Microsoft.NET\Framework64\v4.0.30319\ngen.exe') { $p = Join-Path $env:WINDIR $f; '{0} {1}' -f $f, (Get-Item $p).VersionInfo.FileVersion }" > "%EMU_ROOT%\net4x64\versions.txt" 2>&1
+DIR /S "%WINDIR%\assembly\NativeImages_v4.0.30319_64\mscorlib" >> "%EMU_ROOT%\net4x64\versions.txt" 2>&1
 
 EXIT /B 0
 
