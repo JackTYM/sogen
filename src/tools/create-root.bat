@@ -231,6 +231,9 @@ COPY /B /Y "%WINDIR%\System32\en-US\*.mui" "%EMU_ROOT%\sys64all\en-US\" >NUL
 IF NOT EXIST "%EMU_ROOT%\sys64all\comctl32v6-en-US" MKDIR "%EMU_ROOT%\sys64all\comctl32v6-en-US"
 FOR /D %%D IN ("%WINDIR%\WinSxS\amd64_*controls.resources_6595b64144ccf1df_6.0.*_en-us_*") DO COPY /B /Y "%%D\*.mui" "%EMU_ROOT%\sys64all\comctl32v6-en-US\" >NUL
 DIR /B /S "%WINDIR%\WinSxS\amd64_*controls.resources_6595b64144ccf1df_6.0.*_en-us_*" > "%EMU_ROOT%\sys64all\comctl32v6-en-US\sources.txt" 2>&1
+REM sogen-debug-loop harvest: C:\Windows\SystemResources (*.mun: the resource sections of system DLLs since
+REM Windows 10 1903; propsys.dll loads its schema resources from PROPSYS.dll.mun, missing in every root so far).
+XCOPY "%WINDIR%\SystemResources" "%EMU_WINDIR%\SystemResources\" /E /I /Q /H /Y >NUL
 REM sogen-debug-loop harvest: the 64-bit .NET Framework 4 native image cache with the IL assemblies and runtime it was
 REM generated from (a native image is only used with the exact IL it was compiled from), plus their versions.
 IF NOT EXIST "%EMU_ROOT%\net4x64" MKDIR "%EMU_ROOT%\net4x64"
