@@ -225,6 +225,10 @@ REM sogen-debug-loop harvest: the 64-bit counterpart of every SysWOW64 DLL, in a
 REM so missing 64-bit system DLLs can be staged without another CI round.
 IF NOT EXIST "%EMU_ROOT%\sys64all" MKDIR "%EMU_ROOT%\sys64all"
 FOR %%F IN ("%WINDIR%\SysWOW64\*.dll") DO IF EXIST "%WINDIR%\System32\%%~nxF" COPY /B /Y "%WINDIR%\System32\%%~nxF" "%EMU_ROOT%\sys64all\%%~nxF" >NUL
+REM sogen-debug-loop harvest: the 64-bit-only System32 DLLs (no SysWOW64 twin, so sys64all misses them: service DLLs
+REM such as nsisvc.dll, and winnsi/tokenbinding-style helpers), in a separate folder (not part of the root).
+IF NOT EXIST "%EMU_ROOT%\sys64rest" MKDIR "%EMU_ROOT%\sys64rest"
+FOR %%F IN ("%WINDIR%\System32\*.dll") DO IF NOT EXIST "%WINDIR%\SysWOW64\%%~nxF" COPY /B /Y "%%F" "%EMU_ROOT%\sys64rest\%%~nxF" >NUL
 REM sogen-debug-loop harvest: English MUI files for System32 and for comctl32 v6 (its resources assembly in WinSxS).
 IF NOT EXIST "%EMU_ROOT%\sys64all\en-US" MKDIR "%EMU_ROOT%\sys64all\en-US"
 COPY /B /Y "%WINDIR%\System32\en-US\*.mui" "%EMU_ROOT%\sys64all\en-US\" >NUL
