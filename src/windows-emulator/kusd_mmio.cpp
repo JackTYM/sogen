@@ -119,6 +119,55 @@ namespace sogen
         }
     }
 
+    namespace
+    {
+        constexpr std::array KSYSTEM_TIME_OFFSETS{offsetof(KUSER_SHARED_DATA64, InterruptTime), offsetof(KUSER_SHARED_DATA64, SystemTime),
+                                                  offsetof(KUSER_SHARED_DATA64, TickCount)};
+
+        // Guests read a KSYSTEM_TIME without a lock: High1Time, LowPart, then High2Time, retrying until both highs match.
+        // The kernel stores High2Time, LowPart and High1Time in that order, and a reader only sees a consistent value if
+        // those stores become visible in that order, which a plain copy of the page does not guarantee.
+        template <typename Sink>
+        void publish_kusd(const KUSER_SHARED_DATA64& kusd, const uint64_t begin, const uint64_t end, const Sink& sink)
+        {
+            const auto* image = reinterpret_cast<const uint8_t*>(&kusd);
+            const auto copy = [&](const uint64_t from, const uint64_t to) {
+                if (from < to)
+                {
+                    sink(from, image + from, static_cast<size_t>(to - from));
+                }
+            };
+
+            const auto contains = [&](const size_t offset) { return offset >= begin && offset + sizeof(KSYSTEM_TIME) <= end; };
+
+            uint64_t cursor = begin;
+            for (const auto offset : KSYSTEM_TIME_OFFSETS)
+            {
+                if (contains(offset))
+                {
+                    copy(cursor, offset);
+                    cursor = offset + sizeof(KSYSTEM_TIME);
+                }
+            }
+            copy(cursor, end);
+
+            for (const auto offset : KSYSTEM_TIME_OFFSETS)
+            {
+                if (!contains(offset))
+                {
+                    continue;
+                }
+
+                for (const auto member :
+                     {offsetof(KSYSTEM_TIME, High2Time), offsetof(KSYSTEM_TIME, LowPart), offsetof(KSYSTEM_TIME, High1Time)})
+                {
+                    std::atomic_thread_fence(std::memory_order_release);
+                    sink(offset + member, image + offset + member, sizeof(uint32_t));
+                }
+            }
+        }
+    }
+
     void apply_arm64_processor(KUSER_SHARED_DATA64& kusd, const uint64_t isar0, const uint64_t isar1)
     {
         const auto field = [](const uint64_t value, const unsigned shift) { return (value >> shift) & 0xF; };
@@ -260,19 +309,9 @@ namespace sogen
 
     void kusd_mmio::write_page()
     {
-        // Guests read KSYSTEM_TIME without locking: High1Time, then LowPart, retrying until High2Time matches. That
-        // only works if High2Time is written before LowPart and High1Time after it, but copying the page writes
-        // LowPart first. Writing the new High2Time values ahead of the copy restores the order.
-        const auto write_high2_time = [this](const size_t offset, const volatile KSYSTEM_TIME& time) {
-            const LONG high2_time = time.High2Time;
-            this->memory_->write_memory(KUSD_ADDRESS + offset + offsetof(KSYSTEM_TIME, High2Time), &high2_time, sizeof(high2_time));
-        };
-
-        write_high2_time(offsetof(KUSER_SHARED_DATA64, InterruptTime), this->kusd_.InterruptTime);
-        write_high2_time(offsetof(KUSER_SHARED_DATA64, SystemTime), this->kusd_.SystemTime);
-        write_high2_time(offsetof(KUSER_SHARED_DATA64, TickCount), this->kusd_.TickCount.TickCount);
-
-        this->memory_->write_memory(KUSD_ADDRESS, &this->kusd_, KUSD_SIZE);
+        publish_kusd(this->kusd_, 0, KUSD_SIZE, [this](const uint64_t offset, const void* data, const size_t size) {
+            this->memory_->write_memory(KUSD_ADDRESS + offset, data, size);
+        });
     }
 
     void kusd_mmio::serialize(utils::buffer_serializer& buffer) const
@@ -337,27 +376,10 @@ namespace sogen
 
         const auto end = addr + size;
         const auto valid_end = std::min(end, static_cast<uint64_t>(KUSD_SIZE));
-        const auto real_size = valid_end - addr;
 
-        // Same ordering problem write_page describes: a copy writes LowPart before High1Time, so the new High2Time
-        // has to reach the destination first. It matters when the destination is a page a running vCPU reads.
-        const auto write_high2_time = [&](const size_t offset, const volatile KSYSTEM_TIME& time) {
-            const auto field = offset + offsetof(KSYSTEM_TIME, High2Time);
-            if (field < addr || field + sizeof(LONG) > valid_end)
-            {
-                return;
-            }
-
-            const LONG high2_time = time.High2Time;
-            memcpy(static_cast<uint8_t*>(data) + (field - addr), &high2_time, sizeof(high2_time));
-        };
-
-        write_high2_time(offsetof(KUSER_SHARED_DATA64, InterruptTime), this->kusd_.InterruptTime);
-        write_high2_time(offsetof(KUSER_SHARED_DATA64, SystemTime), this->kusd_.SystemTime);
-        write_high2_time(offsetof(KUSER_SHARED_DATA64, TickCount), this->kusd_.TickCount.TickCount);
-
-        const auto* kusd_buffer = reinterpret_cast<uint8_t*>(&this->kusd_);
-        memcpy(data, kusd_buffer + addr, static_cast<size_t>(real_size));
+        publish_kusd(this->kusd_, addr, valid_end, [&](const uint64_t offset, const void* source, const size_t length) {
+            memcpy(static_cast<uint8_t*>(data) + (offset - addr), source, length);
+        });
     }
 
     uint64_t kusd_mmio::address()
