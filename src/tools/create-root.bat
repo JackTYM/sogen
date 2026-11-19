@@ -229,6 +229,10 @@ REM sogen-debug-loop harvest: the 64-bit-only System32 DLLs (no SysWOW64 twin, s
 REM such as nsisvc.dll, and winnsi/tokenbinding-style helpers), in a separate folder (not part of the root).
 IF NOT EXIST "%EMU_ROOT%\sys64rest" MKDIR "%EMU_ROOT%\sys64rest"
 FOR %%F IN ("%WINDIR%\System32\*.dll") DO IF NOT EXIST "%WINDIR%\SysWOW64\%%~nxF" COPY /B /Y "%%F" "%EMU_ROOT%\sys64rest\%%~nxF" >NUL
+REM sogen-debug-loop probe (harvest only): the network store (NSI) requests iphlpapi and cryptnet make on this Windows
+REM build and the records they get back, so the emulator can model a network adapter (src\tools\nsiprobe\nsiprobe.c).
+IF NOT EXIST "%EMU_ROOT%\probe" MKDIR "%EMU_ROOT%\probe"
+"%~dp0nsiprobe\nsiprobe.exe" "%EMU_ROOT%\probe\nsiprobe.txt" > "%EMU_ROOT%\probe\nsiprobe-console.txt" 2>&1
 REM sogen-debug-loop harvest: English MUI files for System32 and for comctl32 v6 (its resources assembly in WinSxS).
 IF NOT EXIST "%EMU_ROOT%\sys64all\en-US" MKDIR "%EMU_ROOT%\sys64all\en-US"
 COPY /B /Y "%WINDIR%\System32\en-US\*.mui" "%EMU_ROOT%\sys64all\en-US\" >NUL
