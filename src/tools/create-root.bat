@@ -110,6 +110,7 @@ CALL :collect gdiplus.dll
 CALL :collect glu32.dll
 CALL :collect hal.dll
 CALL :collect hid.dll
+CALL :collect iconcodecservice.dll
 CALL :collect imageres.dll
 CALL :collect imm32.dll
 CALL :collect imagehlp.dll
@@ -191,6 +192,7 @@ CALL :collect samlib.dll
 CALL :collect schannel.dll
 CALL :collect sechost.dll
 CALL :collect secur32.dll
+CALL :collect sensapi.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
 CALL :collect shell32.dll
