@@ -242,6 +242,16 @@ DIR /B /S "%WINDIR%\WinSxS\amd64_*controls.resources_6595b64144ccf1df_6.0.*_en-u
 REM sogen-debug-loop harvest: C:\Windows\SystemResources (*.mun: the resource sections of system DLLs since
 REM Windows 10 1903; propsys.dll loads its schema resources from PROPSYS.dll.mun, missing in every root so far).
 XCOPY "%WINDIR%\SystemResources" "%EMU_WINDIR%\SystemResources\" /E /I /Q /H /Y >NUL
+REM sogen-debug-loop harvest: the WMI folders of this Windows build (System32\wbem and SysWOW64\wbem with their
+REM MUIs and the repository), in a separate folder (not part of the root). The roots so far carry 26100 WMI binaries
+REM on a 20348 ntdll (wmiprvsd.dll imports RtlGetImageFileMachines, which 20348 lacks). Winmgmt is stopped while the
+REM repository is copied, then started again.
+IF NOT EXIST "%EMU_ROOT%\wbem20348" MKDIR "%EMU_ROOT%\wbem20348"
+NET STOP winmgmt /y > "%EMU_ROOT%\wbem20348\net-stop.txt" 2>&1
+XCOPY "%WINDIR%\System32\wbem" "%EMU_ROOT%\wbem20348\System32\wbem\" /E /I /Q /H /Y /C > "%EMU_ROOT%\wbem20348\xcopy-sys32.txt" 2>&1
+XCOPY "%WINDIR%\SysWOW64\wbem" "%EMU_ROOT%\wbem20348\SysWOW64\wbem\" /E /I /Q /H /Y /C > "%EMU_ROOT%\wbem20348\xcopy-wow64.txt" 2>&1
+NET START winmgmt >> "%EMU_ROOT%\wbem20348\net-stop.txt" 2>&1
+VER > "%EMU_ROOT%\wbem20348\ver.txt"
 REM sogen-debug-loop harvest: the 64-bit .NET Framework 4 native image cache with the IL assemblies and runtime it was
 REM generated from (a native image is only used with the exact IL it was compiled from), plus their versions.
 IF NOT EXIST "%EMU_ROOT%\net4x64" MKDIR "%EMU_ROOT%\net4x64"
