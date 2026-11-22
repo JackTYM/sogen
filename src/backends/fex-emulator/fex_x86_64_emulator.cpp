@@ -69,6 +69,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <mach/mach_time.h>
 #include <optional>
 #include <random>
 #include <set>
@@ -2312,6 +2313,13 @@ namespace sogen::fex
         {
             if (!this->try_write_memory(address, data, size))
             {
+                if (std::getenv("MV1_TRACE"))
+                {
+                    void* frames[40];
+                    const int n = backtrace(frames, 40);
+                    fprintf(stderr, "[mv1] write_memory FAILED at %llx size %zx; backtrace:\n", (unsigned long long)address, size);
+                    backtrace_symbols_fd(frames, n, 2);
+                }
                 std::array<char, 128> buf{};
                 snprintf(buf.data(), buf.size(), "Failed to write FEX guest memory at 0x%llx size=0x%zx",
                          static_cast<unsigned long long>(address), size);
@@ -4455,7 +4463,7 @@ namespace sogen::fex
                 }
                 return true;
             case pending_fault_kind::interrupt:
-                if (dispatch.vector == invalid_opcode_vector && (this->run_trapped_instruction() || this->run_invalid_instruction_hooks()))
+                if (dispatch.vector == invalid_opcode_vector && (this->run_trapped_instruction(vcpu) || this->run_invalid_instruction_hooks(vcpu)))
                 {
                     return true;
                 }
@@ -4626,9 +4634,9 @@ namespace sogen::fex
 
         // A trapped RDTSC, RDTSCP or CPUID: its hooks run, and unless one skips it, its native result is produced
         // here, since the compiled code no longer computes it.
-        bool run_trapped_instruction()
+        bool run_trapped_instruction(fex_vcpu& vcpu)
         {
-            const auto rip = this->reg(x86_register::rip);
+            const auto rip = vcpu.reg(x86_register::rip);
             std::array<uint8_t, 3> code{};
             if (!this->try_read_memory(rip, code.data(), code.size()) || code[0] != 0x0F)
             {
@@ -4658,7 +4666,7 @@ namespace sogen::fex
             bool skip = false;
             for (auto& [_, hook] : this->instruction_hooks_)
             {
-                if (hook.type == type && hook.callback && hook.callback(*this, 0) == instruction_hook_continuation::skip_instruction)
+                if (hook.type == type && hook.callback && hook.callback(vcpu, 0) == instruction_hook_continuation::skip_instruction)
                 {
                     skip = true;
                 }
@@ -4666,54 +4674,54 @@ namespace sogen::fex
 
             if (!skip)
             {
-                this->run_native_instruction(type);
+                this->run_native_instruction(vcpu, type);
             }
 
-            this->reg(x86_register::rip, this->reg(x86_register::rip) + length);
+            vcpu.reg(x86_register::rip, vcpu.reg(x86_register::rip) + length);
             return true;
         }
 
-        bool run_invalid_instruction_hooks()
+        bool run_invalid_instruction_hooks(fex_vcpu& vcpu)
         {
-            const auto rip = this->reg(x86_register::rip);
+            const auto rip = vcpu.reg(x86_register::rip);
             bool consumed = false;
             for (auto& [_, hook] : this->instruction_hooks_)
             {
                 if (hook.type == x86_hookable_instructions::invalid && hook.callback &&
-                    hook.callback(*this, 0) == instruction_hook_continuation::skip_instruction)
+                    hook.callback(vcpu, 0) == instruction_hook_continuation::skip_instruction)
                 {
                     consumed = true;
                 }
             }
 
-            if (consumed && this->reg(x86_register::rip) == rip)
+            if (consumed && vcpu.reg(x86_register::rip) == rip)
             {
-                this->reg(x86_register::rip, rip + 2);
+                vcpu.reg(x86_register::rip, rip + 2);
             }
 
             return consumed;
         }
 
-        void run_native_instruction(const x86_hookable_instructions type)
+        void run_native_instruction(fex_vcpu& vcpu, const x86_hookable_instructions type)
         {
             if (type == x86_hookable_instructions::cpuid)
             {
                 const auto result =
-                    this->context_->RunCPUIDFunction(this->reg<uint32_t>(x86_register::eax), this->reg<uint32_t>(x86_register::ecx));
-                this->reg(x86_register::rax, uint64_t{result.eax});
-                this->reg(x86_register::rbx, uint64_t{result.ebx});
-                this->reg(x86_register::rcx, uint64_t{result.ecx});
-                this->reg(x86_register::rdx, uint64_t{result.edx});
+                    this->context_->RunCPUIDFunction(vcpu.reg<uint32_t>(x86_register::eax), vcpu.reg<uint32_t>(x86_register::ecx));
+                vcpu.reg(x86_register::rax, uint64_t{result.eax});
+                vcpu.reg(x86_register::rbx, uint64_t{result.ebx});
+                vcpu.reg(x86_register::rcx, uint64_t{result.ecx});
+                vcpu.reg(x86_register::rdx, uint64_t{result.edx});
                 return;
             }
 
             const auto ticks = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-            this->reg(x86_register::rax, ticks & 0xFFFFFFFF);
-            this->reg(x86_register::rdx, ticks >> 32);
+            vcpu.reg(x86_register::rax, ticks & 0xFFFFFFFF);
+            vcpu.reg(x86_register::rdx, ticks >> 32);
             if (type == x86_hookable_instructions::rdtscp)
             {
-                this->reg(x86_register::rcx, uint64_t{0});
+                vcpu.reg(x86_register::rcx, uint64_t{0});
             }
         }
 
@@ -5236,6 +5244,18 @@ namespace sogen::fex
 
         bool handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
         {
+            static std::atomic<uint64_t> mv1_mmio_faults{0};
+            static std::atomic<uint64_t> mv1_kusd_0308{0};
+            static std::atomic<bool> mv1_reg{false};
+            if (!mv1_reg.exchange(true))
+            {
+                std::atexit([] { fprintf(stderr, "[prof] mmio faults=%llu of which addr 0x7ffe0308=%llu\n", (unsigned long long)mv1_mmio_faults.load(), (unsigned long long)mv1_kusd_0308.load()); });
+            }
+            mv1_mmio_faults.fetch_add(1);
+            if (fault_addr == 0x7ffe0308)
+            {
+                mv1_kusd_0308.fetch_add(1);
+            }
             const uint64_t pc = get_host_pc(uctx);
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
             const auto decoded = decode_arm64_load(insn);
@@ -5740,6 +5760,21 @@ namespace sogen::fex
 
         void run(fex_vcpu& vcpu, size_t count)
         {
+            static std::mutex mv1_serial;
+            std::unique_lock<std::mutex> mv1_lock(mv1_serial, std::defer_lock);
+            if (std::getenv("MV1_SERIAL"))
+            {
+                mv1_lock.lock();
+            }
+            if (std::getenv("MV1_TRACE"))
+            {
+                const auto& st = vcpu.cpu_state();
+                fprintf(stderr, "[mv1] run vcpu=%zu thread=%p rip=%llx rsp=%llx rcx=%llx rdx=%llx gs=%llx cs=%x callret=%llx pad1=%llx tid=%llu\n", vcpu.index(),
+                        (void*)vcpu.thread_, (unsigned long long)st.rip, (unsigned long long)st.gregs[detail::greg_rsp],
+                        (unsigned long long)st.gregs[detail::greg_rcx], (unsigned long long)st.gregs[detail::greg_rdx],
+                        (unsigned long long)st.gs_cached, (unsigned)st.cs_idx, (unsigned long long)st.callret_sp,
+                        (unsigned long long)st._pad1, (unsigned long long)pthread_mach_thread_np(pthread_self()));
+            }
             if (count != 0)
             {
                 if (!this->counts_instructions_)
@@ -5956,6 +5991,11 @@ namespace sogen::fex
 
         void invalidate_code_range(uint64_t address, size_t size)
         {
+            static std::atomic<uint64_t> mv1_inval{0};
+            if (std::getenv("MV1_PROF") && (mv1_inval.fetch_add(1) % 20000) == 0)
+            {
+                fprintf(stderr, "[prof] invalidate_code_range #%llu addr=%llx size=%zx\n", (unsigned long long)mv1_inval.load(), (unsigned long long)address, size);
+            }
             if (this->context_)
             {
 #ifdef __APPLE__
@@ -6408,6 +6448,12 @@ namespace sogen::fex
     std::vector<std::byte> fex_vcpu::save_registers() const
     {
         const auto& state = this->cpu_state();
+        if (std::getenv("MV1_TRACE"))
+        {
+            fprintf(stderr, "[mv1] save vcpu=%zu rip=%llx rsp=%llx gs=%llx callret=%llx pad1=%llx\n", this->index_, (unsigned long long)state.rip,
+                    (unsigned long long)state.gregs[detail::greg_rsp], (unsigned long long)state.gs_cached, (unsigned long long)state.callret_sp,
+                    (unsigned long long)state._pad1);
+        }
         std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState) + sizeof(this->emulator_.instance_id_));
         std::memcpy(data.data(), &state, sizeof(state));
         std::memcpy(data.data() + sizeof(state), &this->emulator_.instance_id_, sizeof(this->emulator_.instance_id_));
@@ -6425,6 +6471,12 @@ namespace sogen::fex
 
         std::memcpy(&restored, register_data.data(), sizeof(restored));
         std::memcpy(&instance_id, register_data.data() + sizeof(restored), sizeof(instance_id));
+        if (std::getenv("MV1_TRACE"))
+        {
+            fprintf(stderr, "[mv1] restore vcpu=%zu thread=%p rip=%llx rsp=%llx gs=%llx callret=%llx pad1=%llx\n", this->index_, (void*)this->thread_,
+                    (unsigned long long)restored.rip, (unsigned long long)restored.gregs[detail::greg_rsp], (unsigned long long)restored.gs_cached,
+                    (unsigned long long)restored.callret_sp, (unsigned long long)restored._pad1);
+        }
 
         // The call-ret buffer, descriptor tables and JIT blocks are host memory of the emulator that saved the state,
         // so a state from a saved process gets its own.
@@ -6507,12 +6559,31 @@ namespace sogen::fex
         // re-entry or, for a redirect, branches into the middle of an instruction at target - 2.
         auto& vcpu = *t_running_vcpu;
         auto* hook = this->emulator_.syscall_hook_;
+        static std::atomic<uint64_t> prof_calls{0}, prof_hook{0}, prof_tail{0}, prof_gap{0};
+        static thread_local uint64_t prof_last_end = 0;
+        static std::atomic<bool> prof_registered{false};
+        static const bool prof_on = std::getenv("MV1_PROF") != nullptr;
+        const uint64_t p0 = prof_on ? mach_absolute_time() : 0;
+        if (prof_on && prof_last_end != 0 && p0 - prof_last_end < 2000000)
+        {
+            prof_gap.fetch_add(p0 - prof_last_end);
+        }
+        if (prof_on && !prof_registered.exchange(true))
+        {
+            std::atexit([] {
+                mach_timebase_info_data_t tb{};
+                mach_timebase_info(&tb);
+                const double ns = static_cast<double>(tb.numer) / tb.denom;
+                const auto n = prof_calls.load();
+                fprintf(stderr, "[prof] syscalls=%llu hook=%.0f ns/call tail(refresh+arm)=%.0f ns/call gap(guest+jit+exit)=%.0f ns/call\n", (unsigned long long)n,
+                        prof_hook.load() * ns / n, prof_tail.load() * ns / n, prof_gap.load() * ns / n);
+            });
+        }
         if (hook != nullptr && hook->callback)
         {
-            // The Windows syscall layer reads/writes guest registers itself through the emulator, so the
-            // hook needs no data argument here. It places the NT status in RAX before returning.
             hook->callback(vcpu, 0);
         }
+        const uint64_t p1 = prof_on ? mach_absolute_time() : 0;
 
         this->emulator_.refresh_mmio_backings();
         vcpu.cpu_state().rip += 2;
@@ -6527,6 +6598,14 @@ namespace sogen::fex
             this->emulator_.arm_watchpoints_apple(vcpu);
         }
 #endif
+        if (prof_on)
+        {
+            const uint64_t p2 = mach_absolute_time();
+            prof_calls.fetch_add(1);
+            prof_hook.fetch_add(p1 - p0);
+            prof_tail.fetch_add(p2 - p1);
+            prof_last_end = p2;
+        }
 
         // FEX writes our return value into guest RAX; hand back whatever the hook already set so the
         // value is preserved.
