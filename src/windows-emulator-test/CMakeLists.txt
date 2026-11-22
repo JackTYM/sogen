@@ -10,6 +10,7 @@ list(REMOVE_ITEM SRC_FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/arm64_backend_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/x86_64_backend_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/fex_hvf_spike_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/fex_mv_proto_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/kvm_exception_context_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/wow64_emulation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/whp_guest_page_slabs_test.cpp"
@@ -49,6 +50,13 @@ if(SOGEN_ENABLE_FEX AND SOGEN_ENABLE_HVF)
   sogen_targets_set_folder("tests" fex-hvf-spike-test)
   sogen_enable_hypervisor_entitlement(fex-hvf-spike-test)
   sogen_target_skip_clang_tidy(fex-hvf-spike-test)
+endif()
+
+if(SOGEN_ENABLE_FEX)
+  add_executable(fex-mv-proto-test fex_mv_proto_test.cpp)
+  target_link_libraries(fex-mv-proto-test PRIVATE windows-emulator backend-selection fex-emulator gtest gtest_main)
+  sogen_enable_hypervisor_entitlement(fex-mv-proto-test)
+  sogen_target_skip_clang_tidy(fex-mv-proto-test)
 endif()
 
 add_executable(x86-64-backend-test x86_64_backend_test.cpp)

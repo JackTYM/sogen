@@ -73,7 +73,7 @@ namespace sogen
 
 #if defined(SOGEN_ENABLE_FEX)
             case backend_type::fex:
-                return fex::create_x86_64_emulator();
+                return fex::create_x86_64_emulator(vcpu_count);
 #endif
 
 #if defined(SOGEN_ENABLE_HVF) && defined(__x86_64__)
@@ -82,7 +82,7 @@ namespace sogen
 #elif defined(SOGEN_ENABLE_HVF) && defined(SOGEN_ENABLE_FEX)
             // Apple Silicon runs x86-64 code in Hypervisor.framework through FEX's translation.
             case backend_type::hvf:
-                return fex::create_hypervisor_x86_64_emulator();
+                return fex::create_hypervisor_x86_64_emulator(vcpu_count);
 #endif
 
             default:

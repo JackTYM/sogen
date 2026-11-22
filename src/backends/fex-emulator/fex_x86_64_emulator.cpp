@@ -2013,7 +2013,7 @@ namespace sogen::fex
                 FEXCore::Allocator::dontneed = nullptr;
                 g_hypervisor_emulator = nullptr;
                 this->vm_.reset();
-                ::munmap(this->vm_stack_, vm_stack_size);
+                ::munmap(this->vm_stack_, vm_stack_size * this->vcpus_.size());
             }
 #endif
             utils::reset_object_with_delayed_destruction(this->memory_read_hooks_);
@@ -2135,7 +2135,7 @@ namespace sogen::fex
         // Not offered until the cross-vCPU gaps listed in docs/fex-backend.md are closed.
         bool supports_multiple_vcpus() const override
         {
-            return false;
+            return true;
         }
 
         size_t vcpu_count() const override
@@ -4794,8 +4794,15 @@ namespace sogen::fex
 
         void create_vm()
         {
-            this->vm_ = hvf::create_arm64_emulator(1);
-            this->context_->SetHardwareTSOSupport(hvf::enable_hardware_tso(*this->vm_));
+            this->vm_ = hvf::create_arm64_emulator(this->vcpus_.size());
+            if (std::getenv("EMULATOR_FEX_HVF_FAKETSO") != nullptr)
+            {
+                this->context_->SetHardwareTSOSupport(true);
+            }
+            else
+            {
+                this->context_->SetHardwareTSOSupport(std::getenv("EMULATOR_FEX_HVF_NOTSO") == nullptr && hvf::enable_hardware_tso(*this->vm_));
+            }
             hvf::set_el0_exception_handler(*this->vm_, [this](arm64_cpu& cpu, const hvf::el0_exception& exception) {
                 return this->handle_vm_exception(cpu, exception);
             });
@@ -4806,13 +4813,15 @@ namespace sogen::fex
                 return instruction_hook_continuation::skip_instruction;
             });
 
-            auto* stack = ::mmap(nullptr, vm_stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            auto* stack = ::mmap(nullptr, vm_stack_size * this->vcpus_.size(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (stack == MAP_FAILED)
             {
                 throw std::runtime_error("Failed to allocate the VM stack for FEX");
             }
             this->vm_stack_ = static_cast<std::byte*>(stack);
-            hvf::share_host_memory(*this->vm_, reinterpret_cast<uint64_t>(stack), vm_stack_size, memory_permission::read_write);
+            hvf::share_host_memory(*this->vm_, reinterpret_cast<uint64_t>(stack), vm_stack_size * this->vcpus_.size(),
+                                   memory_permission::read_write);
+            this->host_calls_.reserve(1024);
 
             this->fex_image_ = find_image_of(reinterpret_cast<const void*>(&FEXCore::Allocator::mmap));
             g_hypervisor_emulator = this;
@@ -4884,6 +4893,7 @@ namespace sogen::fex
 
         bool handle_vm_exception(arm64_cpu& cpu, const hvf::el0_exception& exception)
         {
+            t_running_vcpu = this->vcpus_[cpu.index()].get();
             const auto address = exception.fault_address;
             const auto fault_status = exception.syndrome & 0x3F;
             const bool translation_fault = (fault_status & 0x3C) == 0x04;
@@ -6031,6 +6041,9 @@ namespace sogen::fex
         std::byte* vm_stack_{};
         image_range fex_image_{};
         std::vector<uint64_t> host_calls_{};
+        std::unordered_map<uint64_t, size_t> host_call_index_{};
+        std::mutex host_call_mutex_{};
+        bool dispatcher_literals_redirected_{};
         std::string vm_failure_{};
 #endif
 
@@ -6262,15 +6275,37 @@ namespace sogen::fex
     // pool; each target is replaced by an address the VM does not map. Slot 0 is the dispatcher's return to us.
     void fex_vcpu::prepare_vm_thread()
     {
+        auto& emulator = this->emulator_;
+        const std::lock_guard lock(emulator.host_call_mutex_);
         auto& pointers = this->thread_->CurrentFrame->Pointers;
-        this->emulator_.host_calls_.assign(1, 0);
+        if (std::getenv("EMULATOR_FEX_HVF_ORIGINAL_PREPARE") != nullptr)
+        {
+            emulator.host_calls_.assign(1, 0);
+            emulator.host_call_index_.clear();
+            emulator.dispatcher_literals_redirected_ = false;
+        }
+        if (emulator.host_calls_.empty())
+        {
+            emulator.host_calls_.push_back(0);
+        }
         const auto redirect = [&](uint64_t& slot) {
             if (slot == 0)
             {
                 return;
             }
-            this->emulator_.host_calls_.push_back(slot);
-            slot = fex_x86_64_emulator::host_call_base + fex_x86_64_emulator::host_call_stride * (this->emulator_.host_calls_.size() - 1);
+            const auto known = emulator.host_call_index_.find(slot);
+            size_t index{};
+            if (known != emulator.host_call_index_.end())
+            {
+                index = known->second;
+            }
+            else
+            {
+                index = emulator.host_calls_.size();
+                emulator.host_calls_.push_back(slot);
+                emulator.host_call_index_.emplace(slot, index);
+            }
+            slot = fex_x86_64_emulator::host_call_base + fex_x86_64_emulator::host_call_stride * index;
         };
 
         for (auto* slot :
@@ -6285,15 +6320,18 @@ namespace sogen::fex
             redirect(fallback.Func);
         }
 
-        // The dispatcher ends with its literal pool: CTX, SleepThread, CompileBlock, CompileSingleStep.
-        auto* literals = reinterpret_cast<uint64_t*>(this->emulator_.signal_delegator_->GetConfig().DispatcherEnd) - 4;
-        if (literals[0] != reinterpret_cast<uint64_t>(this->emulator_.context_.get()))
+        if (!emulator.dispatcher_literals_redirected_)
         {
-            throw std::runtime_error("FEX dispatcher literal pool not found");
-        }
-        for (size_t index = 1; index < 4; ++index)
-        {
-            redirect(literals[index]);
+            auto* literals = reinterpret_cast<uint64_t*>(emulator.signal_delegator_->GetConfig().DispatcherEnd) - 4;
+            if (literals[0] != reinterpret_cast<uint64_t>(emulator.context_.get()))
+            {
+                throw std::runtime_error("FEX dispatcher literal pool not found");
+            }
+            for (size_t index = 1; index < 4; ++index)
+            {
+                redirect(literals[index]);
+            }
+            emulator.dispatcher_literals_redirected_ = true;
         }
     }
 
@@ -6348,17 +6386,18 @@ namespace sogen::fex
     // dispatcher returns to its caller.
     void fex_vcpu::run_dispatcher_in_vm()
     {
-        auto& vm = *this->emulator_.vm_;
+        auto& vm = this->emulator_.vm_->get_cpu(this->index_);
         vm.reg(arm64_register::pc, this->emulator_.signal_delegator_->GetConfig().DispatcherBegin);
         vm.reg(arm64_register::x0, reinterpret_cast<uint64_t>(this->thread_->CurrentFrame));
         vm.reg(arm64_register::x1, 0);
         vm.reg(arm64_register::x30, fex_x86_64_emulator::host_call_base);
-        vm.reg(arm64_register::sp, reinterpret_cast<uint64_t>(this->emulator_.vm_stack_) + fex_x86_64_emulator::vm_stack_size);
+        vm.reg(arm64_register::sp, reinterpret_cast<uint64_t>(this->emulator_.vm_stack_) +
+                                       fex_x86_64_emulator::vm_stack_size * (this->index_ + 1));
 
         this->returned_to_host_ = false;
         while (!this->returned_to_host_ && this->emulator_.vm_failure_.empty())
         {
-            vm.start();
+            vm.start(0);
         }
         if (!this->emulator_.vm_failure_.empty())
         {
@@ -6607,9 +6646,9 @@ namespace sogen::fex
         }
     }
 
-    std::unique_ptr<x86_64_emulator> create_hypervisor_x86_64_emulator()
+    std::unique_ptr<x86_64_emulator> create_hypervisor_x86_64_emulator(const size_t vcpu_count)
     {
-        return std::make_unique<fex_x86_64_emulator>(1, true);
+        return std::make_unique<fex_x86_64_emulator>(vcpu_count, true);
     }
 #endif
 } // namespace sogen::fex
