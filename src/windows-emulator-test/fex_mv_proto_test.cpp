@@ -48,7 +48,11 @@ namespace sogen::test
             uint64_t gdt{};
             static constexpr uint64_t data_size = 64ull << 20;
             static constexpr uint64_t code_size = 2ull << 20;
-            std::atomic<uint64_t> syscalls[2]{};
+            struct alignas(128) padded_counter
+            {
+                std::atomic<uint64_t> value{};
+            };
+            padded_counter syscalls[2]{};
             uint64_t syscall_limit{};
 
             explicit rig(const size_t vcpus)
@@ -75,7 +79,7 @@ namespace sogen::test
                 }
                 emu->hook_instruction(x86_hookable_instructions::syscall, [this](cpu_interface& raw, uint64_t) {
                     auto& cpu = dynamic_cast<x86_64_cpu&>(raw);
-                    if (syscall_limit == 0 || ++syscalls[cpu.index()] >= syscall_limit)
+                    if (syscall_limit == 0 || ++syscalls[cpu.index()].value >= syscall_limit)
                     {
                         cpu.stop();
                     }
