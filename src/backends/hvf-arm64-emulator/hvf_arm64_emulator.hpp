@@ -86,4 +86,11 @@ namespace sogen::hvf
     HVF_ARM64_EMULATOR_DLL_STORAGE
 #endif
     void set_el0_exception_handler(arm64_emulator& vm, el0_exception_handler handler);
+
+    // Makes the VM's vCPUs order memory accesses like x86 (ACTLR_EL1.EnTSO), so that translated x64 code needs no
+    // ordering instructions of its own. Returns false on macOS before 15, which cannot do this.
+#if !SOGEN_BUILD_STATIC
+    HVF_ARM64_EMULATOR_DLL_STORAGE
+#endif
+    bool enable_hardware_tso(arm64_emulator& vm);
 }
