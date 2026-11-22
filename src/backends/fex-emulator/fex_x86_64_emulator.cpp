@@ -2135,7 +2135,7 @@ namespace sogen::fex
         // Not offered until the cross-vCPU gaps listed in docs/fex-backend.md are closed.
         bool supports_multiple_vcpus() const override
         {
-            return false;
+            return true;
         }
 
         size_t vcpu_count() const override
