@@ -59,6 +59,30 @@ namespace sogen::test
                 return value;
             }
 
+            struct toc_entry
+            {
+                uint32_t offset{};
+                uint32_t length{};
+                uint32_t format{};
+            };
+
+            static std::optional<toc_entry> find_toc_entry(const std::vector<std::byte>& blob, const uint32_t id)
+            {
+                const auto toc_offset = read_u32(blob, 16);
+                const auto toc_count = read_u32(blob, toc_offset + 4);
+                const auto toc_entries = read_u32(blob, toc_offset + 8);
+                for (uint32_t index = 0; index < toc_count; ++index)
+                {
+                    const size_t entry = toc_entries + index * 16;
+                    if (read_u32(blob, entry) == id)
+                    {
+                        return toc_entry{
+                            .offset = read_u32(blob, entry + 4), .length = read_u32(blob, entry + 8), .format = read_u32(blob, entry + 12)};
+                    }
+                }
+                return std::nullopt;
+            }
+
             struct window_class_entry
             {
                 std::u16string key{};
@@ -287,5 +311,150 @@ namespace sogen::test
         EXPECT_EQ(pseudokeys("<windowClass>Fen\xC3\xAAtre</windowClass><windowClass>\xC3\xBF</windowClass>"),
                   (std::vector<uint32_t>{0x1bc8410c, 0x178}));
         EXPECT_EQ(pseudokeys("<windowClass>\xC5\xB8</windowClass>"), (std::vector<uint32_t>{0x178}));
+    }
+
+    TEST_F(ActivationContextTest, EmitsSystemDefaultContextLikeWindows)
+    {
+        struct expected_assembly
+        {
+            uint32_t flags;
+            uint32_t pseudokey;
+            std::u16string_view name;
+        };
+
+        constexpr std::array roster{
+            expected_assembly{1, 0, u""},
+            expected_assembly{2, 0x1a26ef4e, u"Microsoft.Windows.SystemCompatible"},
+            expected_assembly{0, 0xf33271ba, u"Microsoft.Windows.IsolationAutomation"},
+            expected_assembly{0, 0x2d59495b, u"Microsoft.Windows.GdiPlus"},
+            expected_assembly{0, 0x32ceeacd, u"Microsoft.Windows.Common-Controls"},
+            expected_assembly{0, 0x38505fc8, u"Microsoft.Windows.IsolationAutomation.ProxyStub"},
+            expected_assembly{0, 0xb1280544, u"Microsoft.Windows.Common-Controls.Resources"},
+        };
+
+        struct expected_class
+        {
+            std::u16string_view key;
+            uint32_t pseudokey;
+            uint32_t key_offset;
+            uint32_t data_offset;
+            uint32_t data_length;
+        };
+
+        constexpr std::array classes{
+            expected_class{u"ToolbarWindow32", 0xc2202d0a, 0x2b4, 0x2d4, 82},
+            expected_class{u"ComboBoxEx32", 0x4b72e28f, 0x328, 0x344, 76},
+            expected_class{u"msctls_trackbar32", 0xbf8e2348, 0x390, 0x3b4, 86},
+            expected_class{u"msctls_updown32", 0x6dc3f6fd, 0x40c, 0x42c, 82},
+            expected_class{u"msctls_progress32", 0xeacb0f6d, 0x480, 0x4a4, 86},
+            expected_class{u"msctls_hotkey32", 0x62b796d2, 0x4fc, 0x51c, 82},
+            expected_class{u"msctls_statusbar32", 0x2a615cff, 0x570, 0x598, 88},
+            expected_class{u"SysHeader32", 0x51913e59, 0x5f0, 0x608, 74},
+            expected_class{u"SysListView32", 0xa5de204f, 0x654, 0x670, 78},
+            expected_class{u"SysTreeView32", 0x25002e4f, 0x6c0, 0x6dc, 78},
+            expected_class{u"SysTabControl32", 0xbe68a734, 0x72c, 0x74c, 82},
+            expected_class{u"SysIPAddress32", 0x9cd5b65f, 0x7a0, 0x7c0, 80},
+            expected_class{u"SysPager", 0xb1612216, 0x810, 0x824, 68},
+            expected_class{u"NativeFontCtl", 0x3ec77655, 0x868, 0x884, 78},
+            expected_class{u"Button", 0xb2d54652, 0x8d4, 0x8e4, 64},
+            expected_class{u"Static", 0x73d3dcce, 0x924, 0x934, 64},
+            expected_class{u"Listbox", 0x5214e84d, 0x974, 0x984, 66},
+            expected_class{u"ScrollBar", 0xab5fc3a6, 0x9c8, 0x9dc, 70},
+            expected_class{u"tooltips_class32", 0x8461e2c8, 0xa24, 0xa48, 84},
+            expected_class{u"ButtonListBox", 0x1645117b, 0xa9c, 0xab8, 78},
+            expected_class{u"SysAnimate32", 0x162381d3, 0xb08, 0xb24, 76},
+            expected_class{u"SysMonthCal32", 0x8cf964da, 0xb70, 0xb8c, 78},
+            expected_class{u"SysDateTimePick32", 0x321e02a8, 0xbdc, 0xc00, 86},
+            expected_class{u"ReBarWindow32", 0xf4e8060f, 0xc58, 0xc74, 78},
+            expected_class{u"Edit", 0xac1b740a, 0xcc4, 0xcd0, 60},
+            expected_class{u"Combobox", 0x6f945afd, 0xd0c, 0xd20, 68},
+            expected_class{u"ComboLBox", 0x9b53c04d, 0xd64, 0xd78, 70},
+        };
+
+        constexpr std::array<std::array<uint32_t, 6>, 11> chains{{
+            {0x44, 0x20c},
+            {0x5c, 0x14c, 0x23c, 0x284},
+            {0x74, 0x1dc},
+            {0xa4, 0x1f4},
+            {},
+            {0x8c, 0xd4, 0x134, 0x224},
+            {0x2c, 0xec, 0x104},
+            {0x194},
+            {0xbc, 0x11c, 0x17c, 0x1c4, 0x254, 0x29c},
+            {0x26c},
+            {0x164, 0x1ac},
+        }};
+        constexpr std::array<uint32_t, 11> chain_lengths{2, 4, 2, 2, 0, 4, 3, 1, 6, 1, 2};
+
+        const auto blob = sxs::build_system_default_activation_context();
+        EXPECT_EQ(read_u32(blob, 0), 0x78746341u);
+        EXPECT_EQ(read_u32(blob, 4), 32u);
+        EXPECT_EQ(read_u32(blob, 8), 1u);
+        EXPECT_EQ(read_u32(blob, 12), blob.size());
+        EXPECT_EQ(read_u32(blob, 16), 0xdcu);
+        EXPECT_EQ(read_u32(blob, 20), 0u);
+        EXPECT_EQ(read_u32(blob, 24), 0x20u);
+        EXPECT_EQ(read_u32(blob, 28), 0u);
+
+        const size_t roster_offset = read_u32(blob, 24);
+        EXPECT_EQ(read_u32(blob, roster_offset), 20u);
+        EXPECT_EQ(read_u32(blob, roster_offset + 4), 1u);
+        ASSERT_EQ(read_u32(blob, roster_offset + 8), roster.size());
+        EXPECT_EQ(read_u32(blob, roster_offset + 12), 0x34u);
+        for (size_t index = 0; index < roster.size(); ++index)
+        {
+            const size_t entry = read_u32(blob, roster_offset + 12) + index * 24;
+            EXPECT_EQ(read_u32(blob, entry), roster[index].flags);
+            EXPECT_EQ(read_u32(blob, entry + 4), roster[index].pseudokey);
+            EXPECT_EQ(read_string(blob, read_u32(blob, entry + 8), read_u32(blob, entry + 12)), roster[index].name);
+        }
+
+        const auto section = read_window_class_section(blob);
+        ASSERT_TRUE(section);
+        EXPECT_EQ(section->header_size, 44u);
+        EXPECT_EQ(section->flags, 1u);
+        ASSERT_EQ(section->entries.size(), classes.size());
+        for (size_t index = 0; index < classes.size(); ++index)
+        {
+            const auto& actual = section->entries[index];
+            const auto& wanted = classes[index];
+            EXPECT_EQ(actual.key, wanted.key);
+            EXPECT_EQ(actual.pseudokey, wanted.pseudokey);
+            EXPECT_EQ(actual.key_offset, wanted.key_offset);
+            EXPECT_EQ(actual.key_length, wanted.key.size() * sizeof(char16_t));
+            EXPECT_EQ(actual.data_offset, wanted.data_offset);
+            EXPECT_EQ(actual.data_length, wanted.data_length);
+            EXPECT_EQ(actual.roster_index, 4u);
+            EXPECT_EQ(actual.name_offset, 0x18u);
+            EXPECT_EQ(actual.name, wanted.key);
+            EXPECT_EQ(actual.module, u"comctl32.dll");
+            EXPECT_TRUE(actual.reachable_through_hash_table);
+        }
+
+        const auto toc = find_toc_entry(blob, 3);
+        ASSERT_TRUE(toc);
+        EXPECT_EQ(toc->length, 0xe8cu);
+        EXPECT_EQ(toc->format, 1u);
+        EXPECT_EQ(read_u32(blob, toc->offset + 24), 0x2cu);
+        EXPECT_EQ(read_u32(blob, toc->offset + 32), 0xdc0u);
+        EXPECT_EQ(read_u32(blob, toc->offset + 36), 0u);
+        EXPECT_EQ(read_u32(blob, toc->offset + 40), 0u);
+
+        const size_t hash_table = toc->offset + 0xdc0;
+        ASSERT_EQ(read_u32(blob, hash_table), chains.size());
+        for (size_t bucket_index = 0; bucket_index < chains.size(); ++bucket_index)
+        {
+            const size_t bucket = toc->offset + read_u32(blob, hash_table + 4) + bucket_index * 8;
+            ASSERT_EQ(read_u32(blob, bucket), chain_lengths[bucket_index]);
+            for (uint32_t chain_index = 0; chain_index < chain_lengths[bucket_index]; ++chain_index)
+            {
+                EXPECT_EQ(read_u32(blob, toc->offset + read_u32(blob, bucket + 4) + chain_index * 4), chains[bucket_index][chain_index]);
+            }
+        }
+
+        const auto assemblies = find_toc_entry(blob, 1);
+        ASSERT_TRUE(assemblies);
+        EXPECT_EQ(assemblies->format, 1u);
+        EXPECT_EQ(read_u32(blob, roster_offset + 16), assemblies->offset);
     }
 }

@@ -17,6 +17,8 @@ namespace sogen::sxs
                                                     const std::optional<activation_context_source>& config, const windows_path& system_root,
                                                     std::string_view preferred_language);
 
+    std::vector<std::byte> build_system_default_activation_context();
+
     std::vector<std::byte> build_process_activation_context(const file_system& file_system, const mapped_module& executable,
                                                             const windows_path& system_root, std::string_view preferred_language);
 }

@@ -27,6 +27,46 @@ namespace sogen::sxs
         constexpr uint32_t dll_redirection_path_omits_assembly_root = 2;
         constexpr uint32_t activation_context_path_type_win32_file = 2;
         constexpr uint32_t rt_manifest = 24;
+        // Windows' bucket-count rule for string sections is not known; this is the count captured from its system default context.
+        constexpr size_t system_default_window_class_bucket_count = 11;
+        constexpr size_t system_default_common_controls_index = 3;
+        constexpr std::array system_default_assembly_names{
+            "Microsoft.Windows.SystemCompatible",
+            "Microsoft.Windows.IsolationAutomation",
+            "Microsoft.Windows.GdiPlus",
+            "Microsoft.Windows.Common-Controls",
+            "Microsoft.Windows.IsolationAutomation.ProxyStub",
+            "Microsoft.Windows.Common-Controls.Resources",
+        };
+        constexpr std::array system_default_window_class_names{
+            u"ToolbarWindow32",
+            u"ComboBoxEx32",
+            u"msctls_trackbar32",
+            u"msctls_updown32",
+            u"msctls_progress32",
+            u"msctls_hotkey32",
+            u"msctls_statusbar32",
+            u"SysHeader32",
+            u"SysListView32",
+            u"SysTreeView32",
+            u"SysTabControl32",
+            u"SysIPAddress32",
+            u"SysPager",
+            u"NativeFontCtl",
+            u"Button",
+            u"Static",
+            u"Listbox",
+            u"ScrollBar",
+            u"tooltips_class32",
+            u"ButtonListBox",
+            u"SysAnimate32",
+            u"SysMonthCal32",
+            u"SysDateTimePick32",
+            u"ReBarWindow32",
+            u"Edit",
+            u"Combobox",
+            u"ComboLBox",
+        };
 
         struct activation_context_data
         {
@@ -279,6 +319,7 @@ namespace sogen::sxs
             std::vector<assembly_dependency> dependencies{};
             uint32_t flags{};
             uint32_t pseudokey{};
+            bool keyed{true};
         };
 
         class byte_buffer
@@ -1442,6 +1483,40 @@ namespace sogen::sxs
             return checked_u32(value.size() * sizeof(char16_t));
         }
 
+        struct hashed_entry
+        {
+            uint32_t pseudokey{};
+            uint32_t entry_offset{};
+        };
+
+        size_t append_hash_table(byte_buffer& section, const std::vector<hashed_entry>& entries, const size_t bucket_count)
+        {
+            const auto hash_table_offset = section.append<string_section_hash_table>();
+            const auto buckets_offset = section.append_array<string_section_hash_bucket>(bucket_count);
+            std::vector<std::vector<uint32_t>> chains(bucket_count);
+            for (const auto& entry : entries)
+            {
+                chains[entry.pseudokey % bucket_count].push_back(entry.entry_offset);
+            }
+            for (size_t index = 0; index < chains.size(); ++index)
+            {
+                string_section_hash_bucket bucket{};
+                bucket.chain_count = checked_u32(chains[index].size());
+                if (!chains[index].empty())
+                {
+                    bucket.chain_offset = checked_u32(section.size());
+                    for (const auto entry_offset : chains[index])
+                    {
+                        section.append(entry_offset);
+                    }
+                }
+                section.write(buckets_offset + index * sizeof(bucket), bucket);
+            }
+            section.write(hash_table_offset, string_section_hash_table{.bucket_table_entry_count = checked_u32(bucket_count),
+                                                                       .bucket_table_offset = checked_u32(buckets_offset)});
+            return hash_table_offset;
+        }
+
         struct assembly_section_result
         {
             std::vector<std::byte> data{};
@@ -1473,7 +1548,7 @@ namespace sogen::sxs
                 auto& entry = entries[index];
                 entry.pseudokey = assembly.pseudokey;
                 entry.assembly_roster_index = checked_u32(index + 1);
-                if (index != 0)
+                if (assembly.keyed)
                 {
                     const auto name = u8_to_u16(assembly.identity.name);
                     entry.key_offset = checked_u32(section.append_string(name));
@@ -1489,7 +1564,7 @@ namespace sogen::sxs
                 information.file_count = checked_u32(assembly.files.size());
                 const auto information_offset = section.append(information);
 
-                const auto identity = index == 0 ? std::u16string{} : encode_identity(assembly.identity);
+                const auto identity = assembly.keyed ? encode_identity(assembly.identity) : std::u16string{};
                 if (!identity.empty())
                 {
                     information.encoded_identity_length = byte_length(identity);
@@ -1529,33 +1604,18 @@ namespace sogen::sxs
             }
 
             uint32_t hash_table_offset{};
-            if (entries.size() > 1)
+            std::vector<hashed_entry> keyed_entries{};
+            for (size_t index = 0; index < entries.size(); ++index)
             {
-                hash_table_offset = checked_u32(section.append<string_section_hash_table>());
-                const auto bucket_count = entries.size() - 1;
-                const auto buckets_offset = section.append_array<string_section_hash_bucket>(bucket_count);
-                std::vector<std::vector<uint32_t>> chains(bucket_count);
-                for (size_t index = 1; index < entries.size(); ++index)
+                if (assemblies[index].keyed)
                 {
-                    chains[entries[index].pseudokey % bucket_count].push_back(
-                        checked_u32(entries_offset + index * sizeof(string_section_entry)));
+                    keyed_entries.push_back({.pseudokey = entries[index].pseudokey,
+                                             .entry_offset = checked_u32(entries_offset + index * sizeof(entries[index]))});
                 }
-                for (size_t index = 0; index < chains.size(); ++index)
-                {
-                    string_section_hash_bucket bucket{};
-                    bucket.chain_count = checked_u32(chains[index].size());
-                    if (!chains[index].empty())
-                    {
-                        bucket.chain_offset = checked_u32(section.size());
-                        for (const auto entry_offset : chains[index])
-                        {
-                            section.append(entry_offset);
-                        }
-                    }
-                    section.write(buckets_offset + index * sizeof(bucket), bucket);
-                }
-                section.write(hash_table_offset, string_section_hash_table{.bucket_table_entry_count = checked_u32(bucket_count),
-                                                                           .bucket_table_offset = checked_u32(buckets_offset)});
+            }
+            if (!keyed_entries.empty())
+            {
+                hash_table_offset = checked_u32(append_hash_table(section, keyed_entries, keyed_entries.size()));
             }
 
             string_section_header header{};
@@ -1563,7 +1623,11 @@ namespace sogen::sxs
             header.header_size = sizeof(header);
             header.format_version = 1;
             header.data_format_version = 1;
-            header.flags = string_section_case_insensitive | string_section_entries_in_pseudokey_order;
+            header.flags = string_section_case_insensitive;
+            if (std::ranges::is_sorted(keyed_entries, {}, &hashed_entry::pseudokey))
+            {
+                header.flags |= string_section_entries_in_pseudokey_order;
+            }
             header.element_count = checked_u32(entries.size());
             header.element_list_offset = checked_u32(entries_offset);
             header.hash_algorithm = hash_string_algorithm_x65599;
@@ -1572,40 +1636,6 @@ namespace sogen::sxs
             header.user_data_size = global.size;
             section.write(header_offset, header);
             return {.data = section.release(), .entries = std::move(entries)};
-        }
-
-        struct hashed_entry
-        {
-            uint32_t pseudokey{};
-            uint32_t entry_offset{};
-        };
-
-        size_t append_hash_table(byte_buffer& section, const std::vector<hashed_entry>& entries)
-        {
-            const auto hash_table_offset = section.append<string_section_hash_table>();
-            const auto buckets_offset = section.append_array<string_section_hash_bucket>(entries.size());
-            std::vector<std::vector<uint32_t>> chains(entries.size());
-            for (const auto& entry : entries)
-            {
-                chains[entry.pseudokey % entries.size()].push_back(entry.entry_offset);
-            }
-            for (size_t index = 0; index < chains.size(); ++index)
-            {
-                string_section_hash_bucket bucket{};
-                bucket.chain_count = checked_u32(chains[index].size());
-                if (!chains[index].empty())
-                {
-                    bucket.chain_offset = checked_u32(section.size());
-                    for (const auto entry_offset : chains[index])
-                    {
-                        section.append(entry_offset);
-                    }
-                }
-                section.write(buckets_offset + index * sizeof(bucket), bucket);
-            }
-            section.write(hash_table_offset, string_section_hash_table{.bucket_table_entry_count = checked_u32(entries.size()),
-                                                                       .bucket_table_offset = checked_u32(buckets_offset)});
-            return hash_table_offset;
         }
 
         struct dll_entry
@@ -1662,7 +1692,7 @@ namespace sogen::sxs
             {
                 hashed.push_back({.pseudokey = dll.hash, .entry_offset = dll.entry_offset});
             }
-            const auto hash_table_offset = append_hash_table(section, hashed);
+            const auto hash_table_offset = append_hash_table(section, hashed, hashed.size());
 
             string_section_header header{};
             header.magic = string_section_magic;
@@ -1688,7 +1718,8 @@ namespace sogen::sxs
             return u8_to_u16(text);
         }
 
-        std::vector<std::byte> build_window_class_section(const std::vector<resolved_assembly>& assemblies, const case_table& casing)
+        std::vector<std::byte> build_window_class_section(const std::vector<resolved_assembly>& assemblies, const case_table& casing,
+                                                          const std::optional<size_t> bucket_count)
         {
             struct class_source
             {
@@ -1754,17 +1785,17 @@ namespace sogen::sxs
             header.element_count = checked_u32(classes.size());
             header.element_list_offset = checked_u32(entries_offset);
             header.hash_algorithm = hash_string_algorithm_x65599;
-            header.search_structure_offset = checked_u32(append_hash_table(section, hashed));
+            header.search_structure_offset = checked_u32(append_hash_table(section, hashed, bucket_count.value_or(hashed.size())));
             section.write(header_offset, header);
             return section.release();
         }
 
         std::vector<std::byte> build_blob(const std::vector<resolved_assembly>& assemblies, const std::u16string_view application_directory,
-                                          const case_table& casing)
+                                          const case_table& casing, const std::optional<size_t> window_class_bucket_count = std::nullopt)
         {
             auto assembly_section = build_assembly_section(assemblies, application_directory);
             auto dll_section = build_dll_section(assemblies, casing);
-            auto window_class_section = build_window_class_section(assemblies, casing);
+            auto window_class_section = build_window_class_section(assemblies, casing, window_class_bucket_count);
 
             byte_buffer result{};
             const auto header_offset = result.append<activation_context_data>();
@@ -1862,6 +1893,7 @@ namespace sogen::sxs
             root.files = std::move(manifest.files);
             root.window_classes = std::move(manifest.window_classes);
             root.flags = assembly_information_root | assembly_information_private;
+            root.keyed = false;
 
             std::vector<resolved_assembly> assemblies{};
             assemblies.push_back(std::move(root));
@@ -1939,6 +1971,27 @@ namespace sogen::sxs
         }
         return build_activation_context_from_documents(file_system, executable, *manifest, read_application_config(file_system, executable),
                                                        system_root, preferred_language);
+    }
+
+    std::vector<std::byte> build_system_default_activation_context()
+    {
+        const case_table casing{};
+        std::vector<resolved_assembly> assemblies{};
+        for (const auto name : system_default_assembly_names)
+        {
+            resolved_assembly assembly{};
+            assembly.identity.name = name;
+            assembly.pseudokey = hash_string(u8_to_u16(assembly.identity.name), casing);
+            assemblies.push_back(std::move(assembly));
+        }
+        assemblies.front().flags = assembly_information_root;
+
+        auto& common_controls = assemblies[system_default_common_controls_index];
+        for (const auto name : system_default_window_class_names)
+        {
+            common_controls.window_classes.push_back({.name = name, .file = u"comctl32.dll", .versioned = false});
+        }
+        return build_blob(assemblies, {}, casing, system_default_window_class_bucket_count);
     }
 
     std::vector<std::byte> build_activation_context(const file_system& file_system, const mapped_module& executable,
