@@ -64,6 +64,8 @@ namespace sogen
         constexpr uint32_t k_state_system_pressed = 0x00000008;
         constexpr uint32_t k_state_system_invisible = 0x00008000;
         constexpr size_t k_sm_cxvscroll_index = 2;
+        constexpr size_t k_sm_cxmintrack_index = 34;
+        constexpr size_t k_sm_cymintrack_index = 35;
 
         struct send_message_callback_info
         {
@@ -476,6 +478,35 @@ namespace sogen
             return {.left = insets.left, .top = insets.top, .right = insets.right, .bottom = insets.bottom};
         }
 
+        int32_t get_system_metric(const syscall_context& c, const size_t index)
+        {
+            return c.proc.user_handles.get_server_info().read().systemMetrics[index];
+        }
+
+        struct window_size
+        {
+            int width{};
+            int height{};
+        };
+
+        window_size min_track_size(const syscall_context& c, const uint32_t style)
+        {
+            const bool tiled = (style & (WS_POPUP | WS_CHILD)) == 0;
+            const bool sizable_with_border = (style & WS_THICKFRAME) != 0 && (style & (WS_BORDER | WS_DLGFRAME)) != 0;
+            if (!tiled && !sizable_with_border)
+            {
+                return {};
+            }
+
+            return {.width = get_system_metric(c, k_sm_cxmintrack_index), .height = get_system_metric(c, k_sm_cymintrack_index)};
+        }
+
+        window_size clamp_to_min_track_size(const syscall_context& c, const window& win, const int width, const int height)
+        {
+            const auto min_size = min_track_size(c, win.style);
+            return {.width = std::max(width, min_size.width), .height = std::max(height, min_size.height)};
+        }
+
         void update_window_geometry(const syscall_context& c, window& win, const int x, const int y, const int width, const int height,
                                     const bool repaint)
         {
@@ -558,11 +589,15 @@ namespace sogen
             const auto old_client_height = win.client_height();
             const auto x = (position.flags & SWP_NOMOVE) != 0 ? win.x : position.x;
             const auto y = (position.flags & SWP_NOMOVE) != 0 ? win.y : position.y;
-            const auto width = (position.flags & SWP_NOSIZE) != 0 ? win.width : position.cx;
-            const auto height = (position.flags & SWP_NOSIZE) != 0 ? win.height : position.cy;
+            window_size size{.width = (position.flags & SWP_NOSIZE) != 0 ? win.width : position.cx,
+                             .height = (position.flags & SWP_NOSIZE) != 0 ? win.height : position.cy};
+            if ((position.flags & (SWP_NOSIZE | SWP_NOSENDCHANGING)) == 0)
+            {
+                size = clamp_to_min_track_size(c, win, size.width, size.height);
+            }
 
             // TODO: Handle SWP_FRAMECHANGED once runtime style changes and non-client recalculation are implemented.
-            update_window_geometry(c, win, x, y, width, height, false);
+            update_window_geometry(c, win, x, y, size.width, size.height, false);
 
             EMU_WINDOWPOS changed_position{
                 .hwnd = position.hwnd,
@@ -3679,7 +3714,8 @@ namespace sogen
                 return FALSE;
             }
 
-            update_window_geometry(c, *win, x, y, width, height, repaint != FALSE);
+            const auto size = clamp_to_min_track_size(c, *win, width, height);
+            update_window_geometry(c, *win, x, y, size.width, size.height, repaint != FALSE);
             return TRUE;
         }
 
@@ -4274,11 +4310,12 @@ namespace sogen
             win.style = style;
             win.x = x;
             win.y = y;
-            win.width = width;
-            win.height = height;
             win.thread_id = c.thread().id;
             win.handle = handle.bits;
             win.message_only = is_message_only;
+            const auto outer_size = clamp_to_min_track_size(c, win, width, height);
+            win.width = outer_size.width;
+            win.height = outer_size.height;
             // Record the owning thread in the shared handle entry so client-side GetWindowThreadProcessId works.
             c.proc.user_handles.set_owner(static_cast<uint32_t>(handle.value.id), win.thread_id);
             if (!is_message_only)
@@ -8406,11 +8443,6 @@ namespace sogen
             }
 
             return TRUE;
-        }
-
-        int32_t get_system_metric(const syscall_context& c, const size_t index)
-        {
-            return c.proc.user_handles.get_server_info().read().systemMetrics[index];
         }
 
         RECT get_title_bar_rect(const syscall_context& c, const window& win)
