@@ -234,19 +234,19 @@ namespace sogen
 
     struct window_show_state : completion_state
     {
-        bool was_visible{};
+        bool returns_true{};
         window_show_data data{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
-            buffer.write(this->was_visible);
+            buffer.write(this->returns_true);
             this->data.serialize(buffer);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
-            buffer.read(this->was_visible);
+            buffer.read(this->returns_true);
             this->data.deserialize(buffer);
         }
     };
@@ -257,6 +257,9 @@ namespace sogen
         emulator_stack_allocation changed_window_pos_alloc{};
         std::vector<qmsg> message_queue{};
         bool position_applied{};
+        bool show_after_position{};
+        LONG show_command{};
+        DWORD error_after_position{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -265,6 +268,9 @@ namespace sogen
             buffer.write(this->changed_window_pos_alloc);
             buffer.write_vector(this->message_queue);
             buffer.write(this->position_applied);
+            buffer.write(this->show_after_position);
+            buffer.write(this->show_command);
+            buffer.write(this->error_after_position);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -273,6 +279,9 @@ namespace sogen
             buffer.read(this->changed_window_pos_alloc);
             buffer.read_vector(this->message_queue);
             buffer.read(this->position_applied);
+            buffer.read(this->show_after_position);
+            buffer.read(this->show_command);
+            buffer.read(this->error_after_position);
         }
     };
 

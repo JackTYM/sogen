@@ -489,6 +489,7 @@ namespace sogen
         uint8_t layered_constant_alpha{255};
         bool message_only{};
         bool unicode_proc{};
+        POINT min_position{.x = -1, .y = -1};
 
         window(memory_interface& memory)
             : user_object(memory)
@@ -622,6 +623,7 @@ namespace sogen
             buffer.write(this->layered_constant_alpha);
             buffer.write(this->message_only);
             buffer.write(this->unicode_proc);
+            buffer.write(this->min_position);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -653,6 +655,7 @@ namespace sogen
             buffer.read(this->layered_constant_alpha);
             buffer.read(this->message_only);
             buffer.read(this->unicode_proc);
+            buffer.read(this->min_position);
         }
     };
 

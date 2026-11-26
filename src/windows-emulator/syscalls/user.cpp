@@ -63,6 +63,8 @@ namespace sogen
         constexpr uint32_t k_cbs_type_mask = 0x0003;
         constexpr uint32_t k_state_system_pressed = 0x00000008;
         constexpr uint32_t k_state_system_invisible = 0x00008000;
+        constexpr size_t k_sm_cxscreen_index = 0;
+        constexpr size_t k_sm_cyscreen_index = 1;
         constexpr size_t k_sm_cxvscroll_index = 2;
         constexpr size_t k_sm_cxmintrack_index = 34;
         constexpr size_t k_sm_cymintrack_index = 35;
@@ -1370,7 +1372,7 @@ namespace sogen
             const auto step = orchestrator.advance();
             if (!step)
             {
-                return state.was_visible ? TRUE : FALSE;
+                return state.returns_true ? TRUE : FALSE;
             }
 
             auto* win = c.proc.windows.get(step->handle);
@@ -4834,21 +4836,15 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtUserShowWindow(const syscall_context& c, const hwnd hwnd, const LONG cmd_show)
+        BOOL show_window(const syscall_context& c, window* win, const LONG cmd_show, const std::optional<BOOL> forced_result = std::nullopt)
         {
-            auto* win = c.proc.windows.get(hwnd);
-            if (!win)
-            {
-                return FALSE;
-            }
-
             if (win->thread_id != c.vcpu.active_thread->id)
             {
                 // TODO: Wait?
-                return FALSE;
+                return forced_result.value_or(FALSE);
             }
 
-            const bool want_visible = (cmd_show != 0); // SW_HIDE
+            const bool want_visible = (cmd_show != SW_HIDE);
             const bool was_visible = (win->style & WS_VISIBLE) != 0;
             const bool is_child = (win->style & WS_CHILD) != 0 && (win->style & WS_POPUP) == 0;
             const bool command_allows_activation = cmd_show != SW_SHOWNOACTIVATE && cmd_show != SW_SHOWMINNOACTIVE && cmd_show != SW_SHOWNA;
@@ -4856,11 +4852,11 @@ namespace sogen
 
             if (want_visible == was_visible)
             {
-                return was_visible ? TRUE : FALSE;
+                return forced_result.value_or(was_visible ? TRUE : FALSE);
             }
 
             window_show_state state{};
-            state.was_visible = was_visible;
+            state.returns_true = forced_result.value_or(was_visible ? TRUE : FALSE) != FALSE;
             auto orchestrator = window_show_orchestrator{state.data, c};
 
             uint32_t visibility_flags{};
@@ -4887,7 +4883,7 @@ namespace sogen
                 {
                     sync_child_control_titles_from_guest(c, *win);
                 }
-                c.win_emu.ui().set_window_visible(hwnd, want_visible);
+                c.win_emu.ui().set_window_visible(win->handle, want_visible);
             }
 
             if (want_visible)
@@ -4930,6 +4926,17 @@ namespace sogen
             }
 
             return advance_window_show(c, state);
+        }
+
+        BOOL handle_NtUserShowWindow(const syscall_context& c, const hwnd hwnd, const LONG cmd_show)
+        {
+            auto* win = c.proc.windows.get(hwnd);
+            if (!win)
+            {
+                return FALSE;
+            }
+
+            return show_window(c, win, cmd_show);
         }
 
         BOOL completion_NtUserShowWindow(const syscall_context& c, const hwnd /*hwnd*/, const LONG /*cmd_show*/)
@@ -6337,6 +6344,33 @@ namespace sogen
             return old_parent;
         }
 
+        BOOL dispatch_window_position(const syscall_context& c, window& win, const EMU_WINDOWPOS& position,
+                                      window_position_state state = {})
+        {
+            state.window_pos_alloc = c.emu.push_stack(position);
+
+            if ((position.flags & SWP_NOSENDCHANGING) == 0)
+            {
+                const auto window_pos_address = state.window_pos_alloc.address();
+                dispatch_window_message(c, callback_id::NtUserSetWindowPos, std::move(state), win, WM_WINDOWPOSCHANGING, 0,
+                                        window_pos_address);
+            }
+            else
+            {
+                apply_set_window_position(c, win, state, position);
+
+                if (state.message_queue.empty())
+                {
+                    release_window_position_allocations(c, state);
+                    return TRUE;
+                }
+
+                dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(state), win, state.message_queue);
+            }
+
+            return {};
+        }
+
         BOOL handle_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd hwnd_insert_after, const int x, const int y,
                                        const int cx, const int cy, const UINT flags)
         {
@@ -6346,7 +6380,7 @@ namespace sogen
                 return FALSE;
             }
 
-            EMU_WINDOWPOS position{
+            const EMU_WINDOWPOS position{
                 .hwnd = hWnd,
                 .hwndInsertAfter = hwnd_insert_after,
                 .x = x,
@@ -6356,29 +6390,7 @@ namespace sogen
                 .flags = flags,
             };
 
-            window_position_state state{};
-            state.window_pos_alloc = c.emu.push_stack(position);
-
-            if ((flags & SWP_NOSENDCHANGING) == 0)
-            {
-                const auto window_pos_address = state.window_pos_alloc.address();
-                dispatch_window_message(c, callback_id::NtUserSetWindowPos, std::move(state), *win, WM_WINDOWPOSCHANGING, 0,
-                                        window_pos_address);
-            }
-            else
-            {
-                apply_set_window_position(c, *win, state, position);
-
-                if (state.message_queue.empty())
-                {
-                    release_window_position_allocations(c, state);
-                    return TRUE;
-                }
-
-                dispatch_next_message(c, callback_id::NtUserSetWindowPos, std::move(state), *win, state.message_queue);
-            }
-
-            return {};
+            return dispatch_window_position(c, *win, position);
         }
 
         BOOL completion_NtUserSetWindowPos(const syscall_context& c, const hwnd hWnd, const hwnd /*hwnd_insert_after*/, const int /*x*/,
@@ -6405,6 +6417,17 @@ namespace sogen
             }
 
             release_window_position_allocations(c, state);
+
+            if (state.error_after_position != 0)
+            {
+                set_guest_last_error(c, state.error_after_position);
+            }
+
+            if (state.show_after_position)
+            {
+                return show_window(c, win, state.show_command, TRUE);
+            }
+
             return TRUE;
         }
 
@@ -8387,25 +8410,6 @@ namespace sogen
 
         BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, const hwnd window_handle, const emulator_pointer placement_address)
         {
-            if (placement_address == 0)
-            {
-                set_guest_last_error(c, 87); // ERROR_INVALID_PARAMETER
-                return FALSE;
-            }
-
-            DWORD requested_length{};
-            if (!c.win_emu.memory.try_read_memory(placement_address, &requested_length, sizeof(requested_length)))
-            {
-                set_guest_last_error(c, 998); // ERROR_NOACCESS
-                return FALSE;
-            }
-
-            if (requested_length != sizeof(EMU_WINDOWPLACEMENT))
-            {
-                set_guest_last_error(c, 87); // ERROR_INVALID_PARAMETER
-                return FALSE;
-            }
-
             const auto* win = c.proc.windows.get(window_handle);
             if (!win)
             {
@@ -8430,13 +8434,13 @@ namespace sogen
                 placement.showCmd = SW_SHOWNORMAL;
             }
 
-            // TODO: The emulator does not currently maintain separate minimized and
-            //       maximized placement coordinates.
-            placement.ptMinPosition = {.x = -1, .y = -1};
+            // TODO: The emulator does not currently maintain a restore position or ptMaxPosition of its own.
+            placement.ptMinPosition = win->min_position;
             placement.ptMaxPosition = {.x = -1, .y = -1};
             placement.rcNormalPosition = get_window_rect(*win);
 
-            if (!c.win_emu.memory.try_write_memory(placement_address, &placement, sizeof(placement)))
+            if (!is_writable_range(c.win_emu, placement_address, sizeof(placement)) ||
+                !c.win_emu.memory.try_write_memory(placement_address, &placement, sizeof(placement)))
             {
                 set_guest_last_error(c, 998); // ERROR_NOACCESS
                 return FALSE;
@@ -10199,9 +10203,111 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtUserSetWindowPlacement(const syscall_context&, const hwnd, const emulator_pointer)
+        bool is_top_level_window(const window& win)
         {
-            return TRUE;
+            return (win.style & WS_CHILD) == 0 || (win.style & WS_POPUP) != 0;
+        }
+
+        struct placement_axis
+        {
+            LONG origin{};
+            LONG extent{};
+        };
+
+        placement_axis get_placement_axis(const LONG low, const LONG high, const LONG work_low, const LONG work_high, const bool pull_in)
+        {
+            // The extent wraps around for CW_USEDEFAULT edges; Windows then clamps the negative size like any other.
+            const auto extent = static_cast<LONG>(static_cast<uint32_t>(high) - static_cast<uint32_t>(low));
+
+            if (pull_in && low > work_high)
+            {
+                return {.origin = static_cast<LONG>(static_cast<uint32_t>(work_high) - static_cast<uint32_t>(extent)), .extent = extent};
+            }
+
+            if (pull_in && high < work_low)
+            {
+                return {.origin = work_low, .extent = extent};
+            }
+
+            return {.origin = low, .extent = extent};
+        }
+
+        EMU_WINDOWPOS get_placement_position(const syscall_context& c, const window& win, const RECT& rect)
+        {
+            const emulator_object<USER_MONITOR> monitor(c.emu, c.proc.user_handles.get_display_info().read().pPrimaryMonitor);
+            const bool pull_in = monitor && is_top_level_window(win) && (win.ex_style & WS_EX_TOOLWINDOW) == 0;
+            const auto work_area = pull_in ? monitor.read().rcWork : RECT{};
+
+            const auto horizontal = get_placement_axis(rect.left, rect.right, work_area.left, work_area.right, pull_in);
+            const auto vertical = get_placement_axis(rect.top, rect.bottom, work_area.top, work_area.bottom, pull_in);
+
+            return {
+                .hwnd = win.handle,
+                .hwndInsertAfter = 0,
+                .x = horizontal.origin,
+                .y = vertical.origin,
+                .cx = horizontal.extent,
+                .cy = vertical.extent,
+                .flags = SWP_NOZORDER | SWP_NOACTIVATE,
+            };
+        }
+
+        POINT get_placement_min_position(const syscall_context& c, const POINT requested)
+        {
+            constexpr LONG sm_cxminimized = 160;
+            constexpr LONG sm_cyminimized = 28;
+            constexpr LONG default_coordinate = -1;
+
+            const bool in_range = requested.x != default_coordinate && requested.y != default_coordinate &&
+                                  requested.x >= -sm_cxminimized && requested.x <= get_system_metric(c, k_sm_cxscreen_index) &&
+                                  requested.y >= -sm_cyminimized && requested.y <= get_system_metric(c, k_sm_cyscreen_index);
+            return in_range ? requested : POINT{.x = -1, .y = -1};
+        }
+
+        BOOL handle_NtUserSetWindowPlacement(const syscall_context& c, const hwnd window_handle, const emulator_pointer placement_address)
+        {
+            auto* win = c.proc.windows.get(window_handle);
+            if (!win)
+            {
+                set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
+                return FALSE;
+            }
+
+            EMU_WINDOWPLACEMENT placement{};
+            if (!is_readable_range(c.win_emu, placement_address, sizeof(placement)) ||
+                !c.win_emu.memory.try_read_memory(placement_address, &placement, sizeof(placement)))
+            {
+                set_guest_last_error(c, 998); // ERROR_NOACCESS
+                return FALSE;
+            }
+
+            if (placement.length != sizeof(placement))
+            {
+                set_guest_last_error(c, 87); // ERROR_INVALID_PARAMETER
+                return FALSE;
+            }
+
+            win->min_position = get_placement_min_position(c, placement.ptMinPosition);
+
+            // TODO: A minimized or maximized command needs the restore position and the WS_MINIMIZE and WS_MAXIMIZE state.
+            constexpr DWORD error_invalid_parameter = 87;
+            constexpr DWORD error_invalid_showwindow_command = 1449;
+            const bool minimizing_command =
+                placement.showCmd == SW_SHOWMINIMIZED || placement.showCmd == SW_MINIMIZE || placement.showCmd == SW_SHOWMINNOACTIVE;
+
+            window_position_state state{};
+            state.show_command = static_cast<LONG>(placement.showCmd);
+            state.show_after_position = placement.showCmd < SW_FORCEMINIMIZE;
+            if (placement.showCmd > SW_FORCEMINIMIZE)
+            {
+                state.error_after_position = error_invalid_showwindow_command;
+            }
+            else if (minimizing_command && is_top_level_window(*win) && (win->style & WS_VISIBLE) == 0)
+            {
+                state.error_after_position = error_invalid_parameter;
+            }
+
+            return dispatch_window_position(c, *win, get_placement_position(c, *win, placement.rcNormalPosition), std::move(state));
         }
 
         BOOL handle_NtUserIsChildWindowDpiMessageEnabled()
