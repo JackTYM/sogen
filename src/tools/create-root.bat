@@ -28,6 +28,8 @@ SET EMU_WINSXSDIR=%EMU_WINDIR%\winsxs
 SET EMU_WINSXSMANIFESTDIR=%EMU_WINSXSDIR%\manifests
 SET EMU_WINSXSPOLICYDIR=%EMU_WINSXSDIR%\policies
 SET EMU_REGDIR=%EMU_ROOT%\registry
+SET EMU_SXSDIR=%EMU_ROOT%\sxs
+SET ROOT_TOOLS_DIR=%~dp0..\..\build\release\artifacts
 SET EMU_STEAMDIR=%EMU_FILESYS%\c\steam
 
 MKDIR %EMU_SYSDIR%
@@ -42,6 +44,7 @@ MKDIR %EMU_WINSXSDIR%
 MKDIR %EMU_WINSXSMANIFESTDIR%
 MKDIR %EMU_WINSXSPOLICYDIR%
 MKDIR %EMU_REGDIR%
+MKDIR %EMU_SXSDIR%
 MKDIR %EMU_STEAMDIR%
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
@@ -49,6 +52,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps
 REM Capture this machine's registry hives and seed the Steam-bridge keys. Shared with grab-registry.bat
 REM (which writes SYSTEM/SECURITY/SOFTWARE/HARDWARE/SAM + NTUSER.DAT into the given dir) to avoid duplication.
 CALL "%~dp0grab-registry.bat" "%EMU_REGDIR%"
+
+REM Capture the system default activation context that this machine hands every process. The tools are built by
+REM the root-tools CI job; without them (a local run, an ARM64 host) the emulator generates the context instead.
+IF /I "%SXS_NATIVE%"=="amd64" (
+	CALL :capture_activation_context "%ROOT_TOOLS_DIR%\activation-context-dump-x64.exe", system-default-amd64.bin || EXIT /B 1
+)
+CALL :capture_activation_context "%ROOT_TOOLS_DIR%\activation-context-dump-x86.exe", system-default-x86.bin || EXIT /B 1
 
 CALL :collect advapi32.dll
 CALL :collect apisetschema.dll
@@ -338,6 +348,13 @@ EXIT /B 0
 :normpath
 SET %1=%~dpfn2
 EXIT /B
+
+:capture_activation_context
+IF EXIST "%~1" (
+	ECHO %~1 -^> %EMU_SXSDIR%\%~2
+	"%~1" "%EMU_SXSDIR%\%~2" || EXIT /B 1
+)
+EXIT /B 0
 
 :collect_file
 CALL :normpath SRC, %~1\%~2

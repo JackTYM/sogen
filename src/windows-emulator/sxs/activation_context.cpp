@@ -13,20 +13,61 @@ namespace sogen::sxs
     {
         constexpr uint32_t activation_context_magic = 0x78746341;
         constexpr uint32_t string_section_magic = 0x64487353;
+        constexpr uint32_t guid_section_magic = 0x64487347;
         constexpr uint32_t hash_string_algorithm_x65599 = 1;
         constexpr uint32_t activation_context_section_assembly_information = 1;
         constexpr uint32_t activation_context_section_dll_redirection = 2;
         constexpr uint32_t activation_context_section_window_class_redirection = 3;
+        constexpr uint32_t activation_context_section_com_server_redirection = 4;
+        constexpr uint32_t activation_context_section_com_interface_redirection = 5;
+        constexpr uint32_t activation_context_section_com_type_library_redirection = 6;
+        constexpr uint32_t activation_context_section_com_progid_redirection = 7;
+        constexpr uint32_t activation_context_section_clr_surrogates = 9;
+        constexpr uint32_t activation_context_section_compatibility_information = 11;
         constexpr uint32_t activation_context_section_format_string_table = 1;
+        constexpr uint32_t activation_context_section_format_guid_table = 2;
         constexpr uint32_t string_section_case_insensitive = 1;
         constexpr uint32_t string_section_entries_in_pseudokey_order = 2;
+        constexpr uint32_t guid_section_entries_in_order = 1;
         constexpr uint32_t roster_entry_invalid = 1;
         constexpr uint32_t roster_entry_root = 2;
         constexpr uint32_t assembly_information_root = 1;
         constexpr uint32_t assembly_information_private = 0x10;
         constexpr uint32_t dll_redirection_path_omits_assembly_root = 2;
+        constexpr uint32_t dll_redirection_system_default_redirected_system32_dll = 8;
+        constexpr uint32_t activation_context_path_type_none = 1;
         constexpr uint32_t activation_context_path_type_win32_file = 2;
+        constexpr uint32_t com_threading_model_both = 4;
         constexpr uint32_t rt_manifest = 24;
+        constexpr std::array system_default_window_class_names{
+            u"ToolbarWindow32",
+            u"ComboBoxEx32",
+            u"msctls_trackbar32",
+            u"msctls_updown32",
+            u"msctls_progress32",
+            u"msctls_hotkey32",
+            u"msctls_statusbar32",
+            u"SysHeader32",
+            u"SysListView32",
+            u"SysTreeView32",
+            u"SysTabControl32",
+            u"SysIPAddress32",
+            u"SysPager",
+            u"NativeFontCtl",
+            u"Button",
+            u"Static",
+            u"Listbox",
+            u"ScrollBar",
+            u"tooltips_class32",
+            u"ButtonListBox",
+            u"SysAnimate32",
+            u"SysMonthCal32",
+            u"SysDateTimePick32",
+            u"ReBarWindow32",
+            u"Edit",
+            u"Combobox",
+            u"ComboLBox",
+        };
 
         struct activation_context_data
         {
@@ -112,6 +153,85 @@ namespace sogen::sxs
             uint32_t chain_offset;
         };
 
+        using guid = std::array<std::byte, 16>;
+
+        struct guid_section_header
+        {
+            uint32_t magic;
+            uint32_t header_size;
+            uint32_t format_version;
+            uint32_t data_format_version;
+            uint32_t flags;
+            uint32_t element_count;
+            uint32_t element_list_offset;
+            uint32_t search_structure_offset;
+            uint32_t user_data_offset;
+            uint32_t user_data_size;
+        };
+
+        struct guid_section_entry
+        {
+            guid key;
+            uint32_t offset;
+            uint32_t length;
+            uint32_t assembly_roster_index;
+        };
+
+        struct com_server_redirection
+        {
+            uint32_t size;
+            uint32_t flags;
+            uint32_t threading_model;
+            guid reference_clsid;
+            guid configured_clsid;
+            guid implemented_clsid;
+            guid type_library_id;
+            uint32_t module_length;
+            uint32_t module_offset;
+            uint32_t progid_length;
+            uint32_t progid_offset;
+            uint32_t shim_data_length;
+            uint32_t shim_data_offset;
+            uint32_t misc_status_default;
+            uint32_t misc_status_content;
+            uint32_t misc_status_thumbnail;
+            uint32_t misc_status_icon;
+            uint32_t misc_status_doc_print;
+        };
+
+        struct com_interface_redirection
+        {
+            uint32_t size;
+            uint32_t mask;
+            guid iid;
+            uint32_t method_count;
+            guid type_library_id;
+            guid base_interface;
+            uint32_t name_length;
+            uint32_t name_offset;
+        };
+
+        struct com_type_library_redirection
+        {
+            uint32_t size;
+            uint32_t flags;
+            uint32_t name_length;
+            uint32_t name_offset;
+            uint16_t resource_id;
+            uint16_t library_flags;
+            uint32_t help_directory_length;
+            uint32_t help_directory_offset;
+            uint16_t major_version;
+            uint16_t minor_version;
+        };
+
+        struct com_progid_redirection
+        {
+            uint32_t size;
+            uint32_t flags;
+            uint32_t clsid_offset;
+        };
+
         struct assembly_global_information
         {
             uint32_t size;
@@ -184,6 +304,12 @@ namespace sogen::sxs
         static_assert(sizeof(assembly_global_information) == 56);
         static_assert(sizeof(assembly_information) == 108);
         static_assert(sizeof(dll_redirection) == 20);
+        static_assert(sizeof(guid_section_header) == 40);
+        static_assert(sizeof(guid_section_entry) == 28);
+        static_assert(sizeof(com_server_redirection) == 120);
+        static_assert(sizeof(com_interface_redirection) == 68);
+        static_assert(sizeof(com_type_library_redirection) == 32);
+        static_assert(sizeof(com_progid_redirection) == 12);
         static_assert(sizeof(window_class_redirection) == 24);
 
         struct version
@@ -277,8 +403,200 @@ namespace sogen::sxs
             std::vector<std::u16string> files{};
             std::vector<manifest_window_class> window_classes{};
             std::vector<assembly_dependency> dependencies{};
+            std::string record_language{};
+            std::vector<std::u16string> redirected_directories{};
+            uint64_t manifest_last_write_time{};
             uint32_t flags{};
             uint32_t pseudokey{};
+            bool keyed{true};
+            bool system_default_layout{};
+        };
+
+        constexpr guid make_guid(const std::string_view text)
+        {
+            constexpr std::array<size_t, 16> text_offsets{6, 4, 2, 0, 11, 9, 16, 14, 19, 21, 24, 26, 28, 30, 32, 34};
+            const auto hex_digit = [](const char character) {
+                return static_cast<uint8_t>(character <= '9' ? character - '0' : character - 'a' + 10);
+            };
+            guid result{};
+            for (size_t index = 0; index < result.size(); ++index)
+            {
+                const auto offset = text_offsets[index];
+                result[index] = static_cast<std::byte>((hex_digit(text[offset]) << 4) | hex_digit(text[offset + 1]));
+            }
+            return result;
+        }
+
+        struct system_default_assembly_source
+        {
+            std::string_view version;
+            std::u16string_view directory;
+            uint64_t manifest_last_write_time;
+        };
+
+        struct system_default_architecture_source
+        {
+            std::string_view processor_architecture;
+            std::array<system_default_assembly_source, 6> assemblies;
+            std::array<guid, 2> configured_class_ids;
+            std::array<size_t, 4> com_server_record_order;
+            bool has_wow64_directory;
+        };
+
+        struct system_default_assembly_name
+        {
+            std::string_view name;
+            std::string_view language;
+            std::string_view record_language;
+            std::span<const std::u16string_view> files;
+        };
+
+        constexpr std::array<std::u16string_view, 0> no_files{};
+        constexpr std::array isolation_automation_files{u"sxsoa.dll"sv};
+        constexpr std::array gdi_plus_files{u"GdiPlus.dll"sv};
+        constexpr std::array common_controls_files{u"comctl32.dll"sv};
+        constexpr std::array proxy_stub_files{u"sxsoaps.dll"sv, u"sxsoaps.tlb"sv};
+        constexpr std::array common_controls_resources_files{u"comctl32.dll.mui"sv};
+
+        constexpr std::array system_default_assembly_names{
+            system_default_assembly_name{
+                .name = "Microsoft.Windows.SystemCompatible", .language = "", .record_language = "", .files = no_files},
+            system_default_assembly_name{.name = "Microsoft.Windows.IsolationAutomation",
+                                         .language = "",
+                                         .record_language = "",
+                                         .files = isolation_automation_files},
+            system_default_assembly_name{
+                .name = "Microsoft.Windows.GdiPlus", .language = "", .record_language = "", .files = gdi_plus_files},
+            system_default_assembly_name{
+                .name = "Microsoft.Windows.Common-Controls", .language = "", .record_language = "", .files = common_controls_files},
+            system_default_assembly_name{.name = "Microsoft.Windows.IsolationAutomation.ProxyStub",
+                                         .language = "",
+                                         .record_language = "",
+                                         .files = proxy_stub_files},
+            system_default_assembly_name{.name = "Microsoft.Windows.Common-Controls.Resources",
+                                         .language = "en-us",
+                                         .record_language = "en-US",
+                                         .files = common_controls_resources_files},
+        };
+
+        constexpr size_t system_default_isolation_automation_index = 1;
+        constexpr size_t system_default_common_controls_index = 3;
+        constexpr size_t system_default_proxy_stub_index = 4;
+
+        constexpr std::array system_default_architectures{
+            system_default_architecture_source{
+                .processor_architecture = "amd64",
+                .assemblies = {{
+                    {.version = "6.0.26100.1",
+                     .directory = u"amd64_microsoft.windows.systemcompatible_6595b64144ccf1df_6.0.26100.1_none_03c982bdcc6b4e7d",
+                     .manifest_last_write_time = 0x01da840542e64026},
+                    {.version = "1.0.26100.5074",
+                     .directory = u"amd64_microsoft.windows.isolationautomation_6595b64144ccf1df_1.0.26100.5074_none_ef991ef911793267",
+                     .manifest_last_write_time = 0x01dc23d7443042cd},
+                    {.version = "1.1.26100.9974",
+                     .directory = u"amd64_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.26100.9974_none_6ef868b23dc24782",
+                     .manifest_last_write_time = 0x01dd7167a3014ec2},
+                    {.version = "5.82.26100.8328",
+                     .directory = u"amd64_microsoft.windows.common-controls_6595b64144ccf1df_5.82.26100.8328_none_87eede957a2ccddd",
+                     .manifest_last_write_time = 0x01dce27d05a559ed},
+                    {.version = "1.0.26100.5074",
+                     .directory = u"amd64_microsoft.windows.i..utomation.proxystub_6595b64144ccf1df_1.0.26100.5074_none_9910702c70834c7b",
+                     .manifest_last_write_time = 0x01dc23d7443042cd},
+                    {.version = "5.82.26100.8117",
+                     .directory = u"amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_5.82.26100.8117_en-us_9df83bc8a6d4b654",
+                     .manifest_last_write_time = 0x01dccc7d31e9af8f},
+                }},
+                .configured_class_ids = {make_guid("eb9a1a5b-95ab-4575-b4a3-00f70fef6436"),
+                                         make_guid("755e2bd1-db56-4583-86b3-57c653486d3b")},
+                .com_server_record_order = {0, 2, 1, 3},
+                .has_wow64_directory = false,
+            },
+            system_default_architecture_source{
+                .processor_architecture = "x86",
+                .assemblies = {{
+                    {.version = "6.0.26100.1",
+                     .directory = u"x86_microsoft.windows.systemcompatible_6595b64144ccf1df_6.0.26100.1_none_4b76b994e0e77783",
+                     .manifest_last_write_time = 0x01da8405428ba612},
+                    {.version = "1.0.26100.5074",
+                     .directory = u"x86_microsoft.windows.isolationautomation_6595b64144ccf1df_1.0.26100.5074_none_374655d025f55b6d",
+                     .manifest_last_write_time = 0x01dc23d744ba3dbc},
+                    {.version = "1.1.26100.9974",
+                     .directory = u"x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.26100.9974_none_b6a59f89523e7088",
+                     .manifest_last_write_time = 0x01dd7167a66c9b9c},
+                    {.version = "5.82.26100.8521",
+                     .directory = u"x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82.26100.8521_none_cf9e08b68ea73d80",
+                     .manifest_last_write_time = 0x01dcf83e35cbbc75},
+                    {.version = "1.0.26100.5074",
+                     .directory = u"x86_microsoft.windows.i..utomation.proxystub_6595b64144ccf1df_1.0.26100.5074_none_e0bda70384ff7581",
+                     .manifest_last_write_time = 0x01dc23d744ba64fd},
+                    {.version = "5.82.26100.8117",
+                     .directory = u"x86_microsoft.windows.c..-controls.resources_6595b64144ccf1df_5.82.26100.8117_en-us_e5a5729fbb50df5a",
+                     .manifest_last_write_time = 0x01dccc7d31c38076},
+                }},
+                .configured_class_ids = {make_guid("324a81ea-52ad-4efe-87ab-78e95d62fbd9"),
+                                         make_guid("cc8ecddc-41c1-4814-820d-07a9fdd078fd")},
+                .com_server_record_order = {0, 1, 2, 3},
+                .has_wow64_directory = true,
+            },
+        };
+
+        struct system_default_com_class
+        {
+            size_t assembly_index;
+            size_t configured_class_slot;
+            guid clsid;
+            guid type_library_id;
+            std::u16string_view module;
+            std::u16string_view progid;
+            std::u16string_view version_independent_progid;
+        };
+
+        constexpr std::array system_default_com_classes{
+            system_default_com_class{.assembly_index = system_default_isolation_automation_index,
+                                     .configured_class_slot = 0,
+                                     .clsid = make_guid("85bb4477-6dc3-4a8d-84d6-86a0fa1aaf8b"),
+                                     .type_library_id = make_guid("5e0598d8-34a0-4329-bdbd-9d165c5c1554"),
+                                     .module = u"sxsoa.dll",
+                                     .progid = u"Microsoft.Windows.ActCtx.1",
+                                     .version_independent_progid = u"Microsoft.Windows.ActCtx"},
+            system_default_com_class{.assembly_index = system_default_proxy_stub_index,
+                                     .configured_class_slot = 1,
+                                     .clsid = make_guid("8fa7728f-b69b-4ee5-99f2-e2aa021bef28"),
+                                     .type_library_id = make_guid("8143c9aa-38f8-4729-b935-df6823c616c6"),
+                                     .module = u"sxsoaps.dll",
+                                     .progid = {},
+                                     .version_independent_progid = {}},
+        };
+
+        struct system_default_com_interface
+        {
+            size_t assembly_index;
+            guid iid;
+            guid type_library_id;
+            std::u16string_view name;
+        };
+
+        constexpr std::array system_default_com_interfaces{
+            system_default_com_interface{.assembly_index = system_default_proxy_stub_index,
+                                         .iid = make_guid("8fa7728f-b69b-4ee5-99f2-e2aa021bef28"),
+                                         .type_library_id = make_guid("8143c9aa-38f8-4729-b935-df6823c616c6"),
+                                         .name = u"IActCtx"},
+        };
+
+        struct system_default_type_library
+        {
+            size_t assembly_index;
+            guid type_library_id;
+            std::u16string_view file;
+        };
+
+        constexpr std::array system_default_type_libraries{
+            system_default_type_library{.assembly_index = system_default_isolation_automation_index,
+                                        .type_library_id = make_guid("5e0598d8-34a0-4329-bdbd-9d165c5c1554"),
+                                        .file = u"sxsoa.dll"},
+            system_default_type_library{.assembly_index = system_default_proxy_stub_index,
+                                        .type_library_id = make_guid("8143c9aa-38f8-4729-b935-df6823c616c6"),
+                                        .file = u"sxsoaps.tlb"},
         };
 
         class byte_buffer
@@ -316,6 +634,15 @@ namespace sogen::sxs
                 const auto offset = this->data_.size();
                 const auto byte_length = value.size() * sizeof(char16_t);
                 this->data_.resize(offset + byte_length + sizeof(char16_t));
+                std::memcpy(this->data_.data() + offset, value.data(), byte_length);
+                return offset;
+            }
+
+            size_t append_characters(const std::u16string_view value)
+            {
+                const auto offset = this->data_.size();
+                const auto byte_length = value.size() * sizeof(char16_t);
+                this->data_.resize(offset + byte_length);
                 std::memcpy(this->data_.data() + offset, value.data(), byte_length);
                 return offset;
             }
@@ -960,6 +1287,20 @@ namespace sogen::sxs
             return decode_manifest_text(data);
         }
 
+        // windows_path::u16string() is lower case, but the blob stores the root spelled the way Windows does.
+        std::u16string spelled_path(const windows_path& path)
+        {
+            auto spelled = path.to_portable_path().u16string();
+            spelled.insert(1, 1, u':');
+            auto& drive = spelled.front();
+            if (drive >= u'a' && drive <= u'z')
+            {
+                drive = static_cast<char16_t>(drive - u'a' + u'A');
+            }
+            std::ranges::replace(spelled, u'/', u'\\');
+            return spelled;
+        }
+
         windows_path with_suffix(const windows_path& path, const std::u16string_view suffix)
         {
             return windows_path{path.u16string() + std::u16string{suffix}};
@@ -1405,6 +1746,10 @@ namespace sogen::sxs
         std::u16string encode_identity(const assembly_identity& identity)
         {
             std::string encoded = identity.name;
+            if (!identity.language.empty() && identity.language != "*")
+            {
+                encoded += ",language=\"" + identity.language + "\"";
+            }
             if (!identity.processor_architecture.empty())
             {
                 encoded += ",processorArchitecture=\"" + identity.processor_architecture + "\"";
@@ -1420,10 +1765,6 @@ namespace sogen::sxs
             if (!identity.version_text.empty())
             {
                 encoded += ",version=\"" + identity.version_text + "\"";
-            }
-            if (!identity.language.empty() && identity.language != "*")
-            {
-                encoded += ",language=\"" + identity.language + "\"";
             }
             return u8_to_u16(encoded);
         }
@@ -1442,6 +1783,103 @@ namespace sogen::sxs
             return checked_u32(value.size() * sizeof(char16_t));
         }
 
+        struct hashed_entry
+        {
+            uint32_t pseudokey{};
+            uint32_t entry_offset{};
+        };
+
+        // Window class sections captured from Windows for 1..40, 48, 50, 64, 80, 100 and 128 elements; counts between 81 and 99 are
+        // not captured.
+        size_t string_section_bucket_count(const size_t element_count)
+        {
+            if (element_count < 3)
+            {
+                return 0;
+            }
+            if (element_count < 15)
+            {
+                return 3;
+            }
+            return element_count < 100 ? 11 : 101;
+        }
+
+        size_t append_hash_table(byte_buffer& section, const std::vector<hashed_entry>& entries, const size_t bucket_count)
+        {
+            const auto hash_table_offset = section.append<string_section_hash_table>();
+            const auto buckets_offset = section.append_array<string_section_hash_bucket>(bucket_count);
+            std::vector<std::vector<uint32_t>> chains(bucket_count);
+            for (const auto& entry : entries)
+            {
+                chains[entry.pseudokey % bucket_count].push_back(entry.entry_offset);
+            }
+            for (size_t index = 0; index < chains.size(); ++index)
+            {
+                string_section_hash_bucket bucket{};
+                bucket.chain_count = checked_u32(chains[index].size());
+                if (!chains[index].empty())
+                {
+                    bucket.chain_offset = checked_u32(section.size());
+                    for (const auto entry_offset : chains[index])
+                    {
+                        section.append(entry_offset);
+                    }
+                }
+                section.write(buckets_offset + index * sizeof(bucket), bucket);
+            }
+            section.write(hash_table_offset, string_section_hash_table{.bucket_table_entry_count = checked_u32(bucket_count),
+                                                                       .bucket_table_offset = checked_u32(buckets_offset)});
+            return hash_table_offset;
+        }
+
+        struct string_section_search
+        {
+            uint32_t flags{};
+            uint32_t search_structure_offset{};
+        };
+
+        string_section_search finish_string_section(byte_buffer& section, const size_t elements_offset,
+                                                    std::vector<string_section_entry> elements)
+        {
+            const auto bucket_count = string_section_bucket_count(elements.size());
+            if (bucket_count == 0)
+            {
+                std::ranges::stable_sort(elements, {}, &string_section_entry::pseudokey);
+            }
+
+            std::vector<hashed_entry> hashed{};
+            hashed.reserve(elements.size());
+            for (size_t index = 0; index < elements.size(); ++index)
+            {
+                const auto entry_offset = checked_u32(elements_offset + index * sizeof(string_section_entry));
+                section.write(entry_offset, elements[index]);
+                hashed.push_back({.pseudokey = elements[index].pseudokey, .entry_offset = entry_offset});
+            }
+
+            if (bucket_count == 0)
+            {
+                return {.flags = string_section_case_insensitive | string_section_entries_in_pseudokey_order, .search_structure_offset = 0};
+            }
+            return {.flags = string_section_case_insensitive,
+                    .search_structure_offset = checked_u32(append_hash_table(section, hashed, bucket_count))};
+        }
+
+        string_section_header make_string_section_header(const size_t element_count, const size_t elements_offset,
+                                                         const string_section_search& search)
+        {
+            string_section_header header{};
+            header.magic = string_section_magic;
+            header.header_size = sizeof(header);
+            header.format_version = 1;
+            header.data_format_version = 1;
+            header.flags = search.flags;
+            header.element_count = checked_u32(element_count);
+            header.element_list_offset = checked_u32(elements_offset);
+            header.hash_algorithm = hash_string_algorithm_x65599;
+            header.search_structure_offset = search.search_structure_offset;
+            return header;
+        }
+
         struct assembly_section_result
         {
             std::vector<std::byte> data{};
@@ -1458,7 +1896,7 @@ namespace sogen::sxs
             global.application_directory_path_type = activation_context_path_type_win32_file;
             global.application_directory_length = byte_length(application_directory);
             global.application_directory_offset = sizeof(global);
-            global.resource_name = 1;
+            global.resource_name = assemblies.front().system_default_layout ? 0 : 1;
             const auto global_offset = section.append(global);
             section.append_string(application_directory);
             global.size = checked_u32(section.size() - global_offset);
@@ -1473,7 +1911,7 @@ namespace sogen::sxs
                 auto& entry = entries[index];
                 entry.pseudokey = assembly.pseudokey;
                 entry.assembly_roster_index = checked_u32(index + 1);
-                if (index != 0)
+                if (assembly.keyed)
                 {
                     const auto name = u8_to_u16(assembly.identity.name);
                     entry.key_offset = checked_u32(section.append_string(name));
@@ -1486,76 +1924,74 @@ namespace sogen::sxs
                 information.size = sizeof(information);
                 information.flags = assembly.flags;
                 information.manifest_version_major = 1;
-                information.file_count = checked_u32(assembly.files.size());
+                if (assembly.system_default_layout)
+                {
+                    information.policy_path_type = activation_context_path_type_none;
+                    information.manifest_last_write_time_low = static_cast<uint32_t>(assembly.manifest_last_write_time);
+                    information.manifest_last_write_time_high = static_cast<int32_t>(assembly.manifest_last_write_time >> 32);
+                }
+                else
+                {
+                    information.file_count = checked_u32(assembly.files.size());
+                }
                 const auto information_offset = section.append(information);
 
-                const auto identity = index == 0 ? std::u16string{} : encode_identity(assembly.identity);
+                const auto append_text = [&](const std::u16string_view text, uint32_t& length, uint32_t& offset, const bool terminated) {
+                    length = byte_length(text);
+                    offset = checked_u32(terminated ? section.append_string(text) : section.append_characters(text));
+                    if (!assembly.system_default_layout)
+                    {
+                        section.align(4);
+                    }
+                };
+
+                const auto identity = assembly.keyed ? encode_identity(assembly.identity) : std::u16string{};
                 if (!identity.empty())
                 {
-                    information.encoded_identity_length = byte_length(identity);
-                    information.encoded_identity_offset = checked_u32(section.append_string(identity));
-                    section.align(4);
+                    append_text(identity, information.encoded_identity_length, information.encoded_identity_offset,
+                                !assembly.system_default_layout);
                 }
                 if (!assembly.manifest_path.empty())
                 {
                     information.manifest_path_type = activation_context_path_type_win32_file;
-                    information.manifest_path_length = byte_length(assembly.manifest_path);
-                    information.manifest_path_offset = checked_u32(section.append_string(assembly.manifest_path));
-                    section.align(4);
+                    append_text(assembly.manifest_path, information.manifest_path_length, information.manifest_path_offset, true);
                 }
                 if (!assembly.policy_path.empty())
                 {
                     information.policy_path_type = activation_context_path_type_win32_file;
-                    information.policy_path_length = byte_length(assembly.policy_path);
-                    information.policy_path_offset = checked_u32(section.append_string(assembly.policy_path));
-                    section.align(4);
+                    append_text(assembly.policy_path, information.policy_path_length, information.policy_path_offset, true);
                 }
                 if (!assembly.directory_name.empty())
                 {
-                    information.assembly_directory_name_length = byte_length(assembly.directory_name);
-                    information.assembly_directory_name_offset = checked_u32(section.append_string(assembly.directory_name));
-                    section.align(4);
+                    append_text(assembly.directory_name, information.assembly_directory_name_length,
+                                information.assembly_directory_name_offset, true);
                 }
-                if (!assembly.identity.language.empty() && assembly.identity.language != "*")
+                const auto& language_text = assembly.record_language.empty() ? assembly.identity.language : assembly.record_language;
+                if (!language_text.empty() && language_text != "*")
                 {
-                    const auto language = u8_to_u16(assembly.identity.language);
-                    information.language_length = byte_length(language);
-                    information.language_offset = checked_u32(section.append_string(language));
-                    section.align(4);
+                    append_text(u8_to_u16(language_text), information.language_length, information.language_offset, true);
                 }
                 section.write(information_offset, information);
                 entry.length = checked_u32(section.size() - entry.offset);
+                section.align(4);
                 section.write(entries_offset + index * sizeof(entry), entry);
             }
 
             uint32_t hash_table_offset{};
-            if (entries.size() > 1)
+            std::vector<hashed_entry> keyed_entries{};
+            for (size_t index = 0; index < entries.size(); ++index)
             {
-                hash_table_offset = checked_u32(section.append<string_section_hash_table>());
-                const auto bucket_count = entries.size() - 1;
-                const auto buckets_offset = section.append_array<string_section_hash_bucket>(bucket_count);
-                std::vector<std::vector<uint32_t>> chains(bucket_count);
-                for (size_t index = 1; index < entries.size(); ++index)
+                if (assemblies[index].keyed)
                 {
-                    chains[entries[index].pseudokey % bucket_count].push_back(
-                        checked_u32(entries_offset + index * sizeof(string_section_entry)));
+                    keyed_entries.push_back({.pseudokey = entries[index].pseudokey,
+                                             .entry_offset = checked_u32(entries_offset + index * sizeof(entries[index]))});
                 }
-                for (size_t index = 0; index < chains.size(); ++index)
-                {
-                    string_section_hash_bucket bucket{};
-                    bucket.chain_count = checked_u32(chains[index].size());
-                    if (!chains[index].empty())
-                    {
-                        bucket.chain_offset = checked_u32(section.size());
-                        for (const auto entry_offset : chains[index])
-                        {
-                            section.append(entry_offset);
-                        }
-                    }
-                    section.write(buckets_offset + index * sizeof(bucket), bucket);
-                }
-                section.write(hash_table_offset, string_section_hash_table{.bucket_table_entry_count = checked_u32(bucket_count),
-                                                                           .bucket_table_offset = checked_u32(buckets_offset)});
+            }
+            if (!keyed_entries.empty())
+            {
+                const auto bucket_count =
+                    keyed_entries.size() > 2 ? string_section_bucket_count(keyed_entries.size()) : keyed_entries.size();
+                hash_table_offset = checked_u32(append_hash_table(section, keyed_entries, bucket_count));
             }
 
             string_section_header header{};
@@ -1563,7 +1999,11 @@ namespace sogen::sxs
             header.header_size = sizeof(header);
             header.format_version = 1;
             header.data_format_version = 1;
-            header.flags = string_section_case_insensitive | string_section_entries_in_pseudokey_order;
+            header.flags = string_section_case_insensitive;
+            if (std::ranges::is_sorted(keyed_entries, {}, &hashed_entry::pseudokey))
+            {
+                header.flags |= string_section_entries_in_pseudokey_order;
+            }
             header.element_count = checked_u32(entries.size());
             header.element_list_offset = checked_u32(entries_offset);
             header.hash_algorithm = hash_string_algorithm_x65599;
@@ -1574,46 +2014,11 @@ namespace sogen::sxs
             return {.data = section.release(), .entries = std::move(entries)};
         }
 
-        struct hashed_entry
-        {
-            uint32_t pseudokey{};
-            uint32_t entry_offset{};
-        };
-
-        size_t append_hash_table(byte_buffer& section, const std::vector<hashed_entry>& entries)
-        {
-            const auto hash_table_offset = section.append<string_section_hash_table>();
-            const auto buckets_offset = section.append_array<string_section_hash_bucket>(entries.size());
-            std::vector<std::vector<uint32_t>> chains(entries.size());
-            for (const auto& entry : entries)
-            {
-                chains[entry.pseudokey % entries.size()].push_back(entry.entry_offset);
-            }
-            for (size_t index = 0; index < chains.size(); ++index)
-            {
-                string_section_hash_bucket bucket{};
-                bucket.chain_count = checked_u32(chains[index].size());
-                if (!chains[index].empty())
-                {
-                    bucket.chain_offset = checked_u32(section.size());
-                    for (const auto entry_offset : chains[index])
-                    {
-                        section.append(entry_offset);
-                    }
-                }
-                section.write(buckets_offset + index * sizeof(bucket), bucket);
-            }
-            section.write(hash_table_offset, string_section_hash_table{.bucket_table_entry_count = checked_u32(entries.size()),
-                                                                       .bucket_table_offset = checked_u32(buckets_offset)});
-            return hash_table_offset;
-        }
-
         struct dll_entry
         {
             std::u16string name{};
             uint32_t roster_index{};
-            uint32_t hash{};
-            uint32_t entry_offset{};
+            uint32_t flags{};
         };
 
         std::vector<std::byte> build_dll_section(const std::vector<resolved_assembly>& assemblies, const case_table& casing)
@@ -1621,13 +2026,20 @@ namespace sogen::sxs
             std::vector<dll_entry> dlls{};
             for (size_t index = 0; index < assemblies.size(); ++index)
             {
+                const auto roster_index = checked_u32(index + 1);
                 for (const auto& file : assemblies[index].files)
                 {
-                    dll_entry dll{};
-                    dll.name = file;
-                    dll.roster_index = checked_u32(index + 1);
-                    dll.hash = hash_string(file, casing);
-                    dlls.push_back(std::move(dll));
+                    dlls.push_back({.name = file, .roster_index = roster_index, .flags = dll_redirection_path_omits_assembly_root});
+                    for (const auto& directory : assemblies[index].redirected_directories)
+                    {
+                        auto path = directory;
+                        path += u'\\';
+                        path += file;
+                        dlls.push_back(
+                            {.name = std::move(path),
+                             .roster_index = roster_index,
+                             .flags = dll_redirection_path_omits_assembly_root | dll_redirection_system_default_redirected_system32_dll});
+                    }
                 }
             }
             if (dlls.empty())
@@ -1638,43 +2050,26 @@ namespace sogen::sxs
             byte_buffer section{};
             const auto header_offset = section.append<string_section_header>();
             const auto entries_offset = section.append_array<string_section_entry>(dlls.size());
-            for (size_t index = 0; index < dlls.size(); ++index)
+            std::vector<string_section_entry> elements{};
+            elements.reserve(dlls.size());
+            for (const auto& dll : dlls)
             {
-                auto& dll = dlls[index];
                 string_section_entry entry{};
-                entry.pseudokey = dll.hash;
+                entry.pseudokey = hash_string(dll.name, casing);
                 entry.key_offset = checked_u32(section.append_string(dll.name));
                 entry.key_length = byte_length(dll.name);
                 entry.assembly_roster_index = dll.roster_index;
                 section.align(4);
                 dll_redirection redirection{};
                 redirection.size = sizeof(redirection);
-                redirection.flags = dll_redirection_path_omits_assembly_root;
+                redirection.flags = dll.flags;
                 entry.offset = checked_u32(section.append(redirection));
                 entry.length = sizeof(dll_redirection);
-                dll.entry_offset = checked_u32(entries_offset + index * sizeof(entry));
-                section.write(dll.entry_offset, entry);
+                elements.push_back(entry);
             }
 
-            std::vector<hashed_entry> hashed{};
-            hashed.reserve(dlls.size());
-            for (const auto& dll : dlls)
-            {
-                hashed.push_back({.pseudokey = dll.hash, .entry_offset = dll.entry_offset});
-            }
-            const auto hash_table_offset = append_hash_table(section, hashed);
-
-            string_section_header header{};
-            header.magic = string_section_magic;
-            header.header_size = sizeof(header);
-            header.format_version = 1;
-            header.data_format_version = 1;
-            header.flags = string_section_case_insensitive;
-            header.element_count = checked_u32(dlls.size());
-            header.element_list_offset = checked_u32(entries_offset);
-            header.hash_algorithm = hash_string_algorithm_x65599;
-            header.search_structure_offset = checked_u32(hash_table_offset);
-            section.write(header_offset, header);
+            const auto search = finish_string_section(section, entries_offset, std::move(elements));
+            section.write(header_offset, make_string_section_header(dlls.size(), entries_offset, search));
             return section.release();
         }
 
@@ -1714,11 +2109,10 @@ namespace sogen::sxs
             byte_buffer section{};
             const auto header_offset = section.append<string_section_header>();
             const auto entries_offset = section.append_array<string_section_entry>(classes.size());
-            std::vector<hashed_entry> hashed{};
-            hashed.reserve(classes.size());
-            for (size_t index = 0; index < classes.size(); ++index)
+            std::vector<string_section_entry> elements{};
+            elements.reserve(classes.size());
+            for (const auto& source : classes)
             {
-                const auto& source = classes[index];
                 const auto& window_class = *source.window_class;
                 string_section_entry entry{};
                 entry.pseudokey = hash_string(window_class.name, casing);
@@ -1739,48 +2133,320 @@ namespace sogen::sxs
                 section.write(entry.offset, redirection);
                 entry.length = checked_u32(section.size() - entry.offset);
                 section.align(4);
-
-                const auto entry_offset = checked_u32(entries_offset + index * sizeof(entry));
-                section.write(entry_offset, entry);
-                hashed.push_back({.pseudokey = entry.pseudokey, .entry_offset = entry_offset});
+                elements.push_back(entry);
             }
 
-            string_section_header header{};
-            header.magic = string_section_magic;
+            const auto search = finish_string_section(section, entries_offset, std::move(elements));
+            section.write(header_offset, make_string_section_header(classes.size(), entries_offset, search));
+            return section.release();
+        }
+
+        struct guid_record
+        {
+            guid key{};
+            std::vector<std::byte> data{};
+            uint32_t roster_index{};
+        };
+
+        class guid_name_pool
+        {
+          public:
+            explicit guid_name_pool(const std::span<const std::u16string_view> names_in_roster_order)
+            {
+                for (const auto name : names_in_roster_order)
+                {
+                    if (std::ranges::find(this->names_, name) == this->names_.end())
+                    {
+                        this->names_.push_back(name);
+                    }
+                }
+                // Windows stores the names in the reverse order of their first use.
+                std::ranges::reverse(this->names_);
+            }
+
+            uint32_t offset_of(const std::u16string_view name) const
+            {
+                size_t offset = sizeof(guid_section_header);
+                for (const auto candidate : this->names_)
+                {
+                    if (candidate == name)
+                    {
+                        return checked_u32(offset);
+                    }
+                    offset += (candidate.size() + 1) * sizeof(char16_t);
+                }
+                throw std::runtime_error("Name missing from the activation context name pool");
+            }
+
+            std::vector<std::byte> bytes() const
+            {
+                byte_buffer buffer{};
+                for (const auto name : this->names_)
+                {
+                    buffer.append_string(name);
+                }
+                return buffer.release();
+            }
+
+          private:
+            std::vector<std::u16string_view> names_{};
+        };
+
+        template <typename T>
+        std::vector<std::byte> serialize_record(const T& header, const std::u16string_view tail = {})
+        {
+            std::vector<std::byte> record(sizeof(T) + (tail.empty() ? 0 : (tail.size() + 1) * sizeof(char16_t)));
+            std::memcpy(record.data(), &header, sizeof(T));
+            if (!tail.empty())
+            {
+                std::memcpy(record.data() + sizeof(T), tail.data(), tail.size() * sizeof(char16_t));
+            }
+            return record;
+        }
+
+        std::vector<std::byte> build_guid_section(const std::vector<guid_record>& records, const guid_name_pool& pool)
+        {
+            byte_buffer section{};
+            const auto header_offset = section.append<guid_section_header>();
+            guid_section_header header{};
+            header.magic = guid_section_magic;
             header.header_size = sizeof(header);
             header.format_version = 1;
             header.data_format_version = 1;
-            header.flags = string_section_case_insensitive;
-            header.element_count = checked_u32(classes.size());
-            header.element_list_offset = checked_u32(entries_offset);
-            header.hash_algorithm = hash_string_algorithm_x65599;
-            header.search_structure_offset = checked_u32(append_hash_table(section, hashed));
+            if (!records.empty())
+            {
+                const auto pool_bytes = pool.bytes();
+                if (!pool_bytes.empty())
+                {
+                    header.user_data_offset = checked_u32(section.size());
+                    header.user_data_size = checked_u32(pool_bytes.size());
+                    section.append(pool_bytes);
+                    section.align(4);
+                }
+
+                header.flags = guid_section_entries_in_order;
+                header.element_count = checked_u32(records.size());
+                const auto entries_offset = section.append_array<guid_section_entry>(records.size());
+                header.element_list_offset = checked_u32(entries_offset);
+
+                std::vector<guid_section_entry> entries{};
+                entries.reserve(records.size());
+                for (const auto& record : records)
+                {
+                    entries.push_back({.key = record.key,
+                                       .offset = checked_u32(section.size()),
+                                       .length = checked_u32(record.data.size()),
+                                       .assembly_roster_index = record.roster_index});
+                    section.append(record.data);
+                    section.align(4);
+                }
+                std::ranges::sort(entries, {}, &guid_section_entry::key);
+                for (size_t index = 0; index < entries.size(); ++index)
+                {
+                    section.write(entries_offset + index * sizeof(guid_section_entry), entries[index]);
+                }
+            }
             section.write(header_offset, header);
             return section.release();
         }
 
+        std::vector<std::byte> build_com_server_section(const system_default_architecture_source& architecture)
+        {
+            std::vector<std::u16string_view> modules{};
+            modules.reserve(system_default_com_classes.size());
+            for (const auto& com_class : system_default_com_classes)
+            {
+                modules.push_back(com_class.module);
+            }
+            const guid_name_pool pool{modules};
+
+            std::vector<guid_record> records{};
+            for (const auto slot : architecture.com_server_record_order)
+            {
+                const auto& com_class = system_default_com_classes[slot / 2];
+                const auto& configured_clsid = architecture.configured_class_ids[com_class.configured_class_slot];
+                com_server_redirection record{};
+                record.size = sizeof(record);
+                record.threading_model = com_threading_model_both;
+                record.reference_clsid = com_class.clsid;
+                record.configured_clsid = configured_clsid;
+                record.implemented_clsid = com_class.clsid;
+                record.type_library_id = com_class.type_library_id;
+                record.module_length = byte_length(com_class.module);
+                record.module_offset = pool.offset_of(com_class.module);
+                if (!com_class.progid.empty())
+                {
+                    record.progid_length = byte_length(com_class.progid);
+                    record.progid_offset = sizeof(record);
+                }
+                records.push_back({.key = slot % 2 == 0 ? configured_clsid : com_class.clsid,
+                                   .data = serialize_record(record, com_class.progid),
+                                   .roster_index = checked_u32(com_class.assembly_index + 1)});
+            }
+            return build_guid_section(records, pool);
+        }
+
+        std::vector<std::byte> build_com_interface_section()
+        {
+            std::vector<guid_record> records{};
+            for (const auto& com_interface : system_default_com_interfaces)
+            {
+                com_interface_redirection record{};
+                record.size = sizeof(record);
+                record.iid = com_interface.iid;
+                record.type_library_id = com_interface.type_library_id;
+                record.name_length = byte_length(com_interface.name);
+                record.name_offset = sizeof(record);
+                records.push_back({.key = com_interface.iid,
+                                   .data = serialize_record(record, com_interface.name),
+                                   .roster_index = checked_u32(com_interface.assembly_index + 1)});
+            }
+            return build_guid_section(records, guid_name_pool{std::span<const std::u16string_view>{}});
+        }
+
+        std::vector<std::byte> build_com_type_library_section()
+        {
+            std::vector<std::u16string_view> files{};
+            files.reserve(system_default_type_libraries.size());
+            for (const auto& type_library : system_default_type_libraries)
+            {
+                files.push_back(type_library.file);
+            }
+            const guid_name_pool pool{files};
+
+            std::vector<guid_record> records{};
+            for (const auto& type_library : system_default_type_libraries)
+            {
+                com_type_library_redirection record{};
+                record.size = sizeof(record);
+                record.name_length = byte_length(type_library.file) + sizeof(char16_t);
+                record.name_offset = pool.offset_of(type_library.file);
+                record.resource_id = 1;
+                record.major_version = 1;
+                records.push_back({.key = type_library.type_library_id,
+                                   .data = serialize_record(record),
+                                   .roster_index = checked_u32(type_library.assembly_index + 1)});
+            }
+            std::ranges::sort(records, {}, &guid_record::key);
+            return build_guid_section(records, pool);
+        }
+
+        std::vector<std::byte> build_com_progid_section(const system_default_architecture_source& architecture, const case_table& casing)
+        {
+            struct progid_source
+            {
+                std::u16string_view name;
+                const guid* configured_clsid;
+                uint32_t roster_index;
+            };
+
+            std::vector<progid_source> progids{};
+            for (const auto& com_class : system_default_com_classes)
+            {
+                const auto roster_index = checked_u32(com_class.assembly_index + 1);
+                const auto* configured_clsid = &architecture.configured_class_ids[com_class.configured_class_slot];
+                for (const auto name : {com_class.progid, com_class.version_independent_progid})
+                {
+                    if (!name.empty())
+                    {
+                        progids.push_back({.name = name, .configured_clsid = configured_clsid, .roster_index = roster_index});
+                    }
+                }
+            }
+            if (progids.empty())
+            {
+                return {};
+            }
+
+            byte_buffer section{};
+            const auto header_offset = section.append<string_section_header>();
+            const auto user_data_offset = section.size();
+            std::vector<const guid*> clsids{};
+            for (const auto& progid : progids)
+            {
+                if (std::ranges::find(clsids, progid.configured_clsid) == clsids.end())
+                {
+                    clsids.push_back(progid.configured_clsid);
+                    section.append(*progid.configured_clsid);
+                }
+            }
+            const auto user_data_size = section.size() - user_data_offset;
+            const auto entries_offset = section.append_array<string_section_entry>(progids.size());
+
+            std::vector<string_section_entry> elements{};
+            elements.reserve(progids.size());
+            for (const auto& progid : progids)
+            {
+                string_section_entry entry{};
+                entry.pseudokey = hash_string(progid.name, casing);
+                entry.key_offset = checked_u32(section.append_string(progid.name));
+                entry.key_length = byte_length(progid.name);
+                entry.assembly_roster_index = progid.roster_index;
+                section.align(4);
+                const auto clsid_slot = std::ranges::find(clsids, progid.configured_clsid) - clsids.begin();
+                com_progid_redirection record{};
+                record.size = sizeof(record);
+                record.clsid_offset = checked_u32(user_data_offset + static_cast<size_t>(clsid_slot) * sizeof(guid));
+                entry.offset = checked_u32(section.append(record));
+                entry.length = sizeof(record);
+                elements.push_back(entry);
+            }
+
+            const auto search = finish_string_section(section, entries_offset, std::move(elements));
+            auto header = make_string_section_header(progids.size(), entries_offset, search);
+            header.user_data_offset = checked_u32(user_data_offset);
+            header.user_data_size = checked_u32(user_data_size);
+            section.write(header_offset, header);
+            return section.release();
+        }
+
+        struct blob_section
+        {
+            uint32_t id{};
+            uint32_t format{};
+            std::vector<std::byte> data{};
+        };
+
         std::vector<std::byte> build_blob(const std::vector<resolved_assembly>& assemblies, const std::u16string_view application_directory,
-                                          const case_table& casing)
+                                          const case_table& casing, std::vector<blob_section> extra_sections = {})
         {
             auto assembly_section = build_assembly_section(assemblies, application_directory);
-            auto dll_section = build_dll_section(assemblies, casing);
-            auto window_class_section = build_window_class_section(assemblies, casing);
+            std::vector<blob_section> sections{};
+            sections.push_back({.id = activation_context_section_assembly_information,
+                                .format = activation_context_section_format_string_table,
+                                .data = std::move(assembly_section.data)});
+            if (auto dll_section = build_dll_section(assemblies, casing); !dll_section.empty())
+            {
+                sections.push_back({.id = activation_context_section_dll_redirection,
+                                    .format = activation_context_section_format_string_table,
+                                    .data = std::move(dll_section)});
+            }
+            if (auto window_class_section = build_window_class_section(assemblies, casing); !window_class_section.empty())
+            {
+                sections.push_back({.id = activation_context_section_window_class_redirection,
+                                    .format = activation_context_section_format_string_table,
+                                    .data = std::move(window_class_section)});
+            }
+            for (auto& extra_section : extra_sections)
+            {
+                sections.push_back(std::move(extra_section));
+            }
 
             byte_buffer result{};
             const auto header_offset = result.append<activation_context_data>();
             const auto roster_header_offset = result.append<assembly_roster_header>();
             const auto roster_entries_offset = result.append_array<assembly_roster_entry>(assemblies.size() + 1);
             const auto toc_header_offset = result.append<activation_context_toc_header>();
-            const auto toc_entry_count = 1u + (dll_section.empty() ? 0u : 1u) + (window_class_section.empty() ? 0u : 1u);
-            const auto toc_entries_offset = result.append_array<activation_context_toc_entry>(toc_entry_count);
+            const auto toc_entries_offset = result.append_array<activation_context_toc_entry>(sections.size());
             result.align(4);
 
-            const auto assembly_section_offset = result.size();
-            result.append(assembly_section.data);
-            const auto dll_section_offset = result.size();
-            result.append(dll_section);
-            const auto window_class_section_offset = result.size();
-            result.append(window_class_section);
+            std::vector<size_t> section_offsets{};
+            for (const auto& section : sections)
+            {
+                section_offsets.push_back(result.size());
+                result.append(section.data);
+            }
+            const auto assembly_section_offset = section_offsets.front();
 
             assembly_roster_entry invalid_roster_entry{};
             invalid_roster_entry.flags = roster_entry_invalid;
@@ -1805,27 +2471,17 @@ namespace sogen::sxs
                                                 .first_entry_offset = checked_u32(roster_entries_offset),
                                                 .assembly_information_section_offset = checked_u32(assembly_section_offset)});
             result.write(toc_header_offset, activation_context_toc_header{.header_size = sizeof(activation_context_toc_header),
-                                                                          .entry_count = toc_entry_count,
+                                                                          .entry_count = checked_u32(sections.size()),
                                                                           .first_entry_offset = checked_u32(toc_entries_offset),
                                                                           .flags = 2});
-            result.write(toc_entries_offset, activation_context_toc_entry{.id = activation_context_section_assembly_information,
-                                                                          .offset = checked_u32(assembly_section_offset),
-                                                                          .length = checked_u32(assembly_section.data.size()),
-                                                                          .format = activation_context_section_format_string_table});
-            size_t next_toc_entry = 1;
-            const auto write_toc_entry = [&](const uint32_t id, const size_t offset, const std::vector<std::byte>& section) {
-                if (section.empty())
-                {
-                    return;
-                }
-                result.write(toc_entries_offset + next_toc_entry++ * sizeof(activation_context_toc_entry),
-                             activation_context_toc_entry{.id = id,
-                                                          .offset = checked_u32(offset),
-                                                          .length = checked_u32(section.size()),
-                                                          .format = activation_context_section_format_string_table});
-            };
-            write_toc_entry(activation_context_section_dll_redirection, dll_section_offset, dll_section);
-            write_toc_entry(activation_context_section_window_class_redirection, window_class_section_offset, window_class_section);
+            for (size_t index = 0; index < sections.size(); ++index)
+            {
+                result.write(toc_entries_offset + index * sizeof(activation_context_toc_entry),
+                             activation_context_toc_entry{.id = sections[index].id,
+                                                          .offset = checked_u32(section_offsets[index]),
+                                                          .length = checked_u32(sections[index].data.size()),
+                                                          .format = sections[index].format});
+            }
             activation_context_data header{};
             header.magic = activation_context_magic;
             header.header_size = sizeof(header);
@@ -1862,6 +2518,7 @@ namespace sogen::sxs
             root.files = std::move(manifest.files);
             root.window_classes = std::move(manifest.window_classes);
             root.flags = assembly_information_root | assembly_information_private;
+            root.keyed = false;
 
             std::vector<resolved_assembly> assemblies{};
             assemblies.push_back(std::move(root));
@@ -1929,6 +2586,32 @@ namespace sogen::sxs
         }
     }
 
+    std::vector<std::byte> obtain_system_default_activation_context(const std::filesystem::path& emulation_root,
+                                                                    const file_system& file_system, const windows_path& system_root,
+                                                                    const system_default_architecture architecture)
+    {
+        if (!emulation_root.empty())
+        {
+            const auto file_name =
+                architecture == system_default_architecture::amd64 ? "system-default-amd64.bin" : "system-default-x86.bin";
+            auto captured = utils::io::read_file(emulation_root / "sxs" / file_name);
+            constexpr size_t total_size_offset = 12;
+            if (captured.size() > total_size_offset + sizeof(uint32_t))
+            {
+                uint32_t magic{};
+                uint32_t total_size{};
+                std::memcpy(&magic, captured.data(), sizeof(magic));
+                std::memcpy(&total_size, captured.data() + total_size_offset, sizeof(total_size));
+                if (magic == activation_context_magic && total_size == captured.size())
+                {
+                    return captured;
+                }
+            }
+        }
+
+        return build_system_default_activation_context(file_system, system_root, architecture);
+    }
+
     std::vector<std::byte> build_process_activation_context(const file_system& file_system, const mapped_module& executable,
                                                             const windows_path& system_root, const std::string_view preferred_language)
     {
@@ -1939,6 +2622,78 @@ namespace sogen::sxs
         }
         return build_activation_context_from_documents(file_system, executable, *manifest, read_application_config(file_system, executable),
                                                        system_root, preferred_language);
+    }
+
+    std::vector<std::byte> build_system_default_activation_context(const file_system& file_system, const windows_path& system_root,
+                                                                   const system_default_architecture architecture)
+    {
+        const auto& source = system_default_architectures[architecture == system_default_architecture::amd64 ? 0 : 1];
+        const case_table casing{};
+        const auto root = spelled_path(system_root);
+        const auto winsxs = root + u"\\WinSxS";
+
+        std::vector<resolved_assembly> assemblies{};
+        for (size_t index = 0; index < system_default_assembly_names.size(); ++index)
+        {
+            const auto& name = system_default_assembly_names[index];
+            const auto& assembly_source = source.assemblies[index];
+
+            resolved_assembly assembly{};
+            assembly.identity.name = name.name;
+            assembly.identity.processor_architecture = source.processor_architecture;
+            assembly.identity.public_key_token = "6595b64144ccf1df";
+            assembly.identity.type = "win32";
+            assembly.identity.language = name.language;
+            assembly.identity.version_text = assembly_source.version;
+            assembly.record_language = name.record_language;
+            assembly.directory_name = assembly_source.directory;
+            assembly.manifest_path = index == 0 ? u"System Default Context"
+                                                : winsxs + u"\\manifests\\" + std::u16string{assembly_source.directory} + u".manifest";
+            assembly.manifest_last_write_time = assembly_source.manifest_last_write_time;
+            assembly.pseudokey = hash_string(u8_to_u16(assembly.identity.name), casing);
+            assembly.flags = index == 0 ? assembly_information_root : 0;
+            assembly.system_default_layout = true;
+
+            const auto assembly_directory =
+                file_system.stat(system_root / windows_path(u"WinSxS") / windows_path(assembly_source.directory));
+            if (assembly_directory && (assembly_directory->st_mode & S_IFMT) == S_IFDIR)
+            {
+                assembly.files.assign(name.files.begin(), name.files.end());
+                assembly.redirected_directories.push_back(root + u"\\system32");
+                if (source.has_wow64_directory)
+                {
+                    assembly.redirected_directories.push_back(root + u"\\SysWOW64");
+                }
+            }
+            assemblies.push_back(std::move(assembly));
+        }
+
+        auto& common_controls = assemblies[system_default_common_controls_index];
+        for (const auto* const name : system_default_window_class_names)
+        {
+            common_controls.window_classes.push_back({.name = name, .file = u"comctl32.dll", .versioned = false});
+        }
+
+        std::vector<blob_section> com_sections{};
+        com_sections.push_back({.id = activation_context_section_com_server_redirection,
+                                .format = activation_context_section_format_guid_table,
+                                .data = build_com_server_section(source)});
+        com_sections.push_back({.id = activation_context_section_com_interface_redirection,
+                                .format = activation_context_section_format_guid_table,
+                                .data = build_com_interface_section()});
+        com_sections.push_back({.id = activation_context_section_com_type_library_redirection,
+                                .format = activation_context_section_format_guid_table,
+                                .data = build_com_type_library_section()});
+        com_sections.push_back({.id = activation_context_section_com_progid_redirection,
+                                .format = activation_context_section_format_string_table,
+                                .data = build_com_progid_section(source, casing)});
+        com_sections.push_back({.id = activation_context_section_clr_surrogates,
+                                .format = activation_context_section_format_guid_table,
+                                .data = build_guid_section({}, guid_name_pool{std::span<const std::u16string_view>{}})});
+        com_sections.push_back({.id = activation_context_section_compatibility_information,
+                                .format = activation_context_section_format_string_table,
+                                .data = std::vector<std::byte>(8)});
+        return build_blob(assemblies, root + u"\\WinSxs\\", casing, std::move(com_sections));
     }
 
     std::vector<std::byte> build_activation_context(const file_system& file_system, const mapped_module& executable,
