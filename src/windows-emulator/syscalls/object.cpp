@@ -840,7 +840,143 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, const handle /*h*/, const SECURITY_INFORMATION security_information,
+        namespace
+        {
+            struct security_descriptor_parts
+            {
+                std::vector<uint8_t> owner{};
+                std::vector<uint8_t> group{};
+                std::vector<uint8_t> dacl{};
+                WORD dacl_control{};
+            };
+
+            struct allowed_ace
+            {
+                uint8_t flags{};
+                ACCESS_MASK mask{};
+                std::vector<uint8_t> sid{};
+            };
+
+            std::vector<uint8_t> make_sid(const uint8_t authority, const std::initializer_list<uint32_t> sub_authorities)
+            {
+                std::vector<uint8_t> sid{1, static_cast<uint8_t>(sub_authorities.size()), 0, 0, 0, 0, 0, authority};
+                for (const auto sub_authority : sub_authorities)
+                {
+                    for (size_t i = 0; i < sizeof(sub_authority); ++i)
+                    {
+                        sid.push_back(static_cast<uint8_t>(sub_authority >> (i * 8)));
+                    }
+                }
+
+                return sid;
+            }
+
+            std::vector<uint8_t> make_acl(const std::span<const allowed_ace> aces)
+            {
+                std::vector<uint8_t> acl(sizeof(ACL));
+                for (const auto& entry : aces)
+                {
+                    ACCESS_ALLOWED_ACE ace{};
+                    ace.Header.AceType = 0; // ACCESS_ALLOWED_ACE_TYPE
+                    ace.Header.AceFlags = entry.flags;
+                    ace.Header.AceSize = static_cast<WORD>(offsetof(ACCESS_ALLOWED_ACE, SidStart) + entry.sid.size());
+                    ace.Mask = entry.mask;
+
+                    const auto* ace_bytes = reinterpret_cast<const uint8_t*>(&ace);
+                    acl.insert(acl.end(), ace_bytes, ace_bytes + offsetof(ACCESS_ALLOWED_ACE, SidStart));
+                    acl.insert(acl.end(), entry.sid.begin(), entry.sid.end());
+                }
+
+                ACL header{};
+                header.AclRevision = 2; // ACL_REVISION
+                header.AclSize = static_cast<WORD>(acl.size());
+                header.AceCount = static_cast<WORD>(aces.size());
+                memcpy(acl.data(), &header, sizeof(header));
+
+                return acl;
+            }
+
+            // Every directory under C:\Windows and Program Files carries C:\Windows' descriptor, and a file created
+            // there inherits the DACL that C:\Windows\win.ini has (probed on Windows 11 26100).
+            security_descriptor_parts file_security_descriptor(const bool is_directory)
+            {
+                constexpr uint8_t object_inherit = 0x1;
+                constexpr uint8_t container_inherit = 0x2;
+                constexpr uint8_t inherit_only = 0x8;
+                constexpr uint8_t inherited = 0x10;
+                constexpr uint8_t inherit_to_children = object_inherit | container_inherit | inherit_only;
+
+                constexpr ACCESS_MASK file_all_access = 0x1F01FF;
+                constexpr ACCESS_MASK file_modify = 0x1301BF;
+                constexpr ACCESS_MASK file_read_execute = 0x1200A9;
+                constexpr ACCESS_MASK generic_all = 0x10000000;
+                constexpr ACCESS_MASK generic_read_execute = 0xA0000000;
+
+                const auto trusted_installer = make_sid(5, {80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464});
+                const auto local_system = make_sid(5, {18});
+                const auto administrators = make_sid(5, {32, 544});
+                const auto users = make_sid(5, {32, 545});
+                const auto creator_owner = make_sid(3, {0});
+                const auto all_app_packages = make_sid(15, {2, 1});
+                const auto all_restricted_app_packages = make_sid(15, {2, 2});
+
+                if (!is_directory)
+                {
+                    const std::array<allowed_ace, 5> aces{{
+                        {.flags = inherited, .mask = file_all_access, .sid = local_system},
+                        {.flags = inherited, .mask = file_all_access, .sid = administrators},
+                        {.flags = inherited, .mask = file_read_execute, .sid = users},
+                        {.flags = inherited, .mask = file_read_execute, .sid = all_app_packages},
+                        {.flags = inherited, .mask = file_read_execute, .sid = all_restricted_app_packages},
+                    }};
+
+                    return {.owner = local_system, .group = local_system, .dacl = make_acl(aces), .dacl_control = SE_DACL_AUTO_INHERITED};
+                }
+
+                const std::array<allowed_ace, 13> aces{{
+                    {.flags = 0, .mask = file_all_access, .sid = trusted_installer},
+                    {.flags = container_inherit | inherit_only, .mask = generic_all, .sid = trusted_installer},
+                    {.flags = 0, .mask = file_modify, .sid = local_system},
+                    {.flags = inherit_to_children, .mask = generic_all, .sid = local_system},
+                    {.flags = 0, .mask = file_modify, .sid = administrators},
+                    {.flags = inherit_to_children, .mask = generic_all, .sid = administrators},
+                    {.flags = 0, .mask = file_read_execute, .sid = users},
+                    {.flags = inherit_to_children, .mask = generic_read_execute, .sid = users},
+                    {.flags = inherit_to_children, .mask = generic_all, .sid = creator_owner},
+                    {.flags = 0, .mask = file_read_execute, .sid = all_app_packages},
+                    {.flags = inherit_to_children, .mask = generic_read_execute, .sid = all_app_packages},
+                    {.flags = 0, .mask = file_read_execute, .sid = all_restricted_app_packages},
+                    {.flags = inherit_to_children, .mask = generic_read_execute, .sid = all_restricted_app_packages},
+                }};
+
+                return {
+                    .owner = trusted_installer,
+                    .group = trusted_installer,
+                    .dacl = make_acl(aces),
+                    .dacl_control = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED,
+                };
+            }
+
+            security_descriptor_parts default_security_descriptor()
+            {
+                return {
+                    .owner = make_sid(5, {32, 544}),
+                    .group = make_sid(5, {18}),
+                    .dacl = {0x02, 0x00, 0x9C, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x0F, 0x00, 0x02, 0x00, 0x01, 0x01,
+                             0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x0F, 0x00, 0x02, 0x00,
+                             0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x0F, 0x00,
+                             0x0F, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
+                             0x00, 0x0B, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+                             0x00, 0x00, 0x00, 0x0B, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+                             0x0C, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x18, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00,
+                             0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x14, 0x00, 0x00, 0x00, 0x00, 0x10,
+                             0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00},
+                    .dacl_control = 0,
+                };
+            }
+        }
+
+        NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, const handle h, const SECURITY_INFORMATION security_information,
                                               const emulator_pointer security_descriptor, const ULONG length,
                                               const emulator_object<ULONG> length_needed)
         {
@@ -851,25 +987,8 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
-            // Owner SID: S-1-5-32-544 (Administrators)
-            // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
-            const uint8_t owner_sid[] = {0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00};
-
-            // Group SID: S-1-5-18 (Local System)
-            // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
-            const uint8_t group_sid[] = {0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00};
-
-            // DACL structure
-            // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
-            const uint8_t dacl_data[] = {
-                0x02, 0x00, 0x9C, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x0F, 0x00, 0x02, 0x00, 0x01, 0x01, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x0F, 0x00, 0x02, 0x00, 0x01, 0x01, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x05, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x0F, 0x00, 0x0F, 0x00, 0x01, 0x02, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE0,
-                0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE0,
-                0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x18, 0x00, 0x00, 0x00, 0x00, 0x10,
-                0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x14, 0x00,
-                0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00};
+            const auto* f = c.proc.files.get(h);
+            const auto parts = f ? file_security_descriptor(f->is_directory()) : default_security_descriptor();
 
             // SACL structure
             // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
@@ -880,17 +999,17 @@ namespace sogen
 
             if (security_information & OWNER_SECURITY_INFORMATION)
             {
-                total_size += sizeof(owner_sid);
+                total_size += static_cast<ULONG>(parts.owner.size());
             }
 
             if (security_information & GROUP_SECURITY_INFORMATION)
             {
-                total_size += sizeof(group_sid);
+                total_size += static_cast<ULONG>(parts.group.size());
             }
 
             if (security_information & DACL_SECURITY_INFORMATION)
             {
-                total_size += sizeof(dacl_data);
+                total_size += static_cast<ULONG>(parts.dacl.size());
             }
 
             if (security_information & LABEL_SECURITY_INFORMATION)
@@ -916,34 +1035,33 @@ namespace sogen
 
             ULONG current_offset = sizeof(sd);
 
+            const auto append = [&](const std::span<const uint8_t> data) {
+                c.emu.write_memory(security_descriptor + current_offset, data.data(), data.size());
+                const auto offset = current_offset;
+                current_offset += static_cast<ULONG>(data.size());
+                return offset;
+            };
+
             if (security_information & OWNER_SECURITY_INFORMATION)
             {
-                sd.Owner = current_offset;
-                c.emu.write_memory(security_descriptor + current_offset, owner_sid);
-                current_offset += sizeof(owner_sid);
+                sd.Owner = append(parts.owner);
             }
 
             if (security_information & GROUP_SECURITY_INFORMATION)
             {
-                sd.Group = current_offset;
-                c.emu.write_memory(security_descriptor + current_offset, group_sid);
-                current_offset += sizeof(group_sid);
+                sd.Group = append(parts.group);
             }
 
             if (security_information & DACL_SECURITY_INFORMATION)
             {
-                sd.Control |= SE_DACL_PRESENT;
-                sd.Dacl = current_offset;
-                c.emu.write_memory(security_descriptor + current_offset, dacl_data);
-                current_offset += sizeof(dacl_data);
+                sd.Control |= SE_DACL_PRESENT | parts.dacl_control;
+                sd.Dacl = append(parts.dacl);
             }
 
             if (security_information & LABEL_SECURITY_INFORMATION)
             {
                 sd.Control |= SE_SACL_PRESENT | SE_SACL_AUTO_INHERITED;
-                sd.Sacl = current_offset;
-                c.emu.write_memory(security_descriptor + current_offset, sacl_data);
-                current_offset += sizeof(sacl_data);
+                sd.Sacl = append(sacl_data);
             }
 
             assert(current_offset == total_size);

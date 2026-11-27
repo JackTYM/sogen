@@ -4,6 +4,7 @@
 #include "emulator_utils.hpp"
 #include "syscall_utils.hpp"
 #include "devices/console.hpp"
+#include "devices/mountmgr.hpp"
 
 #include <numeric>
 #include <cwctype>
@@ -986,6 +987,53 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        namespace
+        {
+            bool is_volume_open(const file& f)
+            {
+                constexpr std::u16string_view prefix = u"\\??\\";
+                return f.name.size() == prefix.size() + 2 && f.name.starts_with(prefix) && f.name.back() == u':';
+            }
+
+            // A bare drive ("\??\C:") opens the volume device, which answers with a MOUNTDEV_NAME. Below that
+            // struct's size the query is STATUS_INVALID_PARAMETER; with room for only the length it reports
+            // STATUS_BUFFER_OVERFLOW and Information 2 (probed on Windows 11 26100).
+            NTSTATUS query_volume_device_name(const syscall_context& c, const file& volume,
+                                              const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
+                                              const emulator_pointer output_buffer, const ULONG output_buffer_length)
+            {
+                constexpr ULONG mountdev_name_size = sizeof(USHORT) + sizeof(char16_t);
+                if (output_buffer_length < mountdev_name_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto device_name = u8_to_u16("\\Device\\HarddiskVolume" + std::to_string(volume.drive_number));
+                const auto name_length = static_cast<USHORT>(device_name.size() * sizeof(char16_t));
+                c.emu.write_memory(output_buffer, name_length);
+
+                auto status = STATUS_BUFFER_OVERFLOW;
+                size_t written = sizeof(USHORT);
+
+                if (output_buffer_length >= sizeof(USHORT) + name_length)
+                {
+                    c.emu.write_memory(output_buffer + sizeof(USHORT), device_name.data(), name_length);
+                    status = STATUS_SUCCESS;
+                    written += name_length;
+                }
+
+                if (io_status_block)
+                {
+                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                    block.Status = status;
+                    block.Information = written;
+                    io_status_block.write(block);
+                }
+
+                return status;
+            }
+        }
+
         NTSTATUS handle_NtDeviceIoControlFile(const syscall_context& c, const handle file_handle, const handle event,
                                               const emulator_pointer /*PIO_APC_ROUTINE*/ apc_routine, const emulator_pointer apc_context,
                                               const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
@@ -997,6 +1045,19 @@ namespace sogen
             auto* device = c.proc.devices.get(resolved_file_handle);
             if (!device)
             {
+                // A file or directory handle forwards to its volume's stack, which rejects the mount-manager
+                // device-name query as a bad parameter (probed on Windows 11 26100).
+                if (resolved_file_handle.value.type == handle_types::file && io_control_code == IOCTL_MOUNTDEV_QUERY_DEVICE_NAME)
+                {
+                    const auto* f = c.proc.files.get(resolved_file_handle);
+                    if (f && is_volume_open(*f))
+                    {
+                        return query_volume_device_name(c, *f, io_status_block, output_buffer, output_buffer_length);
+                    }
+
+                    return STATUS_INVALID_PARAMETER;
+                }
+
                 return STATUS_INVALID_HANDLE;
             }
 

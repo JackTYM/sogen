@@ -3,11 +3,19 @@
 #include "stat.hpp"
 #include "time.hpp"
 
+#include <array>
+
 #if defined(_WIN32) && !defined(__MINGW64__)
 #include <corecrt_io.h>
 #include <windows.h>
 #else
 #include <unistd.h>
+#endif
+
+#ifdef OS_MAC
+#include <sys/fsgetpath.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 #endif
 
 #include <sys/stat.h>
@@ -103,6 +111,56 @@ namespace sogen
         return result;
     }
 
+    std::optional<std::filesystem::path> compat_find_path_by_inode(const std::filesystem::path& search_root, const uint64_t inode)
+    {
+        auto* const volume_hint =
+            CreateFileW(search_root.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (volume_hint == INVALID_HANDLE_VALUE)
+        {
+            return std::nullopt;
+        }
+
+        FILE_ID_DESCRIPTOR descriptor{};
+        descriptor.dwSize = sizeof(descriptor);
+        descriptor.Type = FileIdType;
+        descriptor.FileId.QuadPart = static_cast<LONGLONG>(inode);
+
+        auto* const file_handle = OpenFileById(volume_hint, &descriptor, FILE_READ_ATTRIBUTES,
+                                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, FILE_FLAG_BACKUP_SEMANTICS);
+        CloseHandle(volume_hint);
+
+        if (file_handle == INVALID_HANDLE_VALUE)
+        {
+            return std::nullopt;
+        }
+
+        std::wstring path(MAX_PATH, L'\0');
+        auto length = GetFinalPathNameByHandleW(file_handle, path.data(), static_cast<DWORD>(path.size()), VOLUME_NAME_DOS);
+        if (length >= path.size())
+        {
+            path.resize(length);
+            length = GetFinalPathNameByHandleW(file_handle, path.data(), static_cast<DWORD>(path.size()), VOLUME_NAME_DOS);
+        }
+
+        CloseHandle(file_handle);
+
+        if (length == 0 || length >= path.size())
+        {
+            return std::nullopt;
+        }
+
+        path.resize(length);
+
+        constexpr std::wstring_view extended_prefix = L"\\\\?\\";
+        if (path.starts_with(extended_prefix))
+        {
+            path.erase(0, extended_prefix.size());
+        }
+
+        return std::filesystem::path(path);
+    }
+
 #else
 
 #if defined(__MINGW64__)
@@ -165,6 +223,48 @@ namespace sogen
         set_stat(stat, &file_stat);
 
         return true;
+    }
+
+    std::optional<std::filesystem::path> compat_find_path_by_inode(const std::filesystem::path& search_root, const uint64_t inode)
+    {
+#ifdef OS_MAC
+        struct statfs volume{};
+        if (statfs(search_root.string().c_str(), &volume) != 0)
+        {
+            return std::nullopt;
+        }
+
+        std::array<char, MAXPATHLEN> path{};
+        if (fsgetpath(path.data(), path.size(), &volume.f_fsid, inode) <= 0)
+        {
+            return std::nullopt;
+        }
+
+        return std::filesystem::path(path.data());
+#else
+        const auto matches = [inode](const std::filesystem::path& candidate) {
+            struct stat file_stat{};
+            return ::stat(candidate.string().c_str(), &file_stat) == 0 && static_cast<uint64_t>(file_stat.st_ino) == inode;
+        };
+
+        if (matches(search_root))
+        {
+            return search_root;
+        }
+
+        std::error_code ec{};
+        for (auto it =
+                 std::filesystem::recursive_directory_iterator(search_root, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+        {
+            if (matches(it->path()))
+            {
+                return it->path();
+            }
+        }
+
+        return std::nullopt;
+#endif
     }
 
 #endif

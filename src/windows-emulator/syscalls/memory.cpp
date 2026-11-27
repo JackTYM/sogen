@@ -164,9 +164,53 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            if (info_class == MemoryWorkingSetExInformation || info_class == MemoryImageExtensionInformation)
+            if (info_class == MemoryImageExtensionInformation)
             {
                 return STATUS_NOT_SUPPORTED;
+            }
+
+            if (info_class == MemoryWorkingSetExInformation)
+            {
+                // The buffer is an array of {VirtualAddress, VirtualAttributes}. A resident page reports
+                // Valid, ShareCount 1, its Win32 protection (bits 4-14), page priority 5 (bits 24-26), and
+                // Shared plus SharedOriginal (bits 15 and 30) when it belongs to an image; Windows 11
+                // reports 0x45008023 for a read-only image page.
+                constexpr uint64_t entry_size = 2 * sizeof(uint64_t);
+                if (memory_information_length < entry_size)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto entry_count = memory_information_length / entry_size;
+                for (uint64_t i = 0; i < entry_count; ++i)
+                {
+                    const auto entry = memory_information + (i * entry_size);
+                    const auto address = c.emu.read_memory<uint64_t>(entry);
+
+                    uint64_t attributes = 0;
+                    if (address >= MIN_ALLOCATION_ADDRESS && address < MAX_ALLOCATION_END_EXCL)
+                    {
+                        const auto region_info = c.win_emu.memory.get_region_info(address);
+                        if (region_info.is_committed)
+                        {
+                            const auto protection = static_cast<uint64_t>(map_emulator_to_nt_protection(region_info.permissions));
+                            attributes = 1 | (1ull << 1) | ((protection & 0x7FF) << 4) | (5ull << 24);
+                            if (memory_region_policy::to_memory_basic_information_type(region_info.kind) == MEM_IMAGE)
+                            {
+                                attributes |= (1ull << 15) | (1ull << 30);
+                            }
+                        }
+                    }
+
+                    c.emu.write_memory(entry + sizeof(uint64_t), attributes);
+                }
+
+                if (return_length)
+                {
+                    return_length.write(entry_count * entry_size);
+                }
+
+                return STATUS_SUCCESS;
             }
 
             if (base_address < MIN_ALLOCATION_ADDRESS || base_address >= MAX_ALLOCATION_END_EXCL)

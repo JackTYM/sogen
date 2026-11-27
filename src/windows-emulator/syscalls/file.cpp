@@ -372,6 +372,70 @@ namespace sogen
             return convert_timespec_to_filetime(ts);
         }
 
+        // NTFS keeps FILE_ATTRIBUTE_ARCHIVE on ordinary files; NORMAL is only reported when no other
+        // attribute is set, which a real install's files rarely are (probed on Windows 11 26100).
+        constexpr ULONG file_attributes_for(const bool is_directory)
+        {
+            return is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
+        }
+
+        bool stat_file(const file& f, struct compat_stat& file_stat)
+        {
+            if (f.handle)
+            {
+                return compat_fstat(f.handle.file_descriptor(), &file_stat);
+            }
+
+            return compat_stat(f.host_path, &file_stat);
+        }
+
+        // FILE_OPEN_BY_FILE_ID passes the 8-byte file ID (or a 16-byte extended ID) as the object name and any
+        // handle on the volume as RootDirectory. An unknown ID is STATUS_INVALID_PARAMETER and a missing
+        // RootDirectory is STATUS_OBJECT_PATH_SYNTAX_BAD (probed on Windows 11 26100).
+        NTSTATUS resolve_file_id_path(const syscall_context& c, const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes,
+                                      std::u16string& filename)
+        {
+            if (!attributes.RootDirectory)
+            {
+                return STATUS_OBJECT_PATH_SYNTAX_BAD;
+            }
+
+            const auto* volume = c.proc.files.get(attributes.RootDirectory);
+            if (!volume)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (!attributes.ObjectName)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto name = c.emu.read_memory<UNICODE_STRING<EmulatorTraits<Emu64>>>(attributes.ObjectName);
+            if (name.Length != sizeof(uint64_t) && name.Length != 2 * sizeof(uint64_t))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            std::array<uint64_t, 2> file_id{};
+            c.emu.read_memory(name.Buffer, file_id.data(), name.Length);
+
+            if (file_id[0] == 0 || file_id[1] != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto drive = static_cast<char>('a' + volume->drive_number - 1);
+            const auto path = c.win_emu.file_sys.find_by_file_id(drive, file_id[0]);
+            if (!path)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            filename = u"\\??\\" + *path;
+            return STATUS_SUCCESS;
+        }
+
         std::vector<file_entry> scan_directory(const file_system& file_sys, const windows_path& win_path,
                                                const std::u16string_view file_mask, const bool deterministic_time)
         {
@@ -502,7 +566,7 @@ namespace sogen
                 info.LastWriteTime = current_file.last_write_time;
                 info.ChangeTime = info.LastWriteTime;
 
-                info.FileAttributes = current_file.is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                info.FileAttributes = file_attributes_for(current_file.is_directory);
                 info.FileNameLength = static_cast<ULONG>(file_name.size() * 2);
                 info.EndOfFile.QuadPart = current_file.file_size;
 
@@ -644,7 +708,7 @@ namespace sogen
                 const emulator_object<FILE_ATTRIBUTE_TAG_INFORMATION> info{c.emu, file_information};
                 FILE_ATTRIBUTE_TAG_INFORMATION i{};
 
-                i.FileAttributes = f->is_directory() ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                i.FileAttributes = file_attributes_for(f->is_directory());
 
                 info.write(i);
 
@@ -682,11 +746,6 @@ namespace sogen
 
             if (info_class == FileIdInformation)
             {
-                if (!f->handle)
-                {
-                    return ret(STATUS_NOT_SUPPORTED);
-                }
-
                 constexpr auto required_length = sizeof(FILE_ID_INFORMATION);
 
                 if (length < required_length)
@@ -695,9 +754,9 @@ namespace sogen
                 }
 
                 struct compat_stat file_stat{};
-                if (!compat_fstat(f->handle.file_descriptor(), &file_stat))
+                if (!stat_file(*f, file_stat))
                 {
-                    return ret(STATUS_INVALID_HANDLE);
+                    return ret(f->handle ? STATUS_INVALID_HANDLE : STATUS_NOT_SUPPORTED);
                 }
 
                 const emulator_object<FILE_ID_INFORMATION> info{c.emu, file_information};
@@ -790,7 +849,7 @@ namespace sogen
                 }
 
                 struct compat_stat file_stat{};
-                if (f->handle && !compat_fstat(f->handle.file_descriptor(), &file_stat))
+                if (!stat_file(*f, file_stat) && f->handle)
                 {
                     return STATUS_INVALID_HANDLE;
                 }
@@ -809,7 +868,7 @@ namespace sogen
                 i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
                 i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 i.ChangeTime = i.LastWriteTime;
-                i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                i.FileAttributes = file_attributes_for(is_directory);
 
                 info.write(i);
 
@@ -869,7 +928,7 @@ namespace sogen
                 }
 
                 struct compat_stat file_stat{};
-                if (f->handle && !compat_fstat(f->handle.file_descriptor(), &file_stat))
+                if (!stat_file(*f, file_stat) && f->handle)
                 {
                     return STATUS_INVALID_HANDLE;
                 }
@@ -1183,7 +1242,7 @@ namespace sogen
                 i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
                 i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 i.ChangeTime = i.LastWriteTime;
-                i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                i.FileAttributes = file_attributes_for(is_directory);
 
                 const auto file_size = is_directory ? 0LL : file_stat.st_size;
                 i.EndOfFile.QuadPart = file_size;
@@ -1691,9 +1750,10 @@ namespace sogen
 
         constexpr std::u16string map_mode(const ACCESS_MASK desired_access, const ULONG create_disposition)
         {
-            const auto wants_write = (desired_access & (GENERIC_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA)) != 0;
+            const auto wants_write =
+                (desired_access & (GENERIC_ALL | GENERIC_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA)) != 0;
             const auto wants_read =
-                (desired_access & (GENERIC_READ | FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE)) != 0;
+                (desired_access & (GENERIC_ALL | GENERIC_READ | FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE)) != 0;
 
             if (desired_access & FILE_APPEND_DATA)
             {
@@ -1837,8 +1897,23 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
-            const auto attributes = object_attributes.read();
-            auto filename = read_unicode_string(c.emu, attributes.ObjectName);
+            auto attributes = object_attributes.read();
+            std::u16string filename{};
+
+            if (create_options & FILE_OPEN_BY_FILE_ID)
+            {
+                const auto status = resolve_file_id_path(c, attributes, filename);
+                if (status != STATUS_SUCCESS)
+                {
+                    return status;
+                }
+
+                attributes.RootDirectory = 0;
+            }
+            else
+            {
+                filename = read_unicode_string(c.emu, attributes.ObjectName);
+            }
 
             // Check for console device paths
             // Convert to uppercase for case-insensitive comparison
@@ -2140,7 +2215,7 @@ namespace sogen
                 info.AllocationSize.QuadPart = static_cast<LONGLONG>(file_stat.st_size);
                 info.EndOfFile.QuadPart = static_cast<LONGLONG>(file_stat.st_size);
                 info.ChangeTime = info.LastWriteTime;
-                info.FileAttributes = (file_stat.st_mode & S_IFDIR) != 0 ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                info.FileAttributes = file_attributes_for((file_stat.st_mode & S_IFDIR) != 0);
             });
 
             return STATUS_SUCCESS;
@@ -2204,7 +2279,7 @@ namespace sogen
                 info.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
                 info.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 info.ChangeTime = info.LastWriteTime;
-                info.FileAttributes = (file_stat.st_mode & S_IFDIR) != 0 ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                info.FileAttributes = file_attributes_for((file_stat.st_mode & S_IFDIR) != 0);
             });
 
             return STATUS_SUCCESS;
@@ -2278,6 +2353,13 @@ namespace sogen
             {
                 link_handle.write(KNOWN_DLLS_SYMLINK);
                 return STATUS_SUCCESS;
+            }
+
+            // A drive path resolves into the file system, which never yields a symbolic link object;
+            // Windows reports a type mismatch whether or not the file exists (probed on Windows 11 26100).
+            if (object_name.size() >= 6 && object_name.starts_with(u"\\??\\") && object_name[5] == u':')
+            {
+                return STATUS_OBJECT_TYPE_MISMATCH;
             }
 
             return STATUS_NOT_SUPPORTED;

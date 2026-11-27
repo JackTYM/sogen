@@ -389,9 +389,12 @@ namespace sogen
         ULONG DefaultThreadpoolCpuSetMaskCount;
         ULONG DefaultThreadpoolThreadMaximum;
         ULONG HeapMemoryTypeMask; // WIN11
+        // Newer ntdll walks this as a list of tagged 16-byte entries during process init and fails with
+        // STATUS_INVALID_PARAMETER on an unknown tag. Null in a fresh process on Windows 11 26100.
+        std::uint64_t TaggedEntryList;
     } RTL_USER_PROCESS_PARAMETERS64, *PRTL_USER_PROCESS_PARAMETERS64;
 
-    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS64) == 0x448);
+    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS64) == 0x450);
 
     union PEB_CROSS_PROCESS_FLAGS_UNION
     {
@@ -580,9 +583,10 @@ namespace sogen
         ULONG DefaultThreadpoolCpuSetMaskCount;
         ULONG DefaultThreadpoolThreadMaximum;
         ULONG HeapMemoryTypeMask; // WIN11
+        std::uint32_t TaggedEntryList;
     } RTL_USER_PROCESS_PARAMETERS32, *PRTL_USER_PROCESS_PARAMETERS32;
 
-    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS32) == 708);
+    static_assert(sizeof(RTL_USER_PROCESS_PARAMETERS32) == 0x2C8);
 
     typedef struct _PEB64
     {

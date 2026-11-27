@@ -452,6 +452,26 @@ namespace sogen
                                                    const uint32_t input_buffer_length, const uint64_t system_information,
                                                    const uint32_t system_information_length, const emulator_object<uint32_t> return_length)
         {
+            // ntdll's NLS initialisation queries class 0xC0. It is absent from the SystemInformation enum here (that index is
+            // SystemFlushInformation), so it cannot be a case label. Windows returns success with these values.
+            constexpr uint32_t nls_init_information_class = 0xC0;
+            if (info_class == nls_init_information_class)
+            {
+                struct nls_init_information
+                {
+                    uint32_t flags;
+                    uint32_t value;
+                    uint32_t reserved[6];
+                };
+
+                return handle_query<nls_init_information>(c.emu, system_information, system_information_length, return_length,
+                                                          [](nls_init_information& info) {
+                                                              info = {};
+                                                              info.flags = 3;
+                                                              info.value = 0x40;
+                                                          });
+            }
+
             switch (info_class)
             {
             case SystemBasicProcessInformation:

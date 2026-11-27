@@ -192,6 +192,11 @@ namespace sogen
             return *this->emu_;
         }
 
+        const application_settings& get_application_settings() const
+        {
+            return this->application_settings_;
+        }
+
         utils::clock& clock()
         {
             return *this->clock_;

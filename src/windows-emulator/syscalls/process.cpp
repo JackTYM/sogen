@@ -9,6 +9,65 @@ namespace sogen
 
     namespace syscalls
     {
+        namespace
+        {
+            std::optional<std::u16string> read_steam_executable_path(const syscall_context& c)
+            {
+                const auto key = c.win_emu.registry.get_key({std::u16string{uR"(\Registry\User\Software\Valve\Steam)"}});
+                if (!key)
+                {
+                    return std::nullopt;
+                }
+
+                const auto value = c.win_emu.registry.get_value(*key, "SteamExe");
+                if (!value || (value->type != REG_SZ && value->type != REG_EXPAND_SZ) || value->data.size() < sizeof(char16_t))
+                {
+                    return std::nullopt;
+                }
+
+                std::u16string path(value->data.size() / sizeof(char16_t), u'\0');
+                memcpy(path.data(), value->data.data(), path.size() * sizeof(char16_t));
+                while (!path.empty() && path.back() == u'\0')
+                {
+                    path.pop_back();
+                }
+
+                return path;
+            }
+
+            NTSTATUS query_steam_image_path(const syscall_context& c, const uint64_t process_information,
+                                            const uint32_t process_information_length, const emulator_object<uint32_t> return_length)
+            {
+                const auto path = read_steam_executable_path(c);
+                if (!path)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const auto string_length = path->size() * sizeof(char16_t);
+                const auto required_length = sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>) + string_length + sizeof(char16_t);
+
+                if (return_length)
+                {
+                    return_length.write(static_cast<uint32_t>(required_length));
+                }
+
+                if (process_information_length < required_length)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto buffer = process_information + sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>);
+                c.emu.write_memory(buffer, path->c_str(), string_length + sizeof(char16_t));
+                emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, process_information}.write({
+                    .Length = static_cast<USHORT>(string_length),
+                    .MaximumLength = static_cast<USHORT>(string_length + sizeof(char16_t)),
+                    .Buffer = buffer,
+                });
+                return STATUS_SUCCESS;
+            }
+        }
+
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, const handle process_handle, const uint32_t info_class,
                                                   const uint64_t process_information, const uint32_t process_information_length,
                                                   const emulator_object<uint32_t> return_length)
@@ -16,10 +75,23 @@ namespace sogen
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 // The synthetic Steam process: report it as alive so a guest steam_api's GetExitCodeProcess
-                // liveness check succeeds. Only ProcessBasicInformation is meaningful; any other class is
-                // rejected cleanly rather than falling through to the default (which stops the emulator).
+                // liveness check succeeds, and as the 32-bit steam.exe named by SteamExe so Steam's own
+                // SteamService.exe can locate the client. Other classes are rejected cleanly rather than
+                // falling through to the default (which stops the emulator).
                 if (process_handle == STEAM_PROCESS_HANDLE)
                 {
+                    if (info_class == ProcessWow64Information)
+                    {
+                        return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
+                            c.emu, process_information, process_information_length, return_length,
+                            [](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = STEAM_FAKE_PEB32; });
+                    }
+
+                    if (info_class == ProcessImageFileNameWin32)
+                    {
+                        return query_steam_image_path(c, process_information, process_information_length, return_length);
+                    }
+
                     if (info_class != ProcessBasicInformation)
                     {
                         return STATUS_NOT_SUPPORTED;
@@ -100,18 +172,35 @@ namespace sogen
                 const emulator_object<PROCESS_MITIGATION_POLICY> policy_obj{c.emu, process_information};
                 const auto policy = policy_obj.read();
 
-                // We only support querying ProcessDynamicCodePolicy
-                if (policy != ProcessDynamicCodePolicy)
+                // Values a default process reports on Windows 11 26100: the DEP policy, the options mask
+                // and the newest policies are not queryable this way; ASLR has bottom-up randomization on
+                // and the user shadow stack policy reports bit 8; the rest are off.
+                const auto policy_value = [](const PROCESS_MITIGATION_POLICY p) -> std::optional<uint32_t> {
+                    switch (static_cast<uint32_t>(p))
+                    {
+                    case 0:
+                    case 5:
+                        return std::nullopt;
+                    case 1:
+                        return 0x1;
+                    case 15:
+                        return 0x100;
+                    default:
+                        return static_cast<uint32_t>(p) <= 16 ? std::optional<uint32_t>{0} : std::nullopt;
+                    }
+                }(policy);
+
+                if (!policy_value)
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                return handle_query<PROCESS_MITIGATION_POLICY_RAW_DATA>(c.emu, process_information, process_information_length,
-                                                                        return_length,
-                                                                        [policy](PROCESS_MITIGATION_POLICY_RAW_DATA& policy_data) {
-                                                                            policy_data.Policy = policy;
-                                                                            policy_data.Value = 0;
-                                                                        });
+                return handle_query<PROCESS_MITIGATION_POLICY_RAW_DATA>(
+                    c.emu, process_information, process_information_length, return_length,
+                    [policy, value = *policy_value](PROCESS_MITIGATION_POLICY_RAW_DATA& policy_data) {
+                        policy_data.Policy = policy;
+                        policy_data.Value = value;
+                    });
             }
             case ProcessEnclaveInformation:
             case ProcessTelemetryIdInformation:
@@ -395,9 +484,9 @@ namespace sogen
 
             if (info_class == ProcessExecuteFlags)
             {
-                // Kernel validates NX/execute flags at the MmSetExecuteOptions level;
-                // sogen doesn't track per-process execute options.
-                return STATUS_INVALID_PARAMETER;
+                // A WoW64 process's DEP setting is already permanent, so Windows refuses to change it
+                // (probed on Windows 11 26100). sogen doesn't track execute options for native processes.
+                return c.proc.is_wow64_process ? STATUS_ACCESS_DENIED : STATUS_INVALID_PARAMETER;
             }
 
             if (info_class == ProcessTlsInformation)

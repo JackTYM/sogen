@@ -350,7 +350,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            return STATUS_NOT_FOUND;
+            return STATUS_OBJECT_NAME_NOT_FOUND;
         }
     }
 

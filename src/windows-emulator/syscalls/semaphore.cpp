@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../steam_drm_ipc.hpp"
 
 namespace sogen
 {
@@ -67,6 +68,7 @@ namespace sogen
             if (succeeded)
             {
                 c.win_emu.notify_thread_readiness_change();
+                steam_drm_ipc::on_semaphore_released(c, *mutant);
             }
 
             if (previous_count)

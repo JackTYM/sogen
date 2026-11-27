@@ -1,6 +1,7 @@
 #pragma once
 #include "std_include.hpp"
 #include "windows_path.hpp"
+#include "utils/stat.hpp"
 
 namespace sogen
 {
@@ -118,6 +119,50 @@ namespace sogen
             }
         }
 
+        // File IDs given to the guest are host inode numbers. Returns the guest path, in on-disk case,
+        // that opens the file with that ID on the given drive.
+        std::optional<std::u16string> find_by_file_id(const char drive, const uint64_t file_id) const
+        {
+#ifdef OS_WINDOWS
+            if (this->root_.empty())
+            {
+                const std::array<char, 4> volume{drive, ':', '\\', 0};
+                const auto host_path = compat_find_path_by_inode(volume.data(), file_id);
+                if (!host_path)
+                {
+                    return std::nullopt;
+                }
+
+                return host_path->u16string();
+            }
+#endif
+
+            std::vector<std::pair<windows_path, std::filesystem::path>> mounts{};
+            mounts.emplace_back(windows_path{drive, {}}, this->root_ / std::string(1, drive));
+
+            for (const auto& [src, dest] : this->mappings_)
+            {
+                if (src.get_drive() == drive)
+                {
+                    mounts.emplace_back(src, dest);
+                }
+            }
+
+            for (const auto& mount : mounts)
+            {
+                const auto host_path = compat_find_path_by_inode(mount.second, file_id);
+                if (host_path)
+                {
+                    if (auto guest_path = this->find_guest_path(mounts, *host_path))
+                    {
+                        return guest_path;
+                    }
+                }
+            }
+
+            return std::nullopt;
+        }
+
         void map(windows_path src, std::filesystem::path dest)
         {
             this->mappings_[std::move(src)] = std::move(dest);
@@ -166,6 +211,56 @@ namespace sogen
             }
 
             return confine(*best_dest, *best_dest / best_remainder.to_portable_path());
+        }
+
+        // A host file can be reachable through several mounts; pick the shortest guest path that translates
+        // back to the same host file.
+        std::optional<std::u16string> find_guest_path(const std::vector<std::pair<windows_path, std::filesystem::path>>& mounts,
+                                                      const std::filesystem::path& host_path) const
+        {
+            std::optional<std::u16string> best{};
+            size_t best_depth = 0;
+            std::error_code ec{};
+
+            for (const auto& [guest_base, host_base] : mounts)
+            {
+                const auto relative = host_path.lexically_relative(weakly_canonical(host_base, ec));
+                if (is_escaping_relative_path(relative))
+                {
+                    continue;
+                }
+
+                auto guest_path = guest_base.u16string();
+                for (const auto& part : relative)
+                {
+                    if (part == ".")
+                    {
+                        continue;
+                    }
+
+                    if (!guest_path.ends_with(u'\\'))
+                    {
+                        guest_path.push_back(u'\\');
+                    }
+
+                    guest_path.append(part.u16string());
+                }
+
+                const windows_path candidate{guest_path};
+                if (!std::filesystem::equivalent(this->translate(candidate), host_path, ec))
+                {
+                    continue;
+                }
+
+                const auto depth = candidate.depth();
+                if (!best || depth < best_depth || (depth == best_depth && guest_path < *best))
+                {
+                    best = std::move(guest_path);
+                    best_depth = depth;
+                }
+            }
+
+            return best;
         }
 
         std::filesystem::path root_{};

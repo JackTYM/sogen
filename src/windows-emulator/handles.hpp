@@ -627,6 +627,8 @@ namespace sogen
     // pseudo handle for that one pid so the liveness check passes. STEAM_FAKE_PROCESS_ID must match the
     // pid value seeded into that registry key.
     constexpr uint32_t STEAM_FAKE_PROCESS_ID = 0x8B0;
+    // Steam's steam.exe is a 32-bit process, so ProcessWow64Information reports a 32-bit PEB address for it.
+    constexpr uint64_t STEAM_FAKE_PEB32 = 0x7FFDE000;
     constexpr auto STEAM_PROCESS_HANDLE = make_pseudo_handle(0x1, handle_types::process);
 
     constexpr auto CURRENT_PROCESS = make_handle(~0ULL);
