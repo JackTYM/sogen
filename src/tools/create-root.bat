@@ -73,6 +73,7 @@ CALL :collect_file "%WINDIR%\System32\en-US", comdlg32.dll.mui, %EMU_SYSDIR%\en-
 CALL :collect_file "%WINDIR%\SysWOW64\en-US", comdlg32.dll.mui, %EMU_SYSDIR_WOW64%\en-us
 CALL :collect coml2.dll
 CALL :collect coremessaging.dll
+CALL :collect coreuicomponents.dll
 CALL :collect credssp.dll
 CALL :collect crtdll.dll
 CALL :collect crypt32.dll
@@ -142,6 +143,7 @@ CALL :collect msacm32.dll
 CALL :collect msasn1.dll
 CALL :collect mscms.dll
 CALL :collect mscoree.dll
+CALL :collect msctf.dll
 CALL :collect msdmo.dll
 CALL :collect msimg32.dll
 CALL :collect mskeyprotect.dll
@@ -213,6 +215,7 @@ CALL :collect sppc.dll
 CALL :collect srvcli.dll
 CALL :collect sspicli.dll
 CALL :collect tdh.dll
+CALL :collect textinputframework.dll
 CALL :collect textshaping.dll
 CALL :collect twinapi.appcore.dll
 CALL :collect ucrtbase.dll
