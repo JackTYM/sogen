@@ -252,6 +252,14 @@ XCOPY "%WINDIR%\System32\wbem" "%EMU_ROOT%\wbem20348\System32\wbem\" /E /I /Q /H
 XCOPY "%WINDIR%\SysWOW64\wbem" "%EMU_ROOT%\wbem20348\SysWOW64\wbem\" /E /I /Q /H /Y /C > "%EMU_ROOT%\wbem20348\xcopy-wow64.txt" 2>&1
 NET START winmgmt >> "%EMU_ROOT%\wbem20348\net-stop.txt" 2>&1
 VER > "%EMU_ROOT%\wbem20348\ver.txt"
+REM sogen-debug-loop harvest: every SysWOW64 DLL of this Windows build with its en-US MUIs and a version list, in a
+REM separate folder (not part of the root). The roots so far carry 26100 x86 TLS DLLs (ncryptsslp, ncryptprov, scksp,
+REM webio, iertutil, schannel) on a 20348 ncrypt/bcrypt: x86 ncryptsslp imports NCryptDecapsulate, which 20348 lacks.
+IF NOT EXIST "%EMU_ROOT%\wow64all\en-US" MKDIR "%EMU_ROOT%\wow64all\en-US"
+COPY /B /Y "%WINDIR%\SysWOW64\*.dll" "%EMU_ROOT%\wow64all\" >NUL
+COPY /B /Y "%WINDIR%\SysWOW64\en-US\*.mui" "%EMU_ROOT%\wow64all\en-US\" >NUL
+powershell -NoProfile -Command "Get-ChildItem -File (Join-Path $env:WINDIR 'SysWOW64\*.dll'),(Join-Path $env:WINDIR 'SysWOW64\en-US\*.mui') | ForEach-Object { $v = $_.VersionInfo; '{0},{1}.{2}.{3}.{4},{5}' -f $_.FullName.Substring($env:WINDIR.Length + 10), $v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.FilePrivatePart, $_.Length }" > "%EMU_ROOT%\wow64all\versions.csv" 2>&1
+VER > "%EMU_ROOT%\wow64all\ver.txt"
 REM sogen-debug-loop harvest: the 64-bit .NET Framework 4 native image cache with the IL assemblies and runtime it was
 REM generated from (a native image is only used with the exact IL it was compiled from), plus their versions.
 IF NOT EXIST "%EMU_ROOT%\net4x64" MKDIR "%EMU_ROOT%\net4x64"
